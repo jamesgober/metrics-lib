@@ -1,0 +1,118 @@
+# ╔══════════════════════════╗
+# ║                          ║
+# ║   ██╗      ██╗ ██████╗   ║
+# ║   ██║      ██║ ██╔══██╗  ║
+# ║   ██║      ██║ ██████╔╝  ║
+# ║   ██║      ██║ ██╔══██╗  ║
+# ║   ███████╗ ██║ ██████╔╝  ║
+# ║   ╚══════╝ ╚═╝ ╚═════╝   ║
+# ║                          ║
+# ╚══════════════════════════╝
+[package]
+name    = "metrics-lib"
+version = "0.1.0"
+edition = "2021"
+
+# Minimum Supported Rust Version (MSRV)
+rust-version = "1.70"
+
+# License
+license = "Apache-2.0"
+
+# Description
+description = "High-performance metrics library for server applications"
+
+# Keywords (5 total)
+keywords = [
+    "benchmark", 
+    "performance", 
+    "profiling", 
+    "timing", 
+    "metrics"
+]
+
+# Categories (5 total)
+categories = [
+    "development-tools::profiling", 
+    "memory-management"
+]
+
+# Links
+homepage      = "https://github.com/jamesgober/metrics-lib"
+repository    = "https://github.com/jamesgober/metrics-lib"
+documentation = "https://docs.rs/metrics-lib"
+
+
+# Authors
+authors = [
+    "James Gober <code@jamesgober.dev>"
+]
+
+
+
+# FEATURE FLAGS
+# #################################
+[features]
+count     = [] # Enables count.
+gauge     = [] # Enables gauge.
+timer     = [] # Enables timer.
+meter     = [] # Enables rate meter.
+sample    = [] # Enable statistical sampling..
+
+# Enables async support (requires Tokio).
+async       = ["dep:tokio"] 
+
+# Enable histogram
+histogram   = ["sample"] 
+
+# Enables all features.
+all = [ 
+    "count", 
+    "gauge", 
+    "timer", 
+    "meter", 
+    "sample",
+    "histogram", 
+] 
+
+# Default features (all enabled).
+default = [ 
+    "count", 
+    "gauge", 
+    "timer", 
+] 
+
+# Minimal build with core timing only (no default features).
+minimal = [ 
+    "count", 
+    "gauge", 
+    "timer", 
+    "meter", 
+    "sample",
+    "histogram", 
+] 
+
+# Enables nightly Rust features for testing.
+nightly     = []
+
+
+
+# BENCHMARKS
+# #################################
+
+
+
+
+# DEPENDENCIES
+# #################################
+[dependencies]
+tokio = { version = "1.0", features = ["rt", "time"], optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+num_cpus = "1.16"
+
+
+# DEV DEPENDENCIES
+# #################################
+[dev-dependencies]
+criterion = "0.5"
+tokio-test = "0.4"
