@@ -14,33 +14,38 @@
 //! ## Quick Start
 //! 
 //! ```rust
-//! use metrics_lib::METRICS;
+//! use metrics_lib::{init, metrics};
+//! 
+//! // Initialize metrics (do this once at startup)
+//! init();
 //! 
 //! // Counters (sub-nanosecond)
-//! METRICS.counter("requests").inc();
-//! METRICS.counter("errors").add(5);
+//! metrics().counter("requests").inc();
+//! metrics().counter("errors").add(5);
 //! 
 //! // Gauges (atomic)  
-//! METRICS.gauge("cpu_usage").set(87.3);
-//! METRICS.gauge("memory_mb").set(1024.5);
+//! metrics().gauge("cpu_usage").set(87.3);
+//! metrics().gauge("memory_mb").set(1024.5);
 //! 
 //! // Timers (high precision)
-//! let timer = METRICS.timer("api_call").start();
+//! let timer_metric = metrics().timer("api_call");
+//! let timer = timer_metric.start();
 //! // ... do work ...
 //! timer.stop(); // Auto-records
 //! 
 //! // Or even simpler
-//! let result = METRICS.time("db_query", || {
-//!     database.query("SELECT * FROM users")
+//! let result = metrics().time("db_query", || {
+//!     // Simulated database query
+//!     "user data"
 //! });
 //! 
 //! // System health
-//! let cpu_pct = METRICS.system().cpu_used();
-//! let mem_mb = METRICS.system().mem_used_mb();
+//! let cpu_pct = metrics().system().cpu_used();
+//! let mem_mb = metrics().system().mem_used_mb();
 //! 
 //! // Rate limiting
-//! METRICS.rate("api_calls").tick();
-//! let rate_per_sec = METRICS.rate("api_calls").rate();
+//! metrics().rate("api_calls").tick();
+//! let rate_per_sec = metrics().rate("api_calls").rate();
 //! ```
 
 #![warn(missing_docs)]
@@ -54,13 +59,21 @@ mod timer;
 mod rate_meter;
 mod registry;
 mod system_health;
+mod async_support;
+mod adaptive;
 
 pub use counter::*;
-pub use gauge::*;
+pub use gauge::{Gauge, GaugeStats};
 pub use timer::*;
-pub use rate_meter::*;
+pub use rate_meter::{RateMeter, RateStats};
 pub use registry::*;
 pub use system_health::*;
+pub use async_support::{AsyncTimerExt, AsyncTimerGuard, AsyncMetricBatch};
+pub use adaptive::{AdaptiveSampler, SamplingStrategy, MetricCircuitBreaker, BackpressureController};
+
+// Re-export specialized modules with qualified names to avoid conflicts
+pub use gauge::specialized as gauge_specialized;
+pub use rate_meter::specialized as rate_meter_specialized;
 
 /// Global metrics instance - initialize once, use everywhere
 pub static METRICS: OnceLock<MetricsCore> = OnceLock::new();
@@ -69,7 +82,7 @@ pub static METRICS: OnceLock<MetricsCore> = OnceLock::new();
 /// 
 /// Call this once at the start of your application
 pub fn init() -> &'static MetricsCore {
-    METRICS.get_or_init(|| MetricsCore::new())
+    METRICS.get_or_init(MetricsCore::new)
 }
 
 /// Get the global metrics instance
@@ -97,32 +110,33 @@ impl MetricsCore {
 
     /// Get or create a counter
     #[inline(always)]
-    pub fn counter(&self, name: &'static str) -> &Counter {
+    pub fn counter(&self, name: &'static str) -> std::sync::Arc<Counter> {
         self.registry.get_or_create_counter(name)
     }
 
     /// Get or create a gauge
     #[inline(always)]
-    pub fn gauge(&self, name: &'static str) -> &Gauge {
+    pub fn gauge(&self, name: &'static str) -> std::sync::Arc<Gauge> {
         self.registry.get_or_create_gauge(name)
     }
 
     /// Get or create a timer
     #[inline(always)]
-    pub fn timer(&self, name: &'static str) -> &Timer {
+    pub fn timer(&self, name: &'static str) -> std::sync::Arc<Timer> {
         self.registry.get_or_create_timer(name)
     }
 
     /// Get or create a rate meter
     #[inline(always)]
-    pub fn rate(&self, name: &'static str) -> &RateMeter {
+    pub fn rate(&self, name: &'static str) -> std::sync::Arc<RateMeter> {
         self.registry.get_or_create_rate_meter(name)
     }
 
     /// Time a closure and record the result
     #[inline]
     pub fn time<T>(&self, name: &'static str, f: impl FnOnce() -> T) -> T {
-        let timer = self.timer(name).start();
+        let binding = self.timer(name);
+        let timer = binding.start();
         let result = f();
         timer.stop();
         result
@@ -169,7 +183,7 @@ impl std::fmt::Display for MetricsError {
             MetricsError::CircuitOpen => write!(f, "Circuit breaker is open"),
             MetricsError::Overloaded => write!(f, "System is overloaded"),
             MetricsError::InvalidName => write!(f, "Invalid metric name"),
-            MetricsError::Config(msg) => write!(f, "Configuration error: {}", msg),
+            MetricsError::Config(msg) => write!(f, "Configuration error: {msg}"),
         }
     }
 }

@@ -10,7 +10,28 @@
 
 ## [Unreleased]
 
-### Added - v2.0.0 Complete Rewrite
+
+
+<br>
+
+## [0.5.0] - COMPLETE ARCHITECTURAL OVERHAUL
+### Fixed
+- **Compilation Errors**: Fixed temporary value dropped while borrowed in timer closure
+- **Import Cleanup**: Removed unused imports (BufRead, BufReader, File) from system_health module
+- **Ambiguous Re-exports**: Resolved conflicting specialized module exports from gauge and rate_meter
+- **Documentation**: Added missing documentation for time_fn macro
+- **Lint Issues**: Applied Clippy fixes for format string optimizations and redundant closures
+- **Integer Overflow**: Fixed subtraction overflow panic in system health monitoring
+
+
+
+
+
+<br>
+
+## [0.2.0] - COMPLETE ARCHITECTURAL OVERHAUL
+
+### Added - Complete Rewrite
 - **COMPLETE ARCHITECTURAL OVERHAUL**: Rebuilt from ground up for ultimate performance
 - **Core Types**: Counter, Gauge, Timer, RateMeter, Registry - optimized for sub-nanosecond operations
 - **System Health Integration**: Built-in CPU/memory monitoring with process introspection
@@ -40,7 +61,6 @@
 - **CPU Detection**: Runtime optimization based on available features
 - **Health Monitoring**: Built-in system resource tracking
 - **Circuit Breakers**: Automatic failure recovery and fallback modes
-
 
 
 <br>
@@ -109,6 +129,7 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/rust-benchmark/compare/v0.1.0...HEAD
-[0.1.5]: https://github.com/jamesgober/rust-benchmark/compare/v0.1.0...v0.1.5
-[0.1.0]: https://github.com/jamesgober/rust-benchmark/releases/tag/v0.1.0
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamesgober/metrics-lib/compare/v0.2.0...v0.5.0
+[0.2.0]: https://github.com/jamesgober/metrics-lib/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/jamesgober/metrics-lib/releases/tag/v0.1.0
