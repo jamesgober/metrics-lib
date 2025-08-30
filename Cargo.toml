@@ -115,5 +115,5 @@ parking_lot = "0.12"
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.4"
 tokio-test = "0.4"

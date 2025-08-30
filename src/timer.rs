@@ -726,19 +726,19 @@ mod benchmarks {
     #[test]
     fn bench_timer_stats() {
         let timer = Timer::new();
-        
+
         // Fill timer with data
         for i in 0..1000 {
             timer.record(Duration::from_nanos(i * 1000));
         }
-        
+
         let iterations = 1_000_000;
         let start = Instant::now();
-        
+
         for _ in 0..iterations {
             let _ = timer.stats();
         }
-        
+
         let elapsed = start.elapsed();
         println!(
             "Timer stats: {:.2} ns/op",
