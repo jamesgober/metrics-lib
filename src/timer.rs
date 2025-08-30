@@ -740,9 +740,11 @@ mod benchmarks {
         }
         
         let elapsed = start.elapsed();
-        println!("Timer stats: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+        println!(
+            "Timer stats: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Should be very fast since it's just atomic loads (relaxed from 100ns to 300ns)
         assert!(elapsed.as_nanos() / iterations < 300);
     }
