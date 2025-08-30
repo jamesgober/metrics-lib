@@ -714,10 +714,12 @@ mod benchmarks {
             guard.stop();
         }
         let elapsed = start.elapsed();
-        
-        println!("Running timer: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "Running timer: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         assert_eq!(timer.count(), iterations);
         // Should be under 1500ns per timer operation (relaxed from 1000ns)
         assert!(elapsed.as_nanos() / (iterations as u128) < 1500);
