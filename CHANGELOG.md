@@ -9,6 +9,15 @@
 </p>
 
 ## [Unreleased]
+
+
+
+
+
+<br>
+
+## [0.5.1] - STABLE
+
 ### Added
 - Codecov configuration `codecov.yml` with project and patch coverage thresholds (target: 85%).
 - Coverage status checks integrated via Codecov for PRs and main.
@@ -25,6 +34,8 @@
   - Formatting: `cargo fmt --all -- --check`.
   - Lints: `cargo clippy --all-features -- -D warnings`.
   - Tests: `cargo test --all-features` across Linux/macOS/Windows and MSRV `1.70.0`.
+
+
 
 
 <br>
@@ -142,7 +153,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/jamesgober/metrics-lib/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jamesgober/metrics-lib/compare/v0.2.0...v0.5.0
 [0.2.0]: https://github.com/jamesgober/metrics-lib/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/metrics-lib/releases/tag/v0.1.0
