@@ -1,0 +1,29 @@
+# Codecov configuration for metrics-lib
+# Enforce healthy coverage thresholds and clear status checks
+coverage:
+  status:
+    project:
+      default:
+        target: 85%
+        threshold: 1%
+        # If coverage drops more than threshold, mark as failure
+        informational: false
+    patch:
+      default:
+        target: 85%
+        threshold: 0%
+        informational: false
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: false
+  behavior: default
+
+ignore:
+  - "examples/**"
+  - "benches/**"
+  - "tests/**"
+
+# Improve path fixing for Rust workspaces
+fixes:
+  - "/home/runner/work/::"

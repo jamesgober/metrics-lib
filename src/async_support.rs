@@ -1,12 +1,12 @@
 //! Async support for metrics
-//! 
+//!
 //! Provides async-aware metric recording with zero-cost abstractions
 
+use crate::Timer;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
-use crate::Timer;
 
 /// Async timer guard that records on drop
 pub struct AsyncTimerGuard<'a> {
@@ -27,19 +27,19 @@ impl<'a> AsyncTimerGuard<'a> {
     }
 
     /// Returns the elapsed time since the guard was created.
-        #[inline]
-        pub fn elapsed(&self) -> std::time::Duration {
-            self.start.elapsed()
+    #[inline]
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+
+    /// Stops the timer and records the elapsed time if not already recorded.
+    #[inline]
+    pub fn stop(mut self) {
+        if !self.recorded {
+            self.timer.record(self.start.elapsed());
+            self.recorded = true;
         }
-    
-        /// Stops the timer and records the elapsed time if not already recorded.
-        #[inline]
-        pub fn stop(mut self) {
-            if !self.recorded {
-                self.timer.record(self.start.elapsed());
-                self.recorded = true;
-            }
-        }
+    }
 }
 
 impl<'a> Drop for AsyncTimerGuard<'a> {
@@ -55,7 +55,7 @@ impl<'a> Drop for AsyncTimerGuard<'a> {
 pub trait AsyncTimerExt {
     /// Start an async-aware timer
     fn start_async(&self) -> AsyncTimerGuard<'_>;
-    
+
     /// Time an async function
     fn time_async<F, Fut, T>(&self, f: F) -> TimedFuture<'_, Fut>
     where
@@ -68,12 +68,12 @@ impl AsyncTimerExt for Timer {
     fn start_async(&self) -> AsyncTimerGuard<'_> {
         AsyncTimerGuard::new(self)
     }
-    
+
     #[inline]
     fn time_async<F, Fut, T>(&self, f: F) -> TimedFuture<'_, Fut>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = T>
+        Fut: Future<Output = T>,
     {
         TimedFuture {
             timer: self,
@@ -99,7 +99,7 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         let future = unsafe { Pin::new_unchecked(&mut this.future) };
-        
+
         match future.poll(cx) {
             Poll::Ready(result) => {
                 if let Some(start) = this.start.take() {
@@ -223,10 +223,10 @@ impl AsyncMetricsBatcher {
     pub async fn record(&self, update: impl FnOnce(&mut AsyncMetricBatch)) {
         let mut batch = self.batch.lock().await;
         update(&mut batch);
-        
+
         if batch.len() >= self.max_batch_size {
             let batch = std::mem::take(&mut *batch);
-            
+
             // Flush in background
             tokio::spawn(async move {
                 batch.flush(crate::metrics());
@@ -239,10 +239,10 @@ impl AsyncMetricsBatcher {
     pub fn start_flusher(self: std::sync::Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.flush_interval);
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let batch = {
                     let mut guard = self.batch.lock().await;
                     if guard.is_empty() {
@@ -250,7 +250,7 @@ impl AsyncMetricsBatcher {
                     }
                     std::mem::take(&mut *guard)
                 };
-                
+
                 batch.flush(crate::metrics());
             }
         });
@@ -260,16 +260,16 @@ impl AsyncMetricsBatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_async_timer_guard() {
         let timer = Timer::new();
-        
+
         {
             let _guard = timer.start_async();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        
+
         assert_eq!(timer.count(), 1);
         assert!(timer.average() >= std::time::Duration::from_millis(9));
     }
@@ -277,34 +277,36 @@ mod tests {
     #[test]
     fn test_metric_batch() {
         let mut batch = AsyncMetricBatch::new();
-        
+
         batch.counter_inc("test", 5);
         batch.gauge_set("test", 42.5);
         batch.timer_record("test", 1000);
         batch.rate_tick("test");
-        
+
         assert_eq!(batch.len(), 4);
         assert!(!batch.is_empty());
-        
+
         let metrics = crate::MetricsCore::new();
         batch.flush(&metrics);
-        
+
         assert_eq!(metrics.counter("test").get(), 5);
         assert_eq!(metrics.gauge("test").get(), 42.5);
         assert_eq!(metrics.timer("test").count(), 1);
         metrics.rate("test").tick_n(1); // Simulate a tick
     }
-    
+
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_timed_future() {
         let timer = Timer::new();
-        
-        let result = timer.time_async(|| async {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            42
-        }).await;
-        
+
+        let result = timer
+            .time_async(|| async {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                42
+            })
+            .await;
+
         assert_eq!(result, 42);
         assert_eq!(timer.count(), 1);
         assert!(timer.average() >= std::time::Duration::from_millis(9));

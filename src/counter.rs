@@ -1,9 +1,9 @@
 //! # Ultra-Fast Atomic Counter
-//! 
+//!
 //! The fastest counter implementation possible - sub-3ns increments.
-//! 
+//!
 //! ## Features
-//! 
+//!
 //! - **Sub-3ns increments** - Single atomic instruction
 //! - **Zero allocations** - Pure stack operations
 //! - **Lock-free** - Never blocks, never waits
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Ultra-fast atomic counter
-/// 
+///
 /// Optimized for maximum throughput with minimal memory overhead.
 /// Cache-line aligned to prevent false sharing.
 #[repr(align(64))]
@@ -58,7 +58,7 @@ impl Counter {
     }
 
     /// Increment by 1 - THE FASTEST PATH
-    /// 
+    ///
     /// This is optimized to be as fast as physically possible:
     /// - Single atomic fetch_add instruction
     /// - Relaxed memory ordering for maximum speed
@@ -69,7 +69,7 @@ impl Counter {
     }
 
     /// Add arbitrary amount - also blazingly fast
-    /// 
+    ///
     /// Zero branch optimization - if amount is 0, still does the atomic
     /// operation to maintain consistent performance characteristics
     #[inline(always)]
@@ -84,7 +84,7 @@ impl Counter {
     }
 
     /// Reset to zero - use sparingly
-    /// 
+    ///
     /// Note: This uses SeqCst ordering to ensure all threads see the reset
     #[inline]
     pub fn reset(&self) {
@@ -92,7 +92,7 @@ impl Counter {
     }
 
     /// Set to specific value - use sparingly
-    /// 
+    ///
     /// Note: This uses SeqCst ordering for consistency
     #[inline]
     pub fn set(&self, value: u64) {
@@ -100,16 +100,14 @@ impl Counter {
     }
 
     /// Atomic compare-and-swap
-    /// 
+    ///
     /// Returns Ok(previous_value) if successful, Err(current_value) if failed
     #[inline]
     pub fn compare_and_swap(&self, expected: u64, new: u64) -> Result<u64, u64> {
-        match self.value.compare_exchange(
-            expected,
-            new,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
+        match self
+            .value
+            .compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst)
+        {
             Ok(prev) => Ok(prev),
             Err(current) => Err(current),
         }
@@ -138,7 +136,7 @@ impl Counter {
         let value = self.get();
         let age = self.created_at.elapsed();
         let age_seconds = age.as_secs_f64();
-        
+
         let rate_per_second = if age_seconds > 0.0 {
             value as f64 / age_seconds
         } else {
@@ -182,12 +180,12 @@ impl Counter {
         loop {
             let current = self.get();
             let new_value = current.saturating_add(amount);
-            
+
             // If no change needed (already at max), break
             if new_value == current {
                 break;
             }
-            
+
             // Try to update
             match self.compare_and_swap(current, new_value) {
                 Ok(_) => break,
@@ -227,7 +225,7 @@ unsafe impl Sync for Counter {}
 /// Batch counter operations for even better performance
 impl Counter {
     /// Batch increment - for very high throughput scenarios
-    /// 
+    ///
     /// When you have many increments to do, batch them for better performance
     #[inline]
     pub fn batch_inc(&self, count: usize) {
@@ -252,7 +250,7 @@ impl Counter {
             if current >= max_value {
                 return false;
             }
-            
+
             match self.compare_and_swap(current, current + 1) {
                 Ok(_) => return true,
                 Err(_) => continue, // Retry
@@ -270,20 +268,20 @@ mod tests {
     #[test]
     fn test_basic_operations() {
         let counter = Counter::new();
-        
+
         assert_eq!(counter.get(), 0);
         assert!(counter.is_zero());
-        
+
         counter.inc();
         assert_eq!(counter.get(), 1);
         assert!(!counter.is_zero());
-        
+
         counter.add(5);
         assert_eq!(counter.get(), 6);
-        
+
         counter.reset();
         assert_eq!(counter.get(), 0);
-        
+
         counter.set(42);
         assert_eq!(counter.get(), 42);
     }
@@ -291,10 +289,10 @@ mod tests {
     #[test]
     fn test_fetch_operations() {
         let counter = Counter::new();
-        
+
         assert_eq!(counter.fetch_add(10), 0);
         assert_eq!(counter.get(), 10);
-        
+
         assert_eq!(counter.inc_and_get(), 11);
         assert_eq!(counter.add_and_get(5), 16);
     }
@@ -303,11 +301,11 @@ mod tests {
     fn test_compare_and_swap() {
         let counter = Counter::new();
         counter.set(10);
-        
+
         // Successful swap
         assert_eq!(counter.compare_and_swap(10, 20), Ok(10));
         assert_eq!(counter.get(), 20);
-        
+
         // Failed swap
         assert_eq!(counter.compare_and_swap(10, 30), Err(20));
         assert_eq!(counter.get(), 20);
@@ -317,10 +315,10 @@ mod tests {
     fn test_saturating_add() {
         let counter = Counter::new();
         counter.set(u64::MAX - 5);
-        
+
         counter.saturating_add(10);
         assert_eq!(counter.get(), u64::MAX);
-        
+
         // Should not overflow
         counter.saturating_add(100);
         assert_eq!(counter.get(), u64::MAX);
@@ -329,17 +327,17 @@ mod tests {
     #[test]
     fn test_conditional_operations() {
         let counter = Counter::new();
-        
+
         counter.inc_if(true);
         assert_eq!(counter.get(), 1);
-        
+
         counter.inc_if(false);
         assert_eq!(counter.get(), 1);
-        
+
         // Test inc_max
         assert!(counter.inc_max(5));
         assert_eq!(counter.get(), 2);
-        
+
         counter.set(5);
         assert!(!counter.inc_max(5));
         assert_eq!(counter.get(), 5);
@@ -349,7 +347,7 @@ mod tests {
     fn test_statistics() {
         let counter = Counter::new();
         counter.add(100);
-        
+
         let stats = counter.stats();
         assert_eq!(stats.value, 100);
         assert_eq!(stats.total, 100);
@@ -363,7 +361,7 @@ mod tests {
         let counter = Arc::new(Counter::new());
         let num_threads = 100;
         let increments_per_thread = 1000;
-        
+
         let handles: Vec<_> = (0..num_threads)
             .map(|_| {
                 let counter = Arc::clone(&counter);
@@ -374,13 +372,13 @@ mod tests {
                 })
             })
             .collect();
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         assert_eq!(counter.get(), num_threads * increments_per_thread);
-        
+
         let stats = counter.stats();
         assert!(stats.rate_per_second > 0.0);
     }
@@ -388,10 +386,10 @@ mod tests {
     #[test]
     fn test_batch_operations() {
         let counter = Counter::new();
-        
+
         counter.batch_inc(1000);
         assert_eq!(counter.get(), 1000);
-        
+
         counter.batch_inc(0); // Should be no-op
         assert_eq!(counter.get(), 1000);
     }
@@ -400,10 +398,10 @@ mod tests {
     fn test_display_and_debug() {
         let counter = Counter::new();
         counter.set(42);
-        
+
         let display_str = format!("{}", counter);
         assert!(display_str.contains("42"));
-        
+
         let debug_str = format!("{:?}", counter);
         assert!(debug_str.contains("Counter"));
         assert!(debug_str.contains("42"));
@@ -419,16 +417,18 @@ mod benchmarks {
     fn bench_counter_increment() {
         let counter = Counter::new();
         let iterations = 10_000_000;
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             counter.inc();
         }
         let elapsed = start.elapsed();
-        
-        println!("Counter increment: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "Counter increment: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Should be under 100ns per increment (relaxed from 50ns)
         assert!(elapsed.as_nanos() / iterations < 100);
         assert_eq!(counter.get(), iterations as u64);
@@ -438,16 +438,18 @@ mod benchmarks {
     fn bench_counter_add() {
         let counter = Counter::new();
         let iterations = 1_000_000;
-        
+
         let start = Instant::now();
         for i in 0..iterations {
             counter.add(i + 1);
         }
         let elapsed = start.elapsed();
-        
-        println!("Counter add: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "Counter add: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Should be similar to increment performance (relaxed from 100ns to 200ns)
         assert!(elapsed.as_nanos() / (iterations as u128) < 200);
     }
@@ -457,20 +459,22 @@ mod benchmarks {
         let counter = Counter::new();
         counter.set(42);
         let iterations = 100_000_000;
-        
+
         let start = Instant::now();
         let mut sum = 0;
         for _ in 0..iterations {
             sum += counter.get();
         }
         let elapsed = start.elapsed();
-        
-        println!("Counter get: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "Counter get: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Prevent optimization
         assert_eq!(sum, 42 * iterations);
-        
+
         // Should be under 50ns per get (relaxed from 20ns)
         assert!(elapsed.as_nanos() / (iterations as u128) < 50);
     }

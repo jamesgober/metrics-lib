@@ -1,9 +1,9 @@
 //! # Ultra-Fast Rate Meter
-//! 
+//!
 //! High-performance rate calculations with sliding window tracking.
-//! 
+//!
 //! ## Features
-//! 
+//!
 //! - **Sub-microsecond tick operations** - Blazingly fast rate tracking
 //! - **Sliding window calculations** - Accurate rate measurements
 //! - **Multiple time windows** - Second, minute, hour rates
@@ -11,11 +11,11 @@
 //! - **Zero allocations** - Pure atomic operations
 //! - **Rate limiting** - Built-in support for throttling
 
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Ultra-fast rate meter with sliding window calculations
-/// 
+///
 /// Tracks events per second/minute/hour with minimal overhead.
 /// Cache-line aligned to prevent false sharing.
 #[repr(align(64))]
@@ -83,7 +83,7 @@ impl RateMeter {
     }
 
     /// Record an event - THE FASTEST PATH
-    /// 
+    ///
     /// This is optimized for maximum speed:
     /// - Single atomic increment for total
     /// - Lazy window updates only when needed
@@ -96,11 +96,13 @@ impl RateMeter {
     /// Record N events at once
     #[inline(always)]
     pub fn tick_n(&self, n: u32) {
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
 
         // Always increment total (fastest path)
         self.total_events.fetch_add(n as u64, Ordering::Relaxed);
-        
+
         // Update windows (lazy - only when needed)
         let now = self.get_unix_timestamp();
         self.update_windows(now, n);
@@ -111,7 +113,7 @@ impl RateMeter {
     pub fn rate(&self) -> f64 {
         let now = self.get_unix_timestamp();
         self.update_windows(now, 0);
-        
+
         let events = self.current_second_events.load(Ordering::Relaxed);
         events as f64
     }
@@ -127,7 +129,7 @@ impl RateMeter {
     pub fn rate_per_minute(&self) -> f64 {
         let now = self.get_unix_timestamp();
         self.update_windows(now, 0);
-        
+
         let events = self.current_minute_events.load(Ordering::Relaxed);
         events as f64
     }
@@ -137,7 +139,7 @@ impl RateMeter {
     pub fn rate_per_hour(&self) -> f64 {
         let now = self.get_unix_timestamp();
         self.update_windows(now, 0);
-        
+
         let events = self.current_hour_events.load(Ordering::Relaxed);
         events as f64
     }
@@ -187,7 +189,7 @@ impl RateMeter {
     #[inline]
     pub fn reset(&self) {
         let now = self.get_unix_timestamp();
-        
+
         self.total_events.store(0, Ordering::SeqCst);
         self.current_second_events.store(0, Ordering::SeqCst);
         self.current_minute_events.store(0, Ordering::SeqCst);
@@ -201,19 +203,19 @@ impl RateMeter {
     pub fn stats(&self) -> RateStats {
         let now = self.get_unix_timestamp();
         self.update_windows(now, 0);
-        
+
         let total_events = self.total();
         let per_second = self.current_second_events.load(Ordering::Relaxed) as f64;
         let per_minute = self.current_minute_events.load(Ordering::Relaxed) as f64;
         let per_hour = self.current_hour_events.load(Ordering::Relaxed) as f64;
-        
+
         let age = self.created_at.elapsed();
         let average_rate = if age.as_secs_f64() > 0.0 {
             total_events as f64 / age.as_secs_f64()
         } else {
             0.0
         };
-        
+
         // Calculate window fill (how much of the window has data)
         let window_fill = if self.window_ns > 0 {
             let window_seconds = self.window_ns as f64 / 1_000_000_000.0;
@@ -250,8 +252,8 @@ impl RateMeter {
 
     #[inline(always)]
     fn get_unix_timestamp(&self) -> u64 {
-        self.created_at.elapsed().as_secs() + 
-            std::time::SystemTime::now()
+        self.created_at.elapsed().as_secs()
+            + std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs()
@@ -262,61 +264,82 @@ impl RateMeter {
         // Update second window
         let current_second = now;
         let last_second = self.last_second.load(Ordering::Relaxed);
-        
+
         if current_second != last_second {
             // New second - reset counter
-            if self.last_second.compare_exchange(
-                last_second, 
-                current_second, 
-                Ordering::Relaxed, 
-                Ordering::Relaxed
-            ).is_ok() {
-                self.current_second_events.store(new_events, Ordering::Relaxed);
+            if self
+                .last_second
+                .compare_exchange(
+                    last_second,
+                    current_second,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.current_second_events
+                    .store(new_events, Ordering::Relaxed);
             } else {
                 // Another thread updated, add to current
-                self.current_second_events.fetch_add(new_events, Ordering::Relaxed);
+                self.current_second_events
+                    .fetch_add(new_events, Ordering::Relaxed);
             }
         } else if new_events > 0 {
             // Same second - add events
-            self.current_second_events.fetch_add(new_events, Ordering::Relaxed);
+            self.current_second_events
+                .fetch_add(new_events, Ordering::Relaxed);
         }
 
         // Update minute window
         let current_minute = now / 60;
         let last_minute = self.last_minute.load(Ordering::Relaxed);
-        
+
         if current_minute != last_minute {
-            if self.last_minute.compare_exchange(
-                last_minute,
-                current_minute,
-                Ordering::Relaxed,
-                Ordering::Relaxed
-            ).is_ok() {
-                self.current_minute_events.store(new_events, Ordering::Relaxed);
+            if self
+                .last_minute
+                .compare_exchange(
+                    last_minute,
+                    current_minute,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.current_minute_events
+                    .store(new_events, Ordering::Relaxed);
             } else {
-                self.current_minute_events.fetch_add(new_events, Ordering::Relaxed);
+                self.current_minute_events
+                    .fetch_add(new_events, Ordering::Relaxed);
             }
         } else if new_events > 0 {
-            self.current_minute_events.fetch_add(new_events, Ordering::Relaxed);
+            self.current_minute_events
+                .fetch_add(new_events, Ordering::Relaxed);
         }
 
         // Update hour window
         let current_hour = now / 3600;
         let last_hour = self.last_hour.load(Ordering::Relaxed);
-        
+
         if current_hour != last_hour {
-            if self.last_hour.compare_exchange(
-                last_hour,
-                current_hour,
-                Ordering::Relaxed,
-                Ordering::Relaxed
-            ).is_ok() {
-                self.current_hour_events.store(new_events, Ordering::Relaxed);
+            if self
+                .last_hour
+                .compare_exchange(
+                    last_hour,
+                    current_hour,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.current_hour_events
+                    .store(new_events, Ordering::Relaxed);
             } else {
-                self.current_hour_events.fetch_add(new_events, Ordering::Relaxed);
+                self.current_hour_events
+                    .fetch_add(new_events, Ordering::Relaxed);
             }
         } else if new_events > 0 {
-            self.current_hour_events.fetch_add(new_events, Ordering::Relaxed);
+            self.current_hour_events
+                .fetch_add(new_events, Ordering::Relaxed);
         }
     }
 }
@@ -425,7 +448,9 @@ pub mod specialized {
     }
 
     impl Default for ApiRateLimiter {
-        fn default() -> Self { Self::new(1000) } // 1000 req/s default
+        fn default() -> Self {
+            Self::new(1000)
+        } // 1000 req/s default
     }
 
     /// Throughput meter for measuring data rates
@@ -487,7 +512,9 @@ pub mod specialized {
     }
 
     impl Default for ThroughputMeter {
-        fn default() -> Self { Self::new() }
+        fn default() -> Self {
+            Self::new()
+        }
     }
 }
 
@@ -500,15 +527,15 @@ mod tests {
     #[test]
     fn test_basic_operations() {
         let meter = RateMeter::new();
-        
+
         assert!(meter.is_empty());
         assert_eq!(meter.total(), 0);
         assert_eq!(meter.rate(), 0.0);
-        
+
         meter.tick();
         assert!(!meter.is_empty());
         assert_eq!(meter.total(), 1);
-        
+
         meter.tick_n(5);
         assert_eq!(meter.total(), 6);
     }
@@ -516,12 +543,12 @@ mod tests {
     #[test]
     fn test_rate_calculations() {
         let meter = RateMeter::new();
-        
+
         // Record events rapidly in same second
         for _ in 0..100 {
             meter.tick();
         }
-        
+
         let rate = meter.rate();
         assert_eq!(rate, 100.0);
         assert_eq!(meter.rate_per_second(), 100.0);
@@ -530,12 +557,12 @@ mod tests {
     #[test]
     fn test_multiple_windows() {
         let meter = RateMeter::new();
-        
+
         // Record events
         for _ in 0..60 {
             meter.tick();
         }
-        
+
         let stats = meter.stats();
         assert_eq!(stats.total_events, 60);
         assert_eq!(stats.per_second, 60.0);
@@ -546,14 +573,14 @@ mod tests {
     #[test]
     fn test_rate_limiting() {
         let meter = RateMeter::new();
-        
+
         // Allow requests under limit
         assert!(meter.tick_if_under_limit(10.0));
         assert!(meter.tick_if_under_limit(10.0));
-        
+
         // Add more to approach limit
         meter.tick_n(8);
-        
+
         // Should now be at/over limit
         assert!(!meter.tick_if_under_limit(10.0));
         assert!(meter.exceeds_rate(9.0));
@@ -563,15 +590,15 @@ mod tests {
     #[test]
     fn test_burst_rate_limiting() {
         let meter = RateMeter::new();
-        
+
         // Try burst under limit
         assert!(meter.tick_burst_if_under_limit(5, 10.0));
         assert_eq!(meter.total(), 5);
-        
+
         // Try burst that would exceed limit
         assert!(!meter.tick_burst_if_under_limit(10, 10.0));
         assert_eq!(meter.total(), 5); // Should be unchanged
-        
+
         // Try smaller burst that fits
         assert!(meter.tick_burst_if_under_limit(3, 10.0));
         assert_eq!(meter.total(), 8);
@@ -580,9 +607,9 @@ mod tests {
     #[test]
     fn test_can_allow() {
         let meter = RateMeter::new();
-        
+
         meter.tick_n(5);
-        
+
         assert!(meter.can_allow(3, 10.0)); // 5 + 3 = 8 <= 10
         assert!(!meter.can_allow(6, 10.0)); // 5 + 6 = 11 > 10
         assert!(meter.can_allow(5, 10.0)); // 5 + 5 = 10 <= 10
@@ -591,11 +618,11 @@ mod tests {
     #[test]
     fn test_reset() {
         let meter = RateMeter::new();
-        
+
         meter.tick_n(100);
         assert_eq!(meter.total(), 100);
         assert!(meter.rate() > 0.0);
-        
+
         meter.reset();
         assert_eq!(meter.total(), 0);
         assert_eq!(meter.rate(), 0.0);
@@ -605,9 +632,9 @@ mod tests {
     #[test]
     fn test_statistics() {
         let meter = RateMeter::new();
-        
+
         meter.tick_n(50);
-        
+
         let stats = meter.stats();
         assert_eq!(stats.total_events, 50);
         assert_eq!(stats.per_second, 50.0);
@@ -619,30 +646,30 @@ mod tests {
     #[test]
     fn test_api_rate_limiter() {
         let limiter = specialized::ApiRateLimiter::new(10);
-        
+
         // Should allow requests under limit
         for _ in 0..10 {
             assert!(limiter.try_request());
         }
-        
+
         // Should deny request over limit
         assert!(!limiter.try_request());
-        
+
         // Check status - rate is at limit (10), not over it since request was denied
         assert_eq!(limiter.current_rate(), 10.0);
         assert_eq!(limiter.total_requests(), 10);
         assert_eq!(limiter.get_limit(), 10);
-        
+
         // Update limit
         limiter.set_limit(20);
         assert_eq!(limiter.get_limit(), 20);
         assert!(!limiter.is_over_limit()); // Now under new limit
-        
+
         // Test burst requests
         limiter.reset();
         assert!(limiter.try_requests(5));
         assert_eq!(limiter.total_requests(), 5);
-        
+
         assert!(!limiter.try_requests(20)); // Would exceed limit
         assert_eq!(limiter.total_requests(), 5); // Unchanged
     }
@@ -650,12 +677,12 @@ mod tests {
     #[test]
     fn test_throughput_meter() {
         let meter = specialized::ThroughputMeter::new();
-        
+
         meter.record_bytes(1024); // 1 KB
         assert_eq!(meter.bytes_per_second(), 1024.0);
         assert_eq!(meter.kb_per_second(), 1.0);
         assert_eq!(meter.total_bytes(), 1024);
-        
+
         meter.record_bytes(1024 * 1024); // 1 MB more
         assert_eq!(meter.total_bytes(), 1024 + 1024 * 1024);
         assert!((meter.mb_per_second() - 1.001).abs() < 0.01);
@@ -666,7 +693,7 @@ mod tests {
         let meter = Arc::new(RateMeter::new());
         let num_threads = 50;
         let ticks_per_thread = 1000;
-        
+
         let handles: Vec<_> = (0..num_threads)
             .map(|_| {
                 let meter = Arc::clone(&meter);
@@ -677,13 +704,13 @@ mod tests {
                 })
             })
             .collect();
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         assert_eq!(meter.total(), num_threads * ticks_per_thread);
-        
+
         let stats = meter.stats();
         assert!(stats.average_rate > 0.0);
         assert_eq!(stats.total_events, num_threads * ticks_per_thread);
@@ -693,7 +720,7 @@ mod tests {
     fn test_concurrent_rate_limiting() {
         let limiter = Arc::new(specialized::ApiRateLimiter::new(100));
         let num_threads = 20;
-        
+
         let handles: Vec<_> = (0..num_threads)
             .map(|_| {
                 let limiter = Arc::clone(&limiter);
@@ -708,11 +735,9 @@ mod tests {
                 })
             })
             .collect();
-        
-        let total_successful: i32 = handles.into_iter()
-            .map(|h| h.join().unwrap())
-            .sum();
-        
+
+        let total_successful: i32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+
         // Should be limited to around 100 requests
         assert!(total_successful <= 100);
         assert!(total_successful >= 95); // Account for timing variations
@@ -722,11 +747,11 @@ mod tests {
     fn test_display_and_debug() {
         let meter = RateMeter::new();
         meter.tick_n(42);
-        
+
         let display_str = format!("{}", meter);
         assert!(display_str.contains("RateMeter"));
         assert!(display_str.contains("42 total"));
-        
+
         let debug_str = format!("{:?}", meter);
         assert!(debug_str.contains("RateMeter"));
         assert!(debug_str.contains("total_events"));
@@ -735,11 +760,11 @@ mod tests {
     #[test]
     fn test_custom_window() {
         let meter = RateMeter::with_window(Duration::from_secs(5));
-        
+
         meter.tick_n(10);
         assert_eq!(meter.total(), 10);
         assert_eq!(meter.rate(), 10.0);
-        
+
         let stats = meter.stats();
         assert!(stats.window_fill >= 0.0);
     }
@@ -754,16 +779,18 @@ mod benchmarks {
     fn bench_rate_meter_tick() {
         let meter = RateMeter::new();
         let iterations = 10_000_000;
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             meter.tick();
         }
         let elapsed = start.elapsed();
-        
-        println!("RateMeter tick: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "RateMeter tick: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         assert_eq!(meter.total(), iterations);
         // Should be under 400ns per tick (relaxed from 200ns)
         assert!(elapsed.as_nanos() / (iterations as u128) < 400);
@@ -773,16 +800,18 @@ mod benchmarks {
     fn bench_rate_meter_tick_n() {
         let meter = RateMeter::new();
         let iterations = 1_000_000;
-        
+
         let start = Instant::now();
         for i in 0..iterations {
             meter.tick_n((i % 10) + 1);
         }
         let elapsed = start.elapsed();
-        
-        println!("RateMeter tick_n: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "RateMeter tick_n: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Should be under 500ns per tick_n (relaxed from 300ns)
         assert!(elapsed.as_nanos() / (iterations as u128) < 500);
     }
@@ -790,21 +819,23 @@ mod benchmarks {
     #[test]
     fn bench_rate_calculation() {
         let meter = RateMeter::new();
-        
+
         // Fill with data
         meter.tick_n(1000);
-        
+
         let iterations = 1_000_000;
         let start = Instant::now();
-        
+
         for _ in 0..iterations {
             let _ = meter.rate();
         }
-        
+
         let elapsed = start.elapsed();
-        println!("RateMeter rate: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+        println!(
+            "RateMeter rate: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Should be very fast (relaxed from 100ns to 300ns)
         assert!(elapsed.as_nanos() / iterations < 300);
     }
@@ -813,16 +844,18 @@ mod benchmarks {
     fn bench_api_rate_limiter() {
         let limiter = specialized::ApiRateLimiter::new(1_000_000); // High limit
         let iterations = 1_000_000;
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             let _ = limiter.try_request();
         }
         let elapsed = start.elapsed();
-        
-        println!("ApiRateLimiter try_request: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "ApiRateLimiter try_request: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Should be under 1000ns per request (relaxed from 300ns)
         assert!(elapsed.as_nanos() / iterations < 1000);
     }

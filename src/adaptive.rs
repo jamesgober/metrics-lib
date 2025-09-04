@@ -1,28 +1,28 @@
 //! Adaptive sampling and backpressure mechanisms
-//! 
+//!
 //! Provides automatic load shedding and sampling to maintain performance under pressure
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Adaptive sampling strategy
 #[derive(Debug, Clone, Copy)]
 pub enum SamplingStrategy {
     /// Fixed rate sampling (1 in N)
-    /// 
+    ///
     /// # Fields
     /// - `rate`: The fixed sampling rate, where 1 in `rate` samples are taken.
     Fixed {
         /// The fixed sampling rate, where 1 in `rate` samples are taken.
-        rate: u32 
+        rate: u32,
     },
     /// Dynamic rate based on load
-    /// 
+    ///
     /// # Fields
     /// - `min_rate`: The minimum sampling rate.
     /// - `max_rate`: The maximum sampling rate.
     /// - `target_throughput`: The target throughput to maintain.
-    Dynamic { 
+    Dynamic {
         /// The minimum sampling rate.
         min_rate: u32,
         /// The maximum sampling rate.
@@ -31,10 +31,10 @@ pub enum SamplingStrategy {
         target_throughput: u64,
     },
     /// Time-based sampling
-    /// 
+    ///
     /// # Fields
     /// - `min_interval`: The minimum interval between samples.
-    TimeBased { 
+    TimeBased {
         /// Duration in nanoseconds
         min_interval: u64,
     },
@@ -58,7 +58,7 @@ impl AdaptiveSampler {
             SamplingStrategy::Dynamic { min_rate, .. } => min_rate,
             SamplingStrategy::TimeBased { .. } => 1,
         };
-        
+
         Self {
             strategy,
             current_rate: AtomicU32::new(initial_rate),
@@ -68,23 +68,19 @@ impl AdaptiveSampler {
             overloaded: AtomicBool::new(false),
         }
     }
-    
+
     /// Check if sample should be taken
     #[inline]
     pub fn should_sample(&self) -> bool {
         match self.strategy {
-            SamplingStrategy::Fixed { .. } => {
-                self.should_sample_fixed()
-            }
-            SamplingStrategy::Dynamic { .. } => {
-                self.should_sample_dynamic()
-            }
+            SamplingStrategy::Fixed { .. } => self.should_sample_fixed(),
+            SamplingStrategy::Dynamic { .. } => self.should_sample_dynamic(),
             SamplingStrategy::TimeBased { min_interval } => {
                 self.should_sample_time_based(Duration::from_nanos(min_interval))
             }
         }
     }
-    
+
     #[inline]
     fn should_sample_fixed(&self) -> bool {
         let rate = self.current_rate.load(Ordering::Relaxed);
@@ -92,42 +88,42 @@ impl AdaptiveSampler {
             self.samples_taken.fetch_add(1, Ordering::Relaxed);
             return true;
         }
-        
+
         // Fast thread-local random
         let should_sample = fastrand::u32(1..=rate) == 1;
-        
+
         if should_sample {
             self.samples_taken.fetch_add(1, Ordering::Relaxed);
         } else {
             self.samples_dropped.fetch_add(1, Ordering::Relaxed);
         }
-        
+
         should_sample
     }
-    
+
     fn should_sample_dynamic(&self) -> bool {
         // Check if we need to adjust rate
         let mut last_adjustment = self.last_adjustment.lock();
         let now = Instant::now();
-        
+
         if now.duration_since(*last_adjustment) > Duration::from_secs(1) {
             self.adjust_dynamic_rate();
             *last_adjustment = now;
         }
         drop(last_adjustment);
-        
+
         self.should_sample_fixed()
     }
-    
+
     fn should_sample_time_based(&self, min_interval: Duration) -> bool {
         thread_local! {
             static LAST_SAMPLE: std::cell::RefCell<Option<Instant>> = const { std::cell::RefCell::new(None) };
         }
-        
+
         LAST_SAMPLE.with(|last| {
             let mut last = last.borrow_mut();
             let now = Instant::now();
-            
+
             match *last {
                 Some(last_time) if now.duration_since(last_time) < min_interval => {
                     self.samples_dropped.fetch_add(1, Ordering::Relaxed);
@@ -141,12 +137,17 @@ impl AdaptiveSampler {
             }
         })
     }
-    
+
     fn adjust_dynamic_rate(&self) {
-        if let SamplingStrategy::Dynamic { min_rate, max_rate, target_throughput } = self.strategy {
+        if let SamplingStrategy::Dynamic {
+            min_rate,
+            max_rate,
+            target_throughput,
+        } = self.strategy
+        {
             let taken = self.samples_taken.load(Ordering::Relaxed);
             let current_rate = self.current_rate.load(Ordering::Relaxed);
-            
+
             let new_rate = if taken > target_throughput {
                 // Increase sampling rate (sample less)
                 (current_rate * 2).min(max_rate)
@@ -156,30 +157,31 @@ impl AdaptiveSampler {
             } else {
                 current_rate
             };
-            
+
             if new_rate != current_rate {
                 self.current_rate.store(new_rate, Ordering::Relaxed);
-                self.overloaded.store(new_rate > min_rate * 2, Ordering::Relaxed);
+                self.overloaded
+                    .store(new_rate > min_rate * 2, Ordering::Relaxed);
             }
-            
+
             // Reset counters
             self.samples_taken.store(0, Ordering::Relaxed);
             self.samples_dropped.store(0, Ordering::Relaxed);
         }
     }
-    
+
     /// Get current sampling rate
     #[inline]
     pub fn current_rate(&self) -> u32 {
         self.current_rate.load(Ordering::Relaxed)
     }
-    
+
     /// Check if system is overloaded
     #[inline]
     pub fn is_overloaded(&self) -> bool {
         self.overloaded.load(Ordering::Relaxed)
     }
-    
+
     /// Get sampling statistics
     pub fn stats(&self) -> SamplingStats {
         SamplingStats {
@@ -259,12 +261,12 @@ impl MetricCircuitBreaker {
             config,
         }
     }
-    
+
     /// Check if operation is allowed
     #[inline]
     pub fn is_allowed(&self) -> bool {
         let state = self.get_state();
-        
+
         match state {
             CircuitState::Closed => true,
             CircuitState::Open => {
@@ -279,18 +281,18 @@ impl MetricCircuitBreaker {
             }
             CircuitState::HalfOpen => {
                 // Allow limited calls
-                let calls = self.successes.load(Ordering::Relaxed) + 
-                           self.failures.load(Ordering::Relaxed);
+                let calls =
+                    self.successes.load(Ordering::Relaxed) + self.failures.load(Ordering::Relaxed);
                 calls < self.config.half_open_max_calls
             }
         }
     }
-    
+
     /// Record success
     #[inline]
     pub fn record_success(&self) {
         let state = self.get_state();
-        
+
         match state {
             CircuitState::Closed => {
                 self.failures.store(0, Ordering::Relaxed);
@@ -304,12 +306,12 @@ impl MetricCircuitBreaker {
             CircuitState::Open => {} // Shouldn't happen
         }
     }
-    
+
     /// Record failure
     #[inline]
     pub fn record_failure(&self) {
         let state = self.get_state();
-        
+
         match state {
             CircuitState::Closed => {
                 let failures = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
@@ -323,7 +325,7 @@ impl MetricCircuitBreaker {
             CircuitState::Open => {} // Already open
         }
     }
-    
+
     #[inline]
     fn get_state(&self) -> CircuitState {
         match self.state.load(Ordering::Relaxed) {
@@ -333,7 +335,7 @@ impl MetricCircuitBreaker {
             _ => unreachable!(),
         }
     }
-    
+
     fn transition_to(&self, new_state: CircuitState) {
         self.state.store(new_state as u32, Ordering::Relaxed);
         self.failures.store(0, Ordering::Relaxed);
@@ -358,12 +360,12 @@ impl BackpressureController {
             rejected: AtomicU64::new(0),
         }
     }
-    
+
     /// Try to acquire slot
     #[inline]
     pub fn try_acquire(&self) -> Option<BackpressureGuard<'_>> {
         let pending = self.pending.fetch_add(1, Ordering::Relaxed);
-        
+
         if pending >= self.max_pending as u64 {
             self.pending.fetch_sub(1, Ordering::Relaxed);
             self.rejected.fetch_add(1, Ordering::Relaxed);
@@ -372,13 +374,13 @@ impl BackpressureController {
             Some(BackpressureGuard { controller: self })
         }
     }
-    
+
     /// Get current pending count
     #[inline]
     pub fn pending_count(&self) -> u64 {
         self.pending.load(Ordering::Relaxed)
     }
-    
+
     /// Get rejected count
     #[inline]
     pub fn rejected_count(&self) -> u64 {
@@ -407,7 +409,7 @@ pub mod fastrand {
         if start == end {
             return start;
         }
-        
+
         // Fast thread-local RNG using xorshift
         thread_local! {
             static RNG: std::cell::Cell<u32> = std::cell::Cell::new({
@@ -416,7 +418,7 @@ pub mod fastrand {
                 std::hash::Hasher::finish(&hasher) as u32 | 1
             });
         }
-        
+
         RNG.with(|rng| {
             let mut x = rng.get();
             x ^= x << 13;
@@ -431,22 +433,22 @@ pub mod fastrand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_fixed_sampling() {
         let sampler = AdaptiveSampler::new(SamplingStrategy::Fixed { rate: 10 });
-        
+
         let mut sampled = 0;
         for _ in 0..1000 {
             if sampler.should_sample() {
                 sampled += 1;
             }
         }
-        
+
         // Should be approximately 100 (10%)
         assert!(sampled > 50 && sampled < 150);
     }
-    
+
     #[test]
     fn test_circuit_breaker() {
         let breaker = MetricCircuitBreaker::new(CircuitBreakerConfig {
@@ -455,50 +457,50 @@ mod tests {
             timeout: Duration::from_millis(100),
             half_open_max_calls: 5,
         });
-        
+
         // Initially closed
         assert!(breaker.is_allowed());
-        
+
         // Record failures to open
         for _ in 0..3 {
             breaker.record_failure();
         }
-        
+
         // Should be open
         assert!(!breaker.is_allowed());
-        
+
         // Wait for timeout
         std::thread::sleep(Duration::from_millis(150));
-        
+
         // Should transition to half-open
         assert!(breaker.is_allowed());
-        
+
         // Record successes to close
         breaker.record_success();
         breaker.record_success();
-        
+
         // Should be closed again
         assert!(breaker.is_allowed());
     }
-    
+
     #[test]
     fn test_backpressure() {
         let controller = BackpressureController::new(5);
-        
+
         let mut guards = Vec::new();
-        
+
         // Acquire up to limit
         for _ in 0..5 {
             guards.push(controller.try_acquire().unwrap());
         }
-        
+
         // Next should fail
         assert!(controller.try_acquire().is_none());
         assert_eq!(controller.rejected_count(), 1);
-        
+
         // Drop one guard
         guards.pop();
-        
+
         // Should be able to acquire again
         assert!(controller.try_acquire().is_some());
     }

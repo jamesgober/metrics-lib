@@ -1,9 +1,9 @@
 //! # High-Precision Timer
-//! 
+//!
 //! Ultra-fast timer implementation with nanosecond precision.
-//! 
+//!
 //! ## Features
-//! 
+//!
 //! - **Nanosecond precision** - Using system high-resolution clocks
 //! - **Zero allocation** - Pure stack operations
 //! - **RAII support** - Automatic timing with scoped timers
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// High-precision timer with automatic statistics
-/// 
+///
 /// Optimized for sub-10ns timing operations.
 /// Cache-line aligned to prevent false sharing.
 #[repr(align(64))]
@@ -32,7 +32,7 @@ pub struct Timer {
 }
 
 /// Running timer instance (RAII)
-/// 
+///
 /// When dropped, automatically records the elapsed time
 pub struct RunningTimer<'a> {
     timer: &'a Timer,
@@ -95,10 +95,10 @@ impl Timer {
         // Update total and count
         self.total_nanos.fetch_add(duration_ns, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
-        
+
         // Update min (compare-and-swap loop)
         self.update_min(duration_ns);
-        
+
         // Update max (compare-and-swap loop)
         self.update_max(duration_ns);
     }
@@ -122,8 +122,9 @@ impl Timer {
         }
 
         self.total_nanos.fetch_add(total_ns, Ordering::Relaxed);
-        self.count.fetch_add(durations.len() as u64, Ordering::Relaxed);
-        
+        self.count
+            .fetch_add(durations.len() as u64, Ordering::Relaxed);
+
         if local_min < u64::MAX {
             self.update_min(local_min);
         }
@@ -151,7 +152,7 @@ impl Timer {
         if count == 0 {
             return Duration::ZERO;
         }
-        
+
         let total_ns = self.total_nanos.load(Ordering::Relaxed);
         Duration::from_nanos(total_ns / count)
     }
@@ -188,23 +189,23 @@ impl Timer {
         let total_ns = self.total_nanos.load(Ordering::Relaxed);
         let min_ns = self.min_nanos.load(Ordering::Relaxed);
         let max_ns = self.max_nanos.load(Ordering::Relaxed);
-        
+
         let total = Duration::from_nanos(total_ns);
         let average = if count > 0 {
             Duration::from_nanos(total_ns / count)
         } else {
             Duration::ZERO
         };
-        
+
         let min = if min_ns == u64::MAX {
             Duration::ZERO
         } else {
             Duration::from_nanos(min_ns)
         };
-        
+
         let max = Duration::from_nanos(max_ns);
         let age = self.created_at.elapsed();
-        
+
         let rate_per_second = if age.as_secs_f64() > 0.0 {
             count as f64 / age.as_secs_f64()
         } else {
@@ -246,7 +247,7 @@ impl Timer {
     }
 
     // Internal helper methods
-    
+
     #[inline(always)]
     fn update_min(&self, value: u64) {
         loop {
@@ -254,7 +255,7 @@ impl Timer {
             if value >= current {
                 break; // Current min is already smaller
             }
-            
+
             match self.min_nanos.compare_exchange_weak(
                 current,
                 value,
@@ -274,7 +275,7 @@ impl Timer {
             if value <= current {
                 break; // Current max is already larger
             }
-            
+
             match self.max_nanos.compare_exchange_weak(
                 current,
                 value,
@@ -382,16 +383,18 @@ pub mod utils {
         F: Fn(),
     {
         let timer = Timer::new();
-        
+
         for _ in 0..iterations {
             let _guard = timer.start();
             f();
         }
 
         let stats = timer.stats();
-        println!("Benchmark '{}': {} iterations, avg: {:?}, total: {:?}", 
-                name, iterations, stats.average, stats.total);
-        
+        println!(
+            "Benchmark '{}': {} iterations, avg: {:?}, total: {:?}",
+            name, iterations, stats.average, stats.total
+        );
+
         stats.average
     }
 }
@@ -407,9 +410,9 @@ macro_rules! time_block {
 
 #[macro_export]
 /// Macro to time a function call and record the result
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```rust
 /// # use metrics_lib::time_fn;
 /// let (result, duration) = time_fn!({
@@ -438,15 +441,15 @@ mod tests {
     #[test]
     fn test_basic_operations() {
         let timer = Timer::new();
-        
+
         assert!(timer.is_empty());
         assert_eq!(timer.count(), 0);
         assert_eq!(timer.total(), Duration::ZERO);
         assert_eq!(timer.average(), Duration::ZERO);
-        
+
         // Record a duration
         timer.record(Duration::from_millis(100));
-        
+
         assert!(!timer.is_empty());
         assert_eq!(timer.count(), 1);
         assert!(timer.total() >= Duration::from_millis(99)); // Account for precision
@@ -456,13 +459,13 @@ mod tests {
     #[test]
     fn test_running_timer() {
         let timer = Timer::new();
-        
+
         {
             let running = timer.start();
             thread::sleep(Duration::from_millis(10));
             assert!(running.elapsed() >= Duration::from_millis(9));
         } // Automatically recorded when dropped
-        
+
         assert_eq!(timer.count(), 1);
         assert!(timer.average() >= Duration::from_millis(9));
     }
@@ -470,11 +473,11 @@ mod tests {
     #[test]
     fn test_manual_stop() {
         let timer = Timer::new();
-        
+
         let running = timer.start();
         thread::sleep(Duration::from_millis(5));
         running.stop(); // Manual stop
-        
+
         assert_eq!(timer.count(), 1);
         assert!(timer.average() >= Duration::from_millis(4));
     }
@@ -482,15 +485,15 @@ mod tests {
     #[test]
     fn test_batch_recording() {
         let timer = Timer::new();
-        
+
         let durations = vec![
             Duration::from_millis(10),
             Duration::from_millis(20),
             Duration::from_millis(30),
         ];
-        
+
         timer.record_batch(&durations);
-        
+
         assert_eq!(timer.count(), 3);
         assert_eq!(timer.min(), Duration::from_millis(10));
         assert_eq!(timer.max(), Duration::from_millis(30));
@@ -501,29 +504,32 @@ mod tests {
     #[test]
     fn test_min_max_tracking() {
         let timer = Timer::new();
-        
+
         timer.record(Duration::from_millis(50));
         timer.record(Duration::from_millis(10));
         timer.record(Duration::from_millis(100));
         timer.record(Duration::from_millis(25));
-        
+
         assert_eq!(timer.count(), 4);
         assert_eq!(timer.min(), Duration::from_millis(10));
         assert_eq!(timer.max(), Duration::from_millis(100));
-        
+
         // Check average is approximately 46.25ms (allowing for precision differences)
         let avg = timer.average();
-        assert!(avg >= Duration::from_millis(46) && avg <= Duration::from_millis(47),
-                "Average {:?} should be between 46ms and 47ms", avg);
+        assert!(
+            avg >= Duration::from_millis(46) && avg <= Duration::from_millis(47),
+            "Average {:?} should be between 46ms and 47ms",
+            avg
+        );
     }
 
     #[test]
     fn test_reset() {
         let timer = Timer::new();
-        
+
         timer.record(Duration::from_millis(100));
         assert!(!timer.is_empty());
-        
+
         timer.reset();
         assert!(timer.is_empty());
         assert_eq!(timer.count(), 0);
@@ -535,11 +541,11 @@ mod tests {
     #[test]
     fn test_statistics() {
         let timer = Timer::new();
-        
+
         for i in 1..=10 {
             timer.record(Duration::from_millis(i * 10));
         }
-        
+
         let stats = timer.stats();
         assert_eq!(stats.count, 10);
         assert_eq!(stats.total, Duration::from_millis(550)); // Sum of 10+20+...+100
@@ -555,7 +561,7 @@ mod tests {
         let timer = Arc::new(Timer::new());
         let num_threads = 50;
         let recordings_per_thread = 1000;
-        
+
         let handles: Vec<_> = (0..num_threads)
             .map(|thread_id| {
                 let timer = Arc::clone(&timer);
@@ -568,11 +574,11 @@ mod tests {
                 })
             })
             .collect();
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         let stats = timer.stats();
         assert_eq!(stats.count, num_threads * recordings_per_thread);
         assert!(stats.min > Duration::ZERO);
@@ -585,7 +591,7 @@ mod tests {
     fn test_concurrent_timing() {
         let timer = Arc::new(Timer::new());
         let num_threads = 20;
-        
+
         let handles: Vec<_> = (0..num_threads)
             .map(|_| {
                 let timer = Arc::clone(&timer);
@@ -597,11 +603,11 @@ mod tests {
                 })
             })
             .collect();
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         let stats = timer.stats();
         assert_eq!(stats.count, num_threads * 100);
         assert!(stats.average >= Duration::from_micros(50)); // Should be at least 50μs
@@ -614,48 +620,48 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
             42
         });
-        
+
         assert_eq!(result, 42);
         assert!(duration >= Duration::from_millis(9));
-        
+
         // Test time_and_record
         let timer = Timer::new();
         let result = utils::time_and_record(&timer, || {
             thread::sleep(Duration::from_millis(5));
             "hello"
         });
-        
+
         assert_eq!(result, "hello");
         assert_eq!(timer.count(), 1);
         assert!(timer.average() >= Duration::from_millis(4));
-        
+
         // Test benchmark
         let avg_duration = utils::benchmark("test_function", 10, || {
             thread::sleep(Duration::from_millis(1));
         });
-        
+
         assert!(avg_duration >= Duration::from_millis(1));
     }
 
     #[test]
     fn test_macros() {
         let timer = Timer::new();
-        
+
         // Test time_block macro
         let result = time_block!(timer, {
             thread::sleep(Duration::from_millis(5));
             "result"
         });
-        
+
         assert_eq!(result, "result");
         assert_eq!(timer.count(), 1);
-        
+
         // Test time_fn macro
         let (result, duration) = time_fn!({
             thread::sleep(Duration::from_millis(2));
             100
         });
-        
+
         assert_eq!(result, 100);
         assert!(duration >= Duration::from_millis(1));
     }
@@ -664,11 +670,11 @@ mod tests {
     fn test_display_and_debug() {
         let timer = Timer::new();
         timer.record(Duration::from_millis(100));
-        
+
         let display_str = format!("{}", timer);
         assert!(display_str.contains("Timer"));
         assert!(display_str.contains("count: 1"));
-        
+
         let debug_str = format!("{:?}", timer);
         assert!(debug_str.contains("Timer"));
         assert!(debug_str.contains("count"));
@@ -686,16 +692,18 @@ mod benchmarks {
         let timer = Timer::new();
         let duration = Duration::from_nanos(1000);
         let iterations = 1_000_000;
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             timer.record(duration);
         }
         let elapsed = start.elapsed();
-        
-        println!("Timer record: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "Timer record: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         assert_eq!(timer.count(), iterations);
         // Should be under 300ns per record (relaxed from 200ns)
         assert!(elapsed.as_nanos() / (iterations as u128) < 300);
@@ -705,7 +713,7 @@ mod benchmarks {
     fn bench_running_timer() {
         let timer = Timer::new();
         let iterations = 100_000;
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             let guard = timer.start();

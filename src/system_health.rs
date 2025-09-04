@@ -1,9 +1,9 @@
 //! # System Health Monitoring
-//! 
+//!
 //! Ultra-fast system resource monitoring with process introspection.
-//! 
+//!
 //! ## Features
-//! 
+//!
 //! - **Process CPU/Memory tracking** - Automatic detection of current app usage
 //! - **System-wide monitoring** - CPU, memory, load average
 //! - **Sub-millisecond updates** - Fast health checks
@@ -11,12 +11,12 @@
 //! - **Zero allocations** - Pure atomic operations
 //! - **Health scoring** - Intelligent system health assessment
 
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
 use std::io;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// System health monitor with process introspection
-/// 
+///
 /// Tracks both system-wide and process-specific resource usage.
 /// Cache-line aligned for maximum performance.
 #[repr(align(64))]
@@ -100,7 +100,7 @@ impl SystemHealth {
             update_interval_ms: 1000, // 1 second default
             created_at: Instant::now(),
         };
-        
+
         // Do initial update
         instance.update_metrics();
         instance
@@ -135,7 +135,7 @@ impl SystemHealth {
     }
 
     /// Get system memory usage in GB
-    #[inline] 
+    #[inline]
     pub fn mem_used_gb(&self) -> f64 {
         self.mem_used_mb() / 1024.0
     }
@@ -186,7 +186,7 @@ impl SystemHealth {
     #[inline(always)]
     pub fn quick_check(&self) -> HealthStatus {
         let score = self.health_score();
-        
+
         if score >= 80.0 {
             HealthStatus::Healthy
         } else if score >= 60.0 {
@@ -207,7 +207,7 @@ impl SystemHealth {
     /// Get detailed system snapshot
     pub fn snapshot(&self) -> SystemSnapshot {
         self.maybe_update();
-        
+
         let last_update_ns = self.last_update.load(Ordering::Relaxed);
         let last_update = if last_update_ns > 0 {
             Duration::from_nanos(last_update_ns)
@@ -231,7 +231,7 @@ impl SystemHealth {
     /// Get process-specific statistics
     pub fn process(&self) -> ProcessStats {
         self.maybe_update();
-        
+
         ProcessStats {
             cpu_percent: self.process_cpu.load(Ordering::Relaxed) as f64 / 100.0,
             memory_mb: self.process_memory_mb.load(Ordering::Relaxed) as f64,
@@ -247,7 +247,7 @@ impl SystemHealth {
     fn maybe_update(&self) {
         let now = self.created_at.elapsed().as_millis() as u64;
         let last_update = self.last_update.load(Ordering::Relaxed);
-        
+
         if now >= last_update && (now - last_update) > self.update_interval_ms {
             self.update_metrics();
         }
@@ -255,47 +255,51 @@ impl SystemHealth {
 
     fn update_metrics(&self) {
         let now_ns = self.created_at.elapsed().as_nanos() as u64;
-        
+
         // Update system metrics
         if let Ok(cpu) = self.get_system_cpu() {
-            self.system_cpu.store((cpu * 100.0) as u32, Ordering::Relaxed);
+            self.system_cpu
+                .store((cpu * 100.0) as u32, Ordering::Relaxed);
         }
-        
+
         if let Ok(memory_mb) = self.get_system_memory_mb() {
             self.system_memory_mb.store(memory_mb, Ordering::Relaxed);
         }
-        
+
         if let Ok(load) = self.get_load_average() {
-            self.load_average.store((load * 100.0) as u32, Ordering::Relaxed);
+            self.load_average
+                .store((load * 100.0) as u32, Ordering::Relaxed);
         }
-        
+
         // Update process metrics
         if let Ok(cpu) = self.get_process_cpu() {
-            self.process_cpu.store((cpu * 100.0) as u32, Ordering::Relaxed);
+            self.process_cpu
+                .store((cpu * 100.0) as u32, Ordering::Relaxed);
         }
-        
+
         if let Ok(memory_mb) = self.get_process_memory_mb() {
             self.process_memory_mb.store(memory_mb, Ordering::Relaxed);
         }
-        
+
         if let Ok(threads) = self.get_thread_count() {
             self.thread_count.store(threads, Ordering::Relaxed);
         }
-        
+
         if let Ok(fds) = self.get_fd_count() {
             self.fd_count.store(fds, Ordering::Relaxed);
         }
-        
+
         // Calculate health score
         let health = self.calculate_health_score();
-        self.health_score.store((health * 100.0) as u32, Ordering::Relaxed);
-        
+        self.health_score
+            .store((health * 100.0) as u32, Ordering::Relaxed);
+
         self.last_update.store(now_ns, Ordering::Relaxed);
     }
 
     fn calculate_health_score(&self) -> f64 {
         let mut score: f64 = 100.0;
-        
+
         // CPU penalty (system)
         let system_cpu = self.system_cpu.load(Ordering::Relaxed) as f64 / 100.0;
         if system_cpu > 80.0 {
@@ -305,7 +309,7 @@ impl SystemHealth {
         } else if system_cpu > 40.0 {
             score -= 5.0;
         }
-        
+
         // Load average penalty
         let load = self.load_average.load(Ordering::Relaxed) as f64 / 100.0;
         let cpu_count = num_cpus::get() as f64;
@@ -316,7 +320,7 @@ impl SystemHealth {
         } else if load > cpu_count {
             score -= 5.0;
         }
-        
+
         // Process CPU penalty
         let process_cpu = self.process_cpu.load(Ordering::Relaxed) as f64 / 100.0;
         if process_cpu > 50.0 {
@@ -324,15 +328,16 @@ impl SystemHealth {
         } else if process_cpu > 25.0 {
             score -= 8.0;
         }
-        
+
         // Memory pressure (simplified - would need actual available memory)
         let memory_gb = self.system_memory_mb.load(Ordering::Relaxed) as f64 / 1024.0;
-        if memory_gb > 16.0 { // Assuming this is high usage
+        if memory_gb > 16.0 {
+            // Assuming this is high usage
             score -= 10.0;
         } else if memory_gb > 8.0 {
             score -= 5.0;
         }
-        
+
         // Thread count penalty (too many threads can indicate issues)
         let threads = self.thread_count.load(Ordering::Relaxed);
         if threads > 1000 {
@@ -342,7 +347,7 @@ impl SystemHealth {
         } else if threads > 200 {
             score -= 5.0;
         }
-        
+
         // File descriptor penalty
         let fds = self.fd_count.load(Ordering::Relaxed);
         if fds > 10000 {
@@ -352,7 +357,7 @@ impl SystemHealth {
         } else if fds > 1000 {
             score -= 3.0;
         }
-        
+
         score.max(0.0)
     }
 
@@ -368,10 +373,10 @@ impl SystemHealth {
                 let nice: u64 = parts[2].parse().unwrap_or(0);
                 let system: u64 = parts[3].parse().unwrap_or(0);
                 let idle: u64 = parts[4].parse().unwrap_or(0);
-                
+
                 let total = user + nice + system + idle;
                 let used = user + nice + system;
-                
+
                 if total > 0 {
                     return Ok(used as f64 / total as f64 * 100.0);
                 }
@@ -393,30 +398,36 @@ impl SystemHealth {
         let mut total_kb = 0u64;
         let mut free_kb = 0u64;
         let mut available_kb = 0u64;
-        
+
         for line in contents.lines() {
             if line.starts_with("MemTotal:") {
-                total_kb = line.split_whitespace().nth(1)
+                total_kb = line
+                    .split_whitespace()
+                    .nth(1)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             } else if line.starts_with("MemFree:") {
-                free_kb = line.split_whitespace().nth(1)
+                free_kb = line
+                    .split_whitespace()
+                    .nth(1)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             } else if line.starts_with("MemAvailable:") {
-                available_kb = line.split_whitespace().nth(1)
+                available_kb = line
+                    .split_whitespace()
+                    .nth(1)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             }
         }
-        
+
         // Use available if present, otherwise fall back to free
         let used_kb = if available_kb > 0 {
             total_kb - available_kb
         } else {
             total_kb - free_kb
         };
-        
+
         Ok(used_kb / 1024) // Convert to MB
     }
 
@@ -429,9 +440,9 @@ impl SystemHealth {
     fn get_load_average(&self) -> io::Result<f64> {
         let contents = std::fs::read_to_string("/proc/loadavg")?;
         if let Some(first) = contents.split_whitespace().next() {
-            return first.parse().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "Invalid load average")
-            });
+            return first
+                .parse()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid load average"));
         }
         Ok(0.0)
     }
@@ -445,12 +456,12 @@ impl SystemHealth {
     fn get_process_cpu(&self) -> io::Result<f64> {
         let contents = std::fs::read_to_string("/proc/self/stat")?;
         let parts: Vec<&str> = contents.split_whitespace().collect();
-        
+
         if parts.len() >= 15 {
             let utime: u64 = parts[13].parse().unwrap_or(0);
             let stime: u64 = parts[14].parse().unwrap_or(0);
             let total = utime + stime;
-            
+
             // This is a simplified calculation - real CPU% would need
             // to track changes over time and account for clock ticks
             Ok(total as f64 * 0.01) // Very rough approximation
@@ -560,10 +571,11 @@ impl Default for SystemHealth {
 impl std::fmt::Display for SystemHealth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let snapshot = self.snapshot();
-        write!(f, "SystemHealth(CPU: {:.1}%, Mem: {} MB, Health: {:.1}%)", 
-               snapshot.system_cpu_percent, 
-               snapshot.system_memory_mb,
-               snapshot.health_score)
+        write!(
+            f,
+            "SystemHealth(CPU: {:.1}%, Mem: {} MB, Health: {:.1}%)",
+            snapshot.system_cpu_percent, snapshot.system_memory_mb, snapshot.health_score
+        )
     }
 }
 
@@ -606,7 +618,7 @@ mod tests {
     #[test]
     fn test_basic_functionality() {
         let health = SystemHealth::new();
-        
+
         // Should be able to get all metrics
         let _cpu = health.cpu_used();
         let _mem = health.mem_used_mb();
@@ -616,19 +628,25 @@ mod tests {
         let _threads = health.thread_count();
         let _fds = health.fd_count();
         let _score = health.health_score();
-        
+
         // Health check should work
         let status = health.quick_check();
-        assert!(matches!(status, HealthStatus::Healthy | HealthStatus::Warning | HealthStatus::Degraded | HealthStatus::Critical));
+        assert!(matches!(
+            status,
+            HealthStatus::Healthy
+                | HealthStatus::Warning
+                | HealthStatus::Degraded
+                | HealthStatus::Critical
+        ));
     }
 
     #[test]
     fn test_cpu_free() {
         let health = SystemHealth::new();
-        
+
         let used = health.cpu_used();
         let free = health.cpu_free();
-        
+
         // Used + free should approximately equal 100%
         assert!((used + free - 100.0).abs() < 0.1);
     }
@@ -636,10 +654,10 @@ mod tests {
     #[test]
     fn test_memory_units() {
         let health = SystemHealth::new();
-        
+
         let mb = health.mem_used_mb();
         let gb = health.mem_used_gb();
-        
+
         // GB should be approximately MB / 1024
         if mb > 0.0 {
             assert!((gb * 1024.0 - mb).abs() < 1.0);
@@ -649,9 +667,9 @@ mod tests {
     #[test]
     fn test_snapshot() {
         let health = SystemHealth::new();
-        
+
         let snapshot = health.snapshot();
-        
+
         // Snapshot should have reasonable values
         assert!(snapshot.system_cpu_percent >= 0.0);
         assert!(snapshot.system_cpu_percent <= 100.0);
@@ -663,9 +681,9 @@ mod tests {
     #[test]
     fn test_process_stats() {
         let health = SystemHealth::new();
-        
+
         let stats = health.process();
-        
+
         assert!(stats.threads > 0); // Should have at least current thread
         assert!(stats.uptime > Duration::ZERO);
         assert!(stats.cpu_percent >= 0.0);
@@ -678,19 +696,19 @@ mod tests {
         let warning = HealthStatus::Warning;
         let degraded = HealthStatus::Degraded;
         let critical = HealthStatus::Critical;
-        
+
         assert!(healthy.is_healthy());
         assert!(!healthy.is_degraded());
         assert!(!healthy.has_issues());
-        
+
         assert!(!warning.is_healthy());
         assert!(!warning.is_degraded());
         assert!(warning.has_issues());
-        
+
         assert!(!degraded.is_healthy());
         assert!(degraded.is_degraded());
         assert!(degraded.has_issues());
-        
+
         assert!(!critical.is_healthy());
         assert!(critical.is_degraded());
         assert!(critical.has_issues());
@@ -699,7 +717,7 @@ mod tests {
     #[test]
     fn test_custom_interval() {
         let health = SystemHealth::with_interval(Duration::from_millis(500));
-        
+
         // Should still work with custom interval
         let _cpu = health.cpu_used();
         let _score = health.health_score();
@@ -708,14 +726,14 @@ mod tests {
     #[test]
     fn test_force_update() {
         let health = SystemHealth::new();
-        
+
         let score_before = health.health_score();
-        
+
         // Force update
         health.update();
-        
+
         let score_after = health.health_score();
-        
+
         // Scores might be different or the same, but both should be valid
         assert!(score_before >= 0.0);
         assert!(score_after >= 0.0);
@@ -725,7 +743,7 @@ mod tests {
     fn test_concurrent_access() {
         let health = std::sync::Arc::new(SystemHealth::new());
         let mut handles = vec![];
-        
+
         // Spawn multiple threads accessing health metrics
         for _ in 0..10 {
             let health_clone = health.clone();
@@ -738,12 +756,12 @@ mod tests {
             });
             handles.push(handle);
         }
-        
+
         // Wait for all threads
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         // Should still be functional
         let final_score = health.health_score();
         assert!(final_score >= 0.0 && final_score <= 100.0);
@@ -752,15 +770,15 @@ mod tests {
     #[test]
     fn test_display_formatting() {
         let health = SystemHealth::new();
-        
+
         let display_str = format!("{}", health);
         assert!(display_str.contains("SystemHealth"));
         assert!(display_str.contains("CPU"));
         assert!(display_str.contains("Mem"));
-        
+
         let debug_str = format!("{:?}", health);
         assert!(debug_str.contains("SystemHealth"));
-        
+
         let status = health.quick_check();
         let status_str = format!("{}", status);
         assert!(!status_str.is_empty());
@@ -776,16 +794,18 @@ mod benchmarks {
     fn bench_quick_check() {
         let health = SystemHealth::new();
         let iterations = 1_000_000;
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             let _ = health.quick_check();
         }
         let elapsed = start.elapsed();
-        
-        println!("SystemHealth quick_check: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64);
-        
+
+        println!(
+            "SystemHealth quick_check: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64
+        );
+
         // Should be extremely fast when cached (relaxed from 100ns to 200ns)
         assert!(elapsed.as_nanos() / iterations < 200);
     }
@@ -794,7 +814,7 @@ mod benchmarks {
     fn bench_cached_metrics() {
         let health = SystemHealth::new();
         let iterations = 1_000_000;
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             let _ = health.cpu_used();
@@ -802,10 +822,12 @@ mod benchmarks {
             let _ = health.health_score();
         }
         let elapsed = start.elapsed();
-        
-        println!("SystemHealth cached metrics: {:.2} ns/op", 
-                elapsed.as_nanos() as f64 / iterations as f64 / 3.0);
-        
+
+        println!(
+            "SystemHealth cached metrics: {:.2} ns/op",
+            elapsed.as_nanos() as f64 / iterations as f64 / 3.0
+        );
+
         // Should be very fast when cached (relaxed from 500ns to 1000ns)
         assert!(elapsed.as_nanos() / iterations < 1000);
     }
@@ -814,16 +836,18 @@ mod benchmarks {
     fn bench_force_update() {
         let health = SystemHealth::new();
         let iterations = 1000; // Less iterations since this does real work
-        
+
         let start = Instant::now();
         for _ in 0..iterations {
             health.update();
         }
         let elapsed = start.elapsed();
-        
-        println!("SystemHealth force update: {:.2} μs/op", 
-                elapsed.as_micros() as f64 / iterations as f64);
-        
+
+        println!(
+            "SystemHealth force update: {:.2} μs/op",
+            elapsed.as_micros() as f64 / iterations as f64
+        );
+
         // Should complete updates reasonably fast (relaxed from 1000ms to 2000ms)
         assert!(elapsed.as_millis() < 2000);
     }

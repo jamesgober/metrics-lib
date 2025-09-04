@@ -3,12 +3,12 @@
 //! The Registry uses a lock-free hash table with memory-efficient string interning
 //! to provide O(1) metric lookup with minimal memory overhead.
 
-use crate::{Counter, Gauge, Timer, RateMeter};
+use crate::{Counter, Gauge, RateMeter, Timer};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// A thread-safe registry for storing metrics by name.
-/// 
+///
 /// Uses RwLock for simplicity while maintaining good performance for the
 /// read-heavy workloads typical in metrics collection.
 #[repr(align(64))]
@@ -41,7 +41,8 @@ impl Registry {
 
         // Slow path: write lock to create new counter
         let mut counters = self.counters.write().unwrap();
-        counters.entry(name.to_string())
+        counters
+            .entry(name.to_string())
             .or_insert_with(|| Arc::new(Counter::new()))
             .clone()
     }
@@ -57,7 +58,8 @@ impl Registry {
 
         // Slow path: write lock to create new gauge
         let mut gauges = self.gauges.write().unwrap();
-        gauges.entry(name.to_string())
+        gauges
+            .entry(name.to_string())
             .or_insert_with(|| Arc::new(Gauge::new()))
             .clone()
     }
@@ -73,7 +75,8 @@ impl Registry {
 
         // Slow path: write lock to create new timer
         let mut timers = self.timers.write().unwrap();
-        timers.entry(name.to_string())
+        timers
+            .entry(name.to_string())
             .or_insert_with(|| Arc::new(Timer::new()))
             .clone()
     }
@@ -89,7 +92,8 @@ impl Registry {
 
         // Slow path: write lock to create new rate meter
         let mut rate_meters = self.rate_meters.write().unwrap();
-        rate_meters.entry(name.to_string())
+        rate_meters
+            .entry(name.to_string())
             .or_insert_with(|| Arc::new(RateMeter::new()))
             .clone()
     }
@@ -116,10 +120,10 @@ impl Registry {
 
     /// Get total number of registered metrics.
     pub fn metric_count(&self) -> usize {
-        self.counters.read().unwrap().len() +
-        self.gauges.read().unwrap().len() +
-        self.timers.read().unwrap().len() +
-        self.rate_meters.read().unwrap().len()
+        self.counters.read().unwrap().len()
+            + self.gauges.read().unwrap().len()
+            + self.timers.read().unwrap().len()
+            + self.rate_meters.read().unwrap().len()
     }
 
     /// Clear all metrics from the registry.
@@ -149,10 +153,10 @@ mod tests {
     #[test]
     fn test_counter_registration() {
         let registry = Registry::new();
-        
+
         let counter1 = registry.get_or_create_counter("requests");
         let counter2 = registry.get_or_create_counter("requests");
-        
+
         // Should return the same instance
         assert!(Arc::ptr_eq(&counter1, &counter2));
         assert_eq!(registry.metric_count(), 1);
@@ -161,10 +165,10 @@ mod tests {
     #[test]
     fn test_gauge_registration() {
         let registry = Registry::new();
-        
+
         let gauge1 = registry.get_or_create_gauge("cpu_usage");
         let gauge2 = registry.get_or_create_gauge("cpu_usage");
-        
+
         // Should return the same instance
         assert!(Arc::ptr_eq(&gauge1, &gauge2));
         assert_eq!(registry.metric_count(), 1);
@@ -173,10 +177,10 @@ mod tests {
     #[test]
     fn test_timer_registration() {
         let registry = Registry::new();
-        
+
         let timer1 = registry.get_or_create_timer("db_query");
         let timer2 = registry.get_or_create_timer("db_query");
-        
+
         // Should return the same instance
         assert!(Arc::ptr_eq(&timer1, &timer2));
         assert_eq!(registry.metric_count(), 1);
@@ -185,10 +189,10 @@ mod tests {
     #[test]
     fn test_rate_meter_registration() {
         let registry = Registry::new();
-        
+
         let meter1 = registry.get_or_create_rate_meter("api_calls");
         let meter2 = registry.get_or_create_rate_meter("api_calls");
-        
+
         // Should return the same instance
         assert!(Arc::ptr_eq(&meter1, &meter2));
         assert_eq!(registry.metric_count(), 1);
@@ -197,12 +201,12 @@ mod tests {
     #[test]
     fn test_mixed_metrics() {
         let registry = Registry::new();
-        
+
         let _counter = registry.get_or_create_counter("requests");
         let _gauge = registry.get_or_create_gauge("cpu_usage");
         let _timer = registry.get_or_create_timer("db_query");
         let _meter = registry.get_or_create_rate_meter("api_calls");
-        
+
         assert_eq!(registry.metric_count(), 4);
         assert_eq!(registry.counter_names().len(), 1);
         assert_eq!(registry.gauge_names().len(), 1);
@@ -240,12 +244,12 @@ mod tests {
     #[test]
     fn test_clear() {
         let registry = Registry::new();
-        
+
         let _counter = registry.get_or_create_counter("requests");
         let _gauge = registry.get_or_create_gauge("cpu_usage");
-        
+
         assert_eq!(registry.metric_count(), 2);
-        
+
         registry.clear();
         assert_eq!(registry.metric_count(), 0);
     }
@@ -253,14 +257,14 @@ mod tests {
     #[test]
     fn test_metric_names() {
         let registry = Registry::new();
-        
+
         let _counter1 = registry.get_or_create_counter("requests");
         let _counter2 = registry.get_or_create_counter("errors");
         let _gauge1 = registry.get_or_create_gauge("cpu_usage");
-        
+
         let counter_names = registry.counter_names();
         let gauge_names = registry.gauge_names();
-        
+
         assert_eq!(counter_names.len(), 2);
         assert_eq!(gauge_names.len(), 1);
         assert!(counter_names.contains(&"requests".to_string()));
