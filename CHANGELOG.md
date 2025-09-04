@@ -9,7 +9,22 @@
 </p>
 
 ## [Unreleased]
+### Added
+- Codecov configuration `codecov.yml` with project and patch coverage thresholds (target: 85%).
+- Coverage status checks integrated via Codecov for PRs and main.
 
+### Changed
+- CI workflow `.github/workflows/ci.yml`: set `codecov/codecov-action@v4` to `fail_ci_if_error: true` to harden coverage enforcement.
+- Repository-wide formatting normalized with `cargo fmt --all`.
+
+### Fixed
+- Lint hygiene: repository is Clippy-clean under `--all-features`.
+
+### Quality Gates
+- Local and CI parity established:
+  - Formatting: `cargo fmt --all -- --check`.
+  - Lints: `cargo clippy --all-features -- -D warnings`.
+  - Tests: `cargo test --all-features` across Linux/macOS/Windows and MSRV `1.70.0`.
 
 
 <br>
@@ -22,8 +37,6 @@
 - **Documentation**: Added missing documentation for time_fn macro
 - **Lint Issues**: Applied Clippy fixes for format string optimizations and redundant closures
 - **Integer Overflow**: Fixed subtraction overflow panic in system health monitoring
-
-
 
 
 
