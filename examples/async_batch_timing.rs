@@ -1,7 +1,7 @@
 use metrics_lib::{metrics, AsyncMetricBatch, AsyncTimerExt};
 use std::time::Duration;
 
-#[tokio::main(flavor = "current_thread")] 
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     metrics_lib::init();
 
