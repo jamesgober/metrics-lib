@@ -62,14 +62,16 @@ jobs:
       run: cargo fmt --all -- --check
 
   coverage:
-    name: Coverage (tarpaulin)
+    name: Coverage (llvm-cov)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
     - uses: actions/checkout@v4
-    - name: Install Rust
+    - name: Install Rust (stable)
       uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
     - name: Cache (cargo registry/git/target)
       uses: actions/cache@v4
       with:
@@ -78,41 +80,27 @@ jobs:
           ~/.cargo/git
           target
         key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Warm up rustup components (retry)
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Generate coverage summary and enforce threshold (85%)
       shell: bash
       run: |
         set -euxo pipefail
-        rustup --version
-        rustup set profile minimal || true
-        rustup update --no-self-update || true
-        for i in {1..3}; do
-          if rustup component add rust-std-x86_64-unknown-linux-gnu; then
-            break
-          fi
-          echo "rustup component add failed (attempt $i). Retrying..."
-          sleep $((i*5))
-        done
-    - name: Install cargo-tarpaulin
-      uses: taiki-e/install-action@cargo-tarpaulin
-    - name: Generate coverage (XML) with threshold (include doctests, all features)
+        cargo llvm-cov --summary-only --workspace \
+          --fail-under-lines 85 \
+          --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
+    - name: Generate LCOV report
       shell: bash
       run: |
         set -euxo pipefail
-        attempts=0
-        until cargo tarpaulin --verbose --workspace --all-features --doc --timeout 120 --out Xml --fail-under 75; do
-          attempts=$((attempts+1))
-          if [ "$attempts" -ge 3 ]; then
-            echo "Tarpaulin failed after $attempts attempts."
-            exit 1
-          fi
-          echo "Tarpaulin attempt $attempts failed. Retrying..."
-          sleep $((attempts*10))
-        done
-    - name: Upload coverage artifact
+        mkdir -p target/coverage
+        cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info \
+          --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
+    - name: Upload LCOV artifact
       uses: actions/upload-artifact@v4
       with:
-        name: coverage-xml
-        path: ./cobertura.xml
+        name: coverage-lcov
+        path: target/coverage/lcov.info
 
   security:
     name: Security audit
