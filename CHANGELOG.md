@@ -51,6 +51,10 @@
 - `README.md` now links to the Benchmarks workflow runs page under "Latest CI Benchmarks" for quick artifact access.
 - `docs/GUIDELINES.md` now references `CONTRIBUTING.md` for detailed benchmarking and comparison guidance so contributors can find it quickly.
 - Coverage job in `.github/workflows/ci.yml` now includes doctests and all features for tarpaulin (`cargo tarpaulin --workspace --all-features --doc`), improving measured coverage without code changes.
+- Coverage job hardened against transient rustup and network issues:
+  - Adds cargo cache for registry/git/target to reduce downloads.
+  - Adds a rustup component warmup with retries for `rust-std-x86_64-unknown-linux-gnu`.
+  - Wraps the tarpaulin invocation in a bounded retry loop to mitigate intermittent failures on hosted runners.
 - Cross-platform CI in `.github/workflows/bench.yml` now runs `cargo test` without `--all-features` to avoid executing bench-gated tests on macOS/Windows while still performing an `--all-features` build for compilation coverage. This prevents benchmark-style assertions from causing failures on slower or more variable runners.
 
 ### Fixed
