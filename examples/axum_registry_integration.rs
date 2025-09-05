@@ -7,9 +7,9 @@
 //! Run with:
 //!   cargo run --example axum_registry_integration --release
 
-use axum::{routing::get, Json, Router};
+use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use axum::body::{Body, to_bytes};
+use axum::{routing::get, Json, Router};
 use serde_json::json;
 use std::time::Duration;
 use tower::util::ServiceExt; // for `oneshot`
