@@ -255,17 +255,19 @@ jobs:
         else
           echo "No estimates.json files found yet."
         fi
-    - name: Aggregate Criterion results to custom NDJSON (smaller is better)
+    - name: Aggregate Criterion results to custom JSON (smaller is better)
       shell: bash
       id: aggregate
       run: |
         set -euo pipefail
-        OUT=criterion-summary.ndjson
+        OUT=criterion-summary.json
         : > "$OUT"
         shopt -s globstar nullglob
         found=0
         # Criterion v0.5 typically writes to target/criterion/**/new/estimates.json
         # Older versions may write to target/criterion/**/estimates.json
+        echo '[' >> "$OUT"
+        first=true
         for f in target/criterion/**/new/estimates.json target/criterion/**/estimates.json; do
           [ -f "$f" ] || continue
           found=1
@@ -281,8 +283,14 @@ jobs:
           if [ -z "$mean" ] || [ "$mean" = "null" ]; then
             mean=0
           fi
-          printf '{"name":"%s","value":%s,"unit":"ns/op"}\n' "$name" "$mean" >> "$OUT"
+          if [ "$first" = true ]; then
+            first=false
+          else
+            echo ',' >> "$OUT"
+          fi
+          printf '{"name":"%s","value":%s,"unit":"ns/op"}' "$name" "$mean" >> "$OUT"
         done
+        echo ']' >> "$OUT"
         if [ "$found" -eq 0 ]; then
           echo "No Criterion estimates found under target/criterion/**/(new/)estimates.json" >&2
           echo "Directory tree:" >&2
@@ -298,8 +306,8 @@ jobs:
       with:
         name: Criterion
         tool: 'customSmallerIsBetter'
-        # Path to aggregated Criterion summary in NDJSON format (one JSON per line)
-        output-file-path: 'criterion-summary.ndjson'
+        # Path to aggregated Criterion summary in JSON array format
+        output-file-path: 'criterion-summary.json'
         github-token: ${{ secrets.GITHUB_TOKEN }}
         auto-push: ${{ github.ref == 'refs/heads/main' }}
         # Store results on gh-pages branch under benchmark-data/
