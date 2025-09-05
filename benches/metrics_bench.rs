@@ -108,6 +108,27 @@ fn rate_meter_benchmarks(c: &mut Criterion) {
         b.iter(|| rate_meter.rate())
     });
 
+    // High-contention benchmark: concurrent tick_n across multiple threads
+    group.bench_function("tick_n_concurrent_4_threads", |b| {
+        b.iter(|| {
+            let meter = Arc::new(RateMeter::new());
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let meter = Arc::clone(&meter);
+                    std::thread::spawn(move || {
+                        for _ in 0..1000 {
+                            meter.tick_n(5);
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        })
+    });
+
     group.finish();
 }
 
