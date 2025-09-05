@@ -103,6 +103,41 @@ cargo test --features bench-tests -- --ignored
 
 We compile-check Rust code blocks in `docs/API.md` using `doc-comment` in `tests/api_md_doctest.rs`. Use `no_run` on examples that require async runtimes or external services.
 
+## Coverage
+
+This project uses `cargo-llvm-cov` for coverage locally and in CI. Line coverage threshold is enforced at 85%.
+
+- Install:
+  ```bash
+  cargo install cargo-llvm-cov
+  rustup component add llvm-tools-preview
+  ```
+
+- Quick summary (workspace):
+  ```bash
+  cargo llvm-cov --summary-only --workspace \
+    --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
+  ```
+
+- Generate LCOV for tooling (e.g., Codecov) at `target/coverage/lcov.info`:
+  ```bash
+  cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info \
+    --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
+  ```
+
+- Generate HTML report for local review:
+  ```bash
+  cargo llvm-cov --workspace --html --output-dir target/coverage/html \
+    --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
+  open target/coverage/html/index.html # macOS
+  ```
+
+### CI Behavior
+
+- CI runs coverage with `cargo-llvm-cov` and enforces `--fail-under-lines 85`.
+- LCOV artifact is uploaded as `coverage-lcov` containing `target/coverage/lcov.info`.
+- Benchmark-gated tests are not required for coverage and remain ignored by default.
+
 ## Comparing Criterion Results
 
 There are two recommended approaches:

@@ -11,6 +11,11 @@
 ## [Unreleased]
 
 ### Added
+- Targeted unit tests increasing coverage for critical modules:
+  - `src/adaptive.rs`: time-based interval sampling and sampling percentage stats.
+  - `src/gauge.rs`: validation errors for `try_*`, overflow paths, and EMA alpha clamping at boundaries.
+  - `src/timer.rs`: empty batch handling, nested RAII timers, and non-negative `rate_per_second`.
+  - `src/registry.rs`: duplicate name independence across types, clear semantics, and concurrent singleton per name.
 - Non-panicking `try_` variants for core metric operations returning `Result<T, MetricsError>`:
   - `Counter`: `try_inc`, `try_add`, `try_set`, `try_fetch_add`, `try_inc_and_get` (overflow-checked)
   - `Gauge`: `try_set`, `try_add`, `try_sub`, `try_set_max`, `try_set_min` (rejects non-finite values; overflow-checked)
@@ -44,6 +49,8 @@
       - `docs/k8s/helm/app-chart/templates/prometheusrule.yaml`
 
 ### Changed
+- CI Coverage switched from tarpaulin to `cargo-llvm-cov` with enforced threshold `--fail-under-lines 85` and LCOV artifact upload (`coverage-lcov` -> `target/coverage/lcov.info`).
+- `CONTRIBUTING.md` updated with a new Coverage section describing local/CI usage of `cargo-llvm-cov`, thresholds, and how to generate LCOV/HTML reports.
 - `README.md` Benchmarks section now explicitly references Criterion and adds:
   - "Interpreting Criterion Results" guidance.
   - "CI Artifacts" subsection describing smoke and nightly artifact names and locations.

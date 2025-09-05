@@ -895,6 +895,69 @@ mod tests {
         assert!(debug_str.contains("Gauge"));
         assert!(debug_str.contains("42.5"));
     }
+
+    #[test]
+    fn test_try_add_validation_and_overflow() {
+        let gauge = Gauge::new();
+
+        // Invalid deltas
+        assert!(matches!(
+            gauge.try_add(f64::NAN),
+            Err(MetricsError::InvalidValue { .. })
+        ));
+        assert!(matches!(
+            gauge.try_add(f64::INFINITY),
+            Err(MetricsError::InvalidValue { .. })
+        ));
+
+        // Overflow on result becoming non-finite
+        let gauge2 = Gauge::with_value(f64::MAX / 2.0);
+        assert!(matches!(
+            gauge2.try_add(f64::MAX),
+            Err(MetricsError::Overflow)
+        ));
+    }
+
+    #[test]
+    fn test_try_set_and_min_max_validation() {
+        let gauge = Gauge::new();
+        assert!(matches!(
+            gauge.try_set(f64::NAN),
+            Err(MetricsError::InvalidValue { .. })
+        ));
+
+        // try_set_max invalid
+        assert!(matches!(
+            gauge.try_set_max(f64::INFINITY),
+            Err(MetricsError::InvalidValue { .. })
+        ));
+
+        // try_set_min invalid
+        assert!(matches!(
+            gauge.try_set_min(f64::NAN),
+            Err(MetricsError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn test_ema_alpha_boundaries() {
+        let gauge = Gauge::with_value(10.0);
+
+        // alpha < 0 should clamp to 0 -> unchanged
+        gauge.update_ema(100.0, -1.0);
+        assert_eq!(gauge.get(), 10.0);
+
+        // alpha > 1 should clamp to 1 -> equals sample
+        gauge.update_ema(100.0, 2.0);
+        assert_eq!(gauge.get(), 100.0);
+
+        // alpha 0 -> unchanged; alpha 1 -> exact sample
+        gauge.set(5.0);
+        gauge.update_ema(20.0, 0.0);
+        assert_eq!(gauge.get(), 5.0);
+        gauge.update_ema(20.0, 1.0);
+        assert_eq!(gauge.get(), 20.0);
+    }
 }
 
 #[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]

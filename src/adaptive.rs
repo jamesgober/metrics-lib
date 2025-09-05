@@ -504,4 +504,45 @@ mod tests {
         // Should be able to acquire again
         assert!(controller.try_acquire().is_some());
     }
+
+    #[test]
+    fn test_time_based_sampling_interval() {
+        // Min interval 5ms
+        let sampler = AdaptiveSampler::new(SamplingStrategy::TimeBased {
+            min_interval: 5_000_000,
+        });
+
+        // First call should sample (no prior sample)
+        assert!(sampler.should_sample());
+
+        // Immediate second call should be dropped due to interval
+        assert!(!sampler.should_sample());
+
+        // After waiting for interval, sampling allowed again
+        std::thread::sleep(Duration::from_millis(6));
+        assert!(sampler.should_sample());
+    }
+
+    #[test]
+    fn test_sampling_stats_percentage() {
+        // When no samples have occurred yet, percentage is 100%
+        let sampler_zero = AdaptiveSampler::new(SamplingStrategy::Fixed { rate: 10 });
+        let stats_zero = sampler_zero.stats();
+        assert_eq!(stats_zero.samples_taken, 0);
+        assert_eq!(stats_zero.samples_dropped, 0);
+        assert!((stats_zero.sampling_percentage() - 100.0).abs() < f64::EPSILON);
+
+        // Use time-based strategy to deterministically create 1 taken and 1 dropped
+        let sampler = AdaptiveSampler::new(SamplingStrategy::TimeBased {
+            min_interval: 5_000_000,
+        });
+
+        assert!(sampler.should_sample()); // taken += 1
+        assert!(!sampler.should_sample()); // dropped += 1 (interval not elapsed)
+
+        let stats = sampler.stats();
+        assert_eq!(stats.samples_taken, 1);
+        assert_eq!(stats.samples_dropped, 1);
+        assert!((stats.sampling_percentage() - 50.0).abs() < 0.0001);
+    }
 }

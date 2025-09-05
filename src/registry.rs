@@ -310,4 +310,68 @@ mod tests {
         assert!(counter_names.contains(&"errors".to_string()));
         assert!(gauge_names.contains(&"cpu_usage".to_string()));
     }
+
+    #[test]
+    fn test_duplicate_names_across_types_are_independent() {
+        let registry = Registry::new();
+
+        let c = registry.get_or_create_counter("same_name");
+        let g = registry.get_or_create_gauge("same_name");
+        let t = registry.get_or_create_timer("same_name");
+        let r = registry.get_or_create_rate_meter("same_name");
+
+        // All should be registered independently (4 metrics total)
+        assert_eq!(registry.metric_count(), 4);
+
+        // And they should be distinct types; at least ensure their addresses differ pairwise
+        let c_addr = Arc::as_ptr(&c) as usize;
+        let g_addr = Arc::as_ptr(&g) as usize;
+        let t_addr = Arc::as_ptr(&t) as usize;
+        let r_addr = Arc::as_ptr(&r) as usize;
+
+        assert_ne!(c_addr, g_addr);
+        assert_ne!(c_addr, t_addr);
+        assert_ne!(c_addr, r_addr);
+        assert_ne!(g_addr, t_addr);
+        assert_ne!(g_addr, r_addr);
+        assert_ne!(t_addr, r_addr);
+    }
+
+    #[test]
+    fn test_clear_then_recreate_returns_new_instances() {
+        let registry = Registry::new();
+
+        let counter_before = registry.get_or_create_counter("requests");
+        let gauge_before = registry.get_or_create_gauge("cpu");
+        assert_eq!(registry.metric_count(), 2);
+
+        // Clear the registry; previously returned Arcs still exist but registry is empty
+        registry.clear();
+        assert_eq!(registry.metric_count(), 0);
+
+        let counter_after = registry.get_or_create_counter("requests");
+        let gauge_after = registry.get_or_create_gauge("cpu");
+
+        // New instances should NOT be ptr-equal to the old ones
+        assert!(!Arc::ptr_eq(&counter_before, &counter_after));
+        assert!(!Arc::ptr_eq(&gauge_before, &gauge_after));
+    }
+
+    #[test]
+    fn test_concurrent_duplicate_registration_singleton_per_name() {
+        let registry = Arc::new(Registry::new());
+        let mut handles = vec![];
+
+        for _ in 0..16 {
+            let r = registry.clone();
+            handles.push(thread::spawn(move || r.get_or_create_timer("dup")));
+        }
+
+        let first = registry.get_or_create_timer("dup");
+        for h in handles {
+            let timer = h.join().unwrap();
+            assert!(Arc::ptr_eq(&first, &timer));
+        }
+        assert_eq!(registry.metric_count(), 1);
+    }
 }

@@ -789,6 +789,41 @@ mod tests {
         assert!(debug_str.contains("count"));
         assert!(debug_str.contains("average"));
     }
+
+    #[test]
+    fn test_empty_batch_handling() {
+        let timer = Timer::new();
+        timer.record_batch(&[]);
+        assert!(timer.is_empty());
+
+        assert!(timer.try_record_batch(&[]).is_ok());
+        assert!(timer.is_empty());
+    }
+
+    #[test]
+    fn test_nested_timers_and_rate() {
+        let timer = Timer::new();
+
+        {
+            let _outer = timer.start();
+            thread::sleep(Duration::from_millis(2));
+            {
+                let _inner = timer.start();
+                thread::sleep(Duration::from_millis(2));
+            } // inner drop -> record
+        } // outer drop -> record
+
+        // Two recordings (outer + inner)
+        assert_eq!(timer.count(), 2);
+
+        // Non-zero rate per second (age should be > 0)
+        let rate = timer.rate_per_second();
+        assert!(rate >= 0.0);
+
+        // stats.rate_per_second should mirror rate_per_second()
+        let stats = timer.stats();
+        assert!(stats.rate_per_second >= 0.0);
+    }
 }
 
 #[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
