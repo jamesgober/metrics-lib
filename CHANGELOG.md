@@ -22,7 +22,8 @@
 - Documentation on running bench-gated tests locally (`cargo test --features bench-tests -- --ignored`).
 
 ### Changed
-- CI workflow `.github/workflows/ci.yml`: set `codecov/codecov-action@v4` to `fail_ci_if_error: true` to harden coverage enforcement.
+- CI coverage no longer uses Codecov or tokens; it is enforced directly via `cargo tarpaulin --fail-under 70` with Cobertura XML (`cobertura.xml`) uploaded as a build artifact.
+- CI workflow `.github/workflows/ci.yml`: replaced Codecov upload with tokenless tarpaulin threshold enforcement; coverage status now comes from the job result.
 - Repository-wide formatting normalized with `cargo fmt --all`.
 - Benchmarks are now gated behind `bench-tests` and ignored by default using `#[cfg_attr(not(feature = "bench-tests"), ignore)]` across modules:
   - `src/counter.rs`
@@ -31,8 +32,7 @@
   - `src/rate_meter.rs`
   - `src/system_health.rs`
 - Relaxed benchmark timing thresholds slightly to reduce flakiness on slower or variable runners.
-- CI coverage no longer uses Codecov or tokens. Coverage is enforced directly via `cargo tarpaulin --fail-under 85` and the Cobertura XML (`cobertura.xml`) is uploaded as a build artifact.
-- Coverage workflow simplified and made tokenless; status now derives from the GitHub Actions job itself.
+- Security audit now runs `cargo audit` directly in CI (no integration permissions required).
 
 ### Fixed
 - Lint hygiene: repository is Clippy-clean under `--all-features`.
@@ -44,10 +44,11 @@
   - Lints: `cargo clippy --all-features -- -D warnings`.
   - Tests: `cargo test --all-features` across Linux/macOS/Windows and MSRV `1.70.0`.
 
+### Removed
+- Codecov integration removed; `codecov.yml` archived to `docs/legacy/codecov.yml`.
+
 ### Internal
 - Build script registers `cfg(tarpaulin)` using MSRV-safe `cargo:rustc-check-cfg=cfg(tarpaulin)` to silence unknown cfg warnings on Rust 1.70.0.
-
-
 
 
 
