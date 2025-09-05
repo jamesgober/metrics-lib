@@ -494,7 +494,12 @@ impl SystemHealth {
         if let Some(pid) = self.pid {
             guard.refresh_process(pid);
             if let Some(proc_) = guard.process(pid) {
-                return Ok(proc_.cpu_usage() as f64);
+                // sysinfo's cpu_usage can exceed 100 on multi-core hosts.
+                // Normalize to per-core percentage (0..100).
+                let raw = proc_.cpu_usage() as f64;
+                let cores = num_cpus::get() as f64;
+                let norm = if cores > 0.0 { raw / cores } else { raw };
+                return Ok(norm.clamp(0.0, 100.0));
             }
         }
         Ok(0.0)
