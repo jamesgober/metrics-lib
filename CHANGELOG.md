@@ -10,6 +10,19 @@
 
 ## [Unreleased]
 
+### CI
+- Added Docs job that builds rustdoc with warnings treated as errors (`RUSTDOCFLAGS=-D warnings`) and uploads artifacts.
+- Coverage is enforced tokenlessly via tarpaulin with a gate set to `--fail-under 75`; Cobertura XML (`cobertura.xml`) is uploaded as a build artifact.
+- Main test matrix runs with default features (no benches) to prevent benchmark-style tests from running on CI by default.
+- Security audit runs `cargo audit` directly (no integration permissions required).
+
+### Documentation
+- Ensured test and docs commands in README cover bench-gated tests and Criterion benches.
+
+### Housekeeping
+- Removed Codecov integration in CI; legacy `codecov.yml` archived to `docs/legacy/codecov.yml`.
+- Minor workflow refactors and naming clarifications in `.github/workflows/ci.yml`.
+
 
 <br>
 
@@ -33,6 +46,8 @@
   - `src/system_health.rs`
 - Relaxed benchmark timing thresholds slightly to reduce flakiness on slower or variable runners.
 - Security audit now runs `cargo audit` directly in CI (no integration permissions required).
+- CI coverage no longer uses Codecov or tokens. Coverage is enforced directly via `cargo tarpaulin --fail-under 85` and the Cobertura XML (`cobertura.xml`) is uploaded as a build artifact.
+- Coverage workflow simplified and made tokenless; status now derives from the GitHub Actions job itself.
 
 ### Fixed
 - Lint hygiene: repository is Clippy-clean under `--all-features`.
@@ -49,6 +64,8 @@
 
 ### Internal
 - Build script registers `cfg(tarpaulin)` using MSRV-safe `cargo:rustc-check-cfg=cfg(tarpaulin)` to silence unknown cfg warnings on Rust 1.70.0.
+
+
 
 
 

@@ -15,3 +15,31 @@
     </sup>
 </div>
 <br>
+
+## Table of Contents
+- [Installation](#installation)
+
+
+<br><br>
+
+## Installation
+
+### Default Installation
+
+#### Install Manually
+
+Add this to your `Cargo.toml`:
+```toml
+[dependencies]
+metrics-lib = "0.8.0"
+```
+
+<br>
+
+#### Install via Terminal
+```bash
+# Basic installation
+cargo add metrics-lib
+```
+
+<br>

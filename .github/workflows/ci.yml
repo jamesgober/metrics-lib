@@ -73,7 +73,7 @@ jobs:
     - name: Install cargo-tarpaulin
       uses: taiki-e/install-action@cargo-tarpaulin
     - name: Generate coverage (XML) with threshold
-      run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml --fail-under 70
+      run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml --fail-under 75
     - name: Upload coverage artifact
       uses: actions/upload-artifact@v4
       with:
@@ -109,3 +109,61 @@ jobs:
       run: cargo fmt --all -- --check
     - name: Clippy (MSRV)
       run: cargo clippy --all-features -- -D warnings
+
+  docs:
+    name: Docs (rustdoc warnings denied)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build documentation
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --no-deps
+    - name: Upload docs artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: docs
+        path: target/doc
+
+  build-matrix:
+    name: Cross-Platform Compatibility
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build: [default, all-features, no-default-features]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build (default features)
+      if: matrix.build == 'default'
+      run: cargo build --verbose
+    - name: Build (all features)
+      if: matrix.build == 'all-features'
+      run: cargo build --verbose --all-features
+    - name: Build (no default features)
+      if: matrix.build == 'no-default-features'
+      run: cargo build --verbose --no-default-features
+
+  publish-dry-run:
+    name: Publish (dry run)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cargo package and publish dry-run
+      run: |
+        cargo package
+        cargo publish --dry-run
