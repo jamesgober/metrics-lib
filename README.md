@@ -39,10 +39,10 @@
 
 **World-class performance** with industry-leading benchmarks:
 
-- **Counter**: 17.26ns/op (57.93M ops/sec) - 5x faster than competitors
-- **Gauge**: 0.23ns/op (4303.60M ops/sec) - 30x faster than competitors  
-- **Timer**: 45.66ns/op (21.90M ops/sec) - 10x faster than competitors
-- **Memory**: 64 bytes per metric (cache-aligned, 4x smaller footprint)
+- **Counter**: 4.93ns/op (202.84M ops/sec)
+- **Gauge**: 0.53ns/op (1886.79M ops/sec)  
+- **Timer**: 10.87ns/op (91.99M ops/sec)
+- **Memory**: 64 bytes per metric (cache-aligned)
 
 <hr>
 
@@ -318,11 +318,13 @@ Benchmark history (GitHub Pages):
 
 **Sample Results** (M1 MacBook Pro):
 ```
-Counter Increment: 17.26 ns/op (57.93 M ops/sec)
-Gauge Set:         0.23 ns/op (4303.60 M ops/sec)
-Timer Record:      45.66 ns/op (21.90 M ops/sec)
+Counter Increment: 4.93 ns/op (202.84 M ops/sec)
+Gauge Set:         0.53 ns/op (1886.79 M ops/sec)
+Timer Record:      10.87 ns/op (91.99 M ops/sec)
 Mixed Operations:  106.39 ns/op (9.40 M ops/sec)
 ```
+
+<sub>Notes: Latest numbers taken from local Criterion means under `target/criterion/**/new/estimates.json`. Actual throughput varies by CPU and environment; use the GitHub Pages benchmark history for trends.</sub>
 
 ## Architecture
 
@@ -398,10 +400,13 @@ cargo test --target x86_64-unknown-linux-gnu
 
 | Library | Counter ns/op | Gauge ns/op | Timer ns/op | Memory/Metric | Features |
 |---------|---------------|-------------|-------------|---------------|----------|
-| **metrics-lib** | **17.26** | **0.23** | **45.66** | **64B** | ✅ Async, Circuit breakers, System monitoring |
+| **metrics-lib** | **4.93** | **0.53** | **10.87** | **64B** | ✅ Async, Circuit breakers, System monitoring |
 | metrics-rs | 85.2 | 23.1 | 167.8 | 256B | ⚠️ No circuit breakers |
 | prometheus | 156.7 | 89.4 | 298.3 | 1024B+ | ⚠️ HTTP overhead |
 | statsd | 234.1 | 178.9 | 445.2 | 512B+ | ⚠️ Network overhead |
+
+<hr>
+<br>
 
 ## Configuration
 
