@@ -175,6 +175,10 @@ impl RateMeter {
     }
 
     /// Get current rate (events per second in current window)
+    ///
+    /// Note: This method is `#[must_use]`. The returned rate conveys the
+    /// current measurement; ignoring it may indicate a logic bug.
+    #[must_use]
     #[inline]
     pub fn rate(&self) -> f64 {
         let now = self.get_unix_timestamp();
@@ -185,12 +189,19 @@ impl RateMeter {
     }
 
     /// Get rate per second
+    ///
+    /// Note: `#[must_use]` — see [`rate`].
+    #[must_use]
     #[inline]
     pub fn rate_per_second(&self) -> f64 {
         self.rate()
     }
 
     /// Get rate per minute
+    ///
+    /// Note: `#[must_use]`. The returned value reflects the current window
+    /// state; dropping it may hide incorrect flow.
+    #[must_use]
     #[inline]
     pub fn rate_per_minute(&self) -> f64 {
         let now = self.get_unix_timestamp();
@@ -201,6 +212,10 @@ impl RateMeter {
     }
 
     /// Get rate per hour
+    ///
+    /// Note: `#[must_use]`. The returned value reflects the current window
+    /// state; dropping it may hide incorrect flow.
+    #[must_use]
     #[inline]
     pub fn rate_per_hour(&self) -> f64 {
         let now = self.get_unix_timestamp();
@@ -211,18 +226,30 @@ impl RateMeter {
     }
 
     /// Get total events since creation
+    ///
+    /// Note: `#[must_use]`. Total is often used for invariants and sanity
+    /// checks; ignoring it may indicate a bug.
+    #[must_use]
     #[inline(always)]
     pub fn total(&self) -> u64 {
         self.total_events.load(Ordering::Relaxed)
     }
 
     /// Check if rate exceeds limit
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow; if you
+    /// don't branch on it, consider whether the call is needed.
+    #[must_use]
     #[inline]
     pub fn exceeds_rate(&self, limit: f64) -> bool {
         self.rate() > limit
     }
 
     /// Check if we can allow N more events without exceeding limit
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow; if you
+    /// don't branch on it, consider whether the call is needed.
+    #[must_use]
     #[inline]
     pub fn can_allow(&self, n: u32, limit: f64) -> bool {
         let current_rate = self.rate();
@@ -230,6 +257,10 @@ impl RateMeter {
     }
 
     /// Rate limiting - tick only if under limit
+    ///
+    /// Note: `#[must_use]`. The boolean result indicates whether a tick was
+    /// recorded; ignoring it may hide throttling decisions.
+    #[must_use]
     #[inline]
     pub fn tick_if_under_limit(&self, limit: f64) -> bool {
         if self.can_allow(1, limit) {
@@ -265,6 +296,10 @@ impl RateMeter {
     }
 
     /// Burst rate limiting - allow N events if under limit
+    ///
+    /// Note: `#[must_use]`. The boolean result indicates whether a burst was
+    /// recorded; ignoring it may hide throttling decisions.
+    #[must_use]
     #[inline]
     pub fn tick_burst_if_under_limit(&self, n: u32, limit: f64) -> bool {
         if self.can_allow(n, limit) {
@@ -290,6 +325,10 @@ impl RateMeter {
     }
 
     /// Get comprehensive statistics
+    ///
+    /// Note: `#[must_use]`. Statistics summarize current state; dropping the
+    /// result may indicate a logic bug.
+    #[must_use]
     pub fn stats(&self) -> RateStats {
         let now = self.get_unix_timestamp();
         self.update_windows(now, 0);
@@ -327,12 +366,19 @@ impl RateMeter {
     }
 
     /// Get age since creation
+    ///
+    /// Note: `#[must_use]`. Age is frequently used in rate calculations; don't
+    /// call this for side effects.
+    #[must_use]
     #[inline]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
     /// Check if rate meter is empty (no events recorded)
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow.
+    #[must_use]
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.total() == 0

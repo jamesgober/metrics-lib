@@ -244,18 +244,30 @@ impl Timer {
     }
 
     /// Get current count of samples
+    ///
+    /// Note: `#[must_use]`. The count informs control flow and sanity checks;
+    /// ignoring it may indicate a logic bug.
+    #[must_use]
     #[inline(always)]
     pub fn count(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }
 
     /// Get total accumulated time
+    ///
+    /// Note: `#[must_use]`. The total duration is commonly used for reporting
+    /// and ratios; dropping it may indicate a bug.
+    #[must_use]
     #[inline]
     pub fn total(&self) -> Duration {
         Duration::from_nanos(self.total_nanos.load(Ordering::Relaxed))
     }
 
     /// Get average duration
+    ///
+    /// Note: `#[must_use]`. The average is a derived metric; call this only
+    /// when you consume the result.
+    #[must_use]
     #[inline]
     pub fn average(&self) -> Duration {
         let count = self.count();
@@ -268,6 +280,9 @@ impl Timer {
     }
 
     /// Get minimum duration
+    ///
+    /// Note: `#[must_use]`. Often used for alerting/thresholds.
+    #[must_use]
     #[inline]
     pub fn min(&self) -> Duration {
         let min_ns = self.min_nanos.load(Ordering::Relaxed);
@@ -279,6 +294,9 @@ impl Timer {
     }
 
     /// Get maximum duration
+    ///
+    /// Note: `#[must_use]`. Often used for alerting/thresholds.
+    #[must_use]
     #[inline]
     pub fn max(&self) -> Duration {
         Duration::from_nanos(self.max_nanos.load(Ordering::Relaxed))
@@ -294,6 +312,10 @@ impl Timer {
     }
 
     /// Get comprehensive statistics
+    ///
+    /// Note: `#[must_use]`. Statistics summarize current state; dropping the
+    /// result may indicate a logic bug.
+    #[must_use]
     pub fn stats(&self) -> TimerStats {
         let count = self.count();
         let total_ns = self.total_nanos.load(Ordering::Relaxed);
@@ -334,18 +356,28 @@ impl Timer {
     }
 
     /// Get age since creation
+    ///
+    /// Note: `#[must_use]`. Age is used in rate calculations; don't call for
+    /// side effects.
+    #[must_use]
     #[inline]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
     /// Check if timer has recorded any samples
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow.
+    #[must_use]
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.count() == 0
     }
 
     /// Get samples per second rate
+    ///
+    /// Note: `#[must_use]`. Derived metric; consume the result.
+    #[must_use]
     #[inline]
     pub fn rate_per_second(&self) -> f64 {
         let age_seconds = self.age().as_secs_f64();
@@ -434,6 +466,10 @@ unsafe impl Sync for Timer {}
 /// Running timer implementation (RAII)
 impl<'a> RunningTimer<'a> {
     /// Get elapsed time without stopping the timer
+    ///
+    /// Note: `#[must_use]`. The elapsed duration is typically used in logic or
+    /// reporting; ignoring it may indicate a bug.
+    #[must_use]
     #[inline]
     pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()

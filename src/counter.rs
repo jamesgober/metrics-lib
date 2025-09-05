@@ -161,7 +161,6 @@ impl Counter {
     /// Atomic compare-and-swap
     ///
     /// Returns Ok(previous_value) if successful, Err(current_value) if failed
-    #[must_use]
     #[inline]
     pub fn compare_and_swap(&self, expected: u64, new: u64) -> core::result::Result<u64, u64> {
         match self
@@ -192,7 +191,6 @@ impl Counter {
     /// assert_eq!(c.try_fetch_add(1).unwrap(), u64::MAX - 1);
     /// assert!(matches!(c.try_fetch_add(1), Err(MetricsError::Overflow)));
     /// ```
-    #[must_use]
     #[inline]
     pub fn try_fetch_add(&self, amount: u64) -> Result<u64> {
         if amount == 0 {

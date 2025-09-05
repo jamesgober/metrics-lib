@@ -154,6 +154,10 @@ impl Gauge {
     }
 
     /// Get current value - single atomic load
+    ///
+    /// Note: `#[must_use]`. The returned value represents current gauge state;
+    /// ignoring it may indicate a logic bug.
+    #[must_use]
     #[inline(always)]
     pub fn get(&self) -> f64 {
         f64::from_bits(self.value.load(Ordering::Relaxed))
@@ -455,6 +459,10 @@ impl Gauge {
     }
 
     /// Get comprehensive statistics
+    ///
+    /// Note: `#[must_use]`. Statistics summarize current state; dropping the
+    /// result may indicate a logic bug.
+    #[must_use]
     pub fn stats(&self) -> GaugeStats {
         GaugeStats {
             value: self.get(),
@@ -464,30 +472,46 @@ impl Gauge {
     }
 
     /// Get age since creation
+    ///
+    /// Note: `#[must_use]`. Age is often used for derived metrics; don't call
+    /// this for side effects.
+    #[must_use]
     #[inline]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
     /// Check if gauge is zero
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow.
+    #[must_use]
     #[inline]
     pub fn is_zero(&self) -> bool {
         self.get() == 0.0
     }
 
     /// Check if value is positive
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow.
+    #[must_use]
     #[inline]
     pub fn is_positive(&self) -> bool {
         self.get() > 0.0
     }
 
     /// Check if value is negative
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow.
+    #[must_use]
     #[inline]
     pub fn is_negative(&self) -> bool {
         self.get() < 0.0
     }
 
     /// Check if value is finite (not NaN or infinity)
+    ///
+    /// Note: `#[must_use]`. The boolean result determines control flow.
+    #[must_use]
     #[inline]
     pub fn is_finite(&self) -> bool {
         self.get().is_finite()
