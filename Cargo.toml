@@ -134,3 +134,4 @@ tokio = { version = "1.0", features = ["full"] }
 rand = "0.8"
 anyhow = "1"
 tower = "0.5"
+crossbeam-channel = "0.5"
