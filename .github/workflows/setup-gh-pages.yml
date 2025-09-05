@@ -229,7 +229,7 @@ jobs:
               return false;
             }
             function load(){
-              var onDataDir = location.pathname.endsWith('/benchmark-data/') || location.pathname.indexOf('/benchmark-data/index.html')>=0;
+              var onDataDir = /\/benchmark-data(\/?|\/index\.html)$/.test(location.pathname);
               var url = onDataDir ? './data.js' : './benchmark-data/data.js';
               // First try loading as a script to expose any globals the action may set
               var s = document.createElement('script');
@@ -333,7 +333,12 @@ jobs:
             <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha256-6u4u1nHfH8a6YpN2XGJwH4b6blYzK2sCk5o0Z2d1Ssk=" crossorigin="anonymous"></script>
           </head>
           <body>
-            <h1>metrics-lib Benchmark Dashboard</h1>
+            <h1 align="center">
+              <img width="90px" height="auto" src="https://raw.githubusercontent.com/jamesgober/jamesgober/main/media/icons/hexagon-3.svg" alt="Triple Hexagon">
+              <br>
+              <b>metrics-lib</b>
+              <sup>Benchmark Dashboard</sup>
+            </h1>
             <p class="note">This page hosts benchmark history produced by <code>github-action-benchmark</code>.</p>
             <ul>
               <li>Raw data directory: <a href="./benchmark-data/">benchmark-data/</a></li>
