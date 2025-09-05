@@ -58,6 +58,7 @@ gauge     = [] # Enables gauge.
 timer     = [] # Enables timer.
 meter     = [] # Enables rate meter.
 sample    = [] # Enable statistical sampling..
+bench-tests = [] # Enable running benchmark-style tests in CI or locally
 
 # Enables async support (requires Tokio).
 async       = ["dep:tokio"] 
@@ -115,5 +116,5 @@ parking_lot = "0.12"
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
-criterion = "0.4"
+criterion = { version = "0.4", default-features = false }
 tokio-test = "0.4"

@@ -733,11 +733,11 @@ mod tests {
     }
 }
 
-#[cfg(test)]
 mod benchmarks {
     use super::*;
     use std::time::Instant;
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_gauge_set() {
         let gauge = Gauge::new();
@@ -759,6 +759,7 @@ mod benchmarks {
         assert_eq!(gauge.get(), (iterations - 1) as f64);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_gauge_add() {
         let gauge = Gauge::new();
@@ -780,6 +781,7 @@ mod benchmarks {
         assert_eq!(gauge.get(), iterations as f64);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_gauge_get() {
         let gauge = Gauge::with_value(42.5);

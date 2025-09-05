@@ -775,6 +775,7 @@ mod benchmarks {
     use super::*;
     use std::time::Instant;
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_rate_meter_tick() {
         let meter = RateMeter::new();
@@ -796,6 +797,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / (iterations as u128) < 400);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_rate_meter_tick_n() {
         let meter = RateMeter::new();
@@ -816,6 +818,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / (iterations as u128) < 500);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_rate_calculation() {
         let meter = RateMeter::new();
@@ -840,6 +843,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / iterations < 300);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_api_rate_limiter() {
         let limiter = specialized::ApiRateLimiter::new(1_000_000); // High limit

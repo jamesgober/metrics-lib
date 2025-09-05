@@ -687,6 +687,7 @@ mod benchmarks {
     use super::*;
     use std::time::Instant;
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_timer_record() {
         let timer = Timer::new();
@@ -709,6 +710,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / (iterations as u128) < 300);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_running_timer() {
         let timer = Timer::new();
@@ -733,6 +735,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / (iterations as u128) < 1500);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_timer_stats() {
         let timer = Timer::new();

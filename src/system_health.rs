@@ -790,6 +790,7 @@ mod benchmarks {
     use super::*;
     use std::time::Instant;
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_quick_check() {
         let health = SystemHealth::new();
@@ -810,6 +811,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / iterations < 200);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_cached_metrics() {
         let health = SystemHealth::new();
@@ -832,6 +834,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / iterations < 1000);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_force_update() {
         let health = SystemHealth::new();

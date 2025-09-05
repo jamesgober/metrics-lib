@@ -413,6 +413,7 @@ mod benchmarks {
     use super::*;
     use std::time::Instant;
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_counter_increment() {
         let counter = Counter::new();
@@ -434,6 +435,7 @@ mod benchmarks {
         assert_eq!(counter.get(), iterations as u64);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_counter_add() {
         let counter = Counter::new();
@@ -454,6 +456,7 @@ mod benchmarks {
         assert!(elapsed.as_nanos() / (iterations as u128) < 200);
     }
 
+    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
     fn bench_counter_get() {
         let counter = Counter::new();
