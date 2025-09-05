@@ -160,6 +160,12 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
+    - name: Install jq (for Criterion JSON aggregation)
+      run: |
+        if ! command -v jq >/dev/null 2>&1; then
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+        fi
     - name: Cache
       uses: actions/cache@v4
       with:
@@ -240,12 +246,24 @@ jobs:
     - name: Run Criterion benchmarks
       run: |
         cargo bench --all-features
-    - name: Aggregate Criterion results to custom JSON
+    - name: Inspect Criterion output (debug)
       run: |
         set -euo pipefail
-        OUT=criterion-summary.json
-        echo '{"benchmarks":[' > "$OUT"
-        first=true
+        echo "Listing target/criterion contents (if any):"
+        ls -R target/criterion || true
+        echo "Preview an estimates.json if present:"
+        first=$(ls target/criterion/*/new/estimates.json 2>/dev/null | head -n1 || true)
+        if [ -n "$first" ]; then
+          echo "Showing: $first"
+          head -n 50 "$first"
+        else
+          echo "No estimates.json files found yet."
+        fi
+    - name: Aggregate Criterion results to custom NDJSON (smaller is better)
+      run: |
+        set -euo pipefail
+        OUT=criterion-summary.ndjson
+        : > "$OUT"
         shopt -s nullglob
         for f in target/criterion/*/new/estimates.json; do
           benchdir=$(dirname "$(dirname "$f")")
@@ -255,21 +273,19 @@ jobs:
           if [ -z "$mean" ] || [ "$mean" = "null" ]; then
             mean=0
           fi
-          if [ "$first" = true ]; then
-            first=false
-          else
-            echo ',' >> "$OUT"
-          fi
-          printf '{"name":"%s","value":%s,"unit":"ns/op"}' "$name" "$mean" >> "$OUT"
+          printf '{"name":"%s","value":%s,"unit":"ns/op"}\n' "$name" "$mean" >> "$OUT"
         done
-        echo ']}' >> "$OUT"
+        if [ ! -s "$OUT" ]; then
+          echo "No Criterion estimates found under target/criterion/*/new/estimates.json" >&2
+          exit 1
+        fi
     - name: Benchmark Regression Check
       uses: benchmark-action/github-action-benchmark@v1
       with:
         name: Criterion
         tool: 'customSmallerIsBetter'
-        # Path to aggregated Criterion summary in custom JSON format
-        output-file-path: 'criterion-summary.json'
+        # Path to aggregated Criterion summary in NDJSON format (one JSON per line)
+        output-file-path: 'criterion-summary.ndjson'
         github-token: ${{ secrets.GITHUB_TOKEN }}
         auto-push: ${{ github.ref == 'refs/heads/main' }}
         # Store results on gh-pages branch under benchmark-data/
