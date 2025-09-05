@@ -1,0 +1,13 @@
+groups:
+  - name: metrics-lib.rules
+    interval: 30s
+    rules:
+      - record: job:http_requests:rate5m
+        expr: sum by (job) (rate(http_requests_total[5m]))
+      - record: job:operation_duration:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (job, le) (rate(operation_duration_bucket[5m]))
+          )
+      - record: job:broker_consume:rate5m
+        expr: sum by (job) (rate(broker_messages_total[5m]))
