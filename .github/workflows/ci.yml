@@ -237,9 +237,9 @@ jobs:
           ~/.cargo/git
           target
         key: bench-regression-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run Criterion benchmarks (short)
+    - name: Run Criterion benchmarks
       run: |
-        cargo bench --all-features -- --warm-up-time 0.5 --measurement-time 1.5 --sample-size 50
+        cargo bench --all-features
     - name: Benchmark Regression Check
       uses: benchmark-action/github-action-benchmark@v1
       with:

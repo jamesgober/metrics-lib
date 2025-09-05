@@ -1,9 +1,7 @@
 #![allow(dead_code)]
-
 // Chaos Testing Suite: concurrent access and system pressure
 // Gated to avoid CI flakiness and long runtimes by default.
 // Run with: cargo test --features bench-tests -- --ignored --test chaos_tests
-
 #![cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
 
 use std::sync::Arc;
@@ -64,7 +62,10 @@ fn chaos_concurrent_counter_and_gauge_updates() {
     assert!(gval.is_finite());
 
     // Prevent optimizer dropping values
-    eprintln!("chaos checksum={}, counter={}, gauge={}", checksum, cval, gval);
+    eprintln!(
+        "chaos checksum={}, counter={}, gauge={}",
+        checksum, cval, gval
+    );
 }
 
 #[ignore]

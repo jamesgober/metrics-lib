@@ -1,9 +1,7 @@
 #![allow(dead_code)]
-
 // Longevity Tests: sustained 1B+ operations (configurable)
 // Gated and ignored by default to avoid CI timeouts.
 // Run with: OPS=1000000000 cargo test --features bench-tests -- --ignored --test longevity_tests
-
 #![cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
 
 use std::env;
@@ -12,7 +10,10 @@ use std::time::{Duration, Instant};
 use metrics_lib::{init, metrics};
 
 fn parse_ops(default_ops: u64) -> u64 {
-    env::var("OPS").ok().and_then(|s| s.parse().ok()).unwrap_or(default_ops)
+    env::var("OPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default_ops)
 }
 
 #[ignore]
