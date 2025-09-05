@@ -118,3 +118,4 @@ parking_lot = "0.12"
 [dev-dependencies]
 criterion = { version = "0.4", default-features = false }
 tokio-test = "0.4"
+half = "=2.2.1" # Pin transitive resolution (via plotters) to MSRV-compatible half version

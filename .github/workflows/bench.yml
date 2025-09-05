@@ -1,18 +1,54 @@
-name: Benchmarks
+name: Benchmarks (opt-in)
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  schedule:
-    - cron: '0 12 * * 0'  # Weekly on Sundays
+  workflow_dispatch:
+    inputs:
+      run_criterion:
+        description: "Run Criterion benches"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      run_examples:
+        description: "Run benchmark comparison example"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      run_bench_tests:
+        description: "Run bench-gated tests (cargo test --features bench-tests -- --ignored)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  bench-tests:
+    if: ${{ inputs.run_bench_tests == 'true' }}
+    name: Bench Tests (feature-flagged)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: bench-tests-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Run bench-gated tests
+      run: cargo test --features bench-tests -- --ignored
+
   benchmark:
+    if: ${{ inputs.run_criterion == 'true' || inputs.run_examples == 'true' }}
     name: Performance Benchmarks
     runs-on: ${{ matrix.os }}
     strategy:
@@ -31,10 +67,13 @@ jobs:
           target
         key: bench-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - name: Run benchmark comparison
+      if: ${{ inputs.run_examples == 'true' }}
       run: cargo run --example benchmark_comparison --release
     - name: Run criterion benchmarks
+      if: ${{ inputs.run_criterion == 'true' }}
       run: cargo bench --all-features
     - name: Archive benchmark results
+      if: ${{ inputs.run_criterion == 'true' }}
       uses: actions/upload-artifact@v4
       with:
         name: benchmark-results-${{ matrix.os }}

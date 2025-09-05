@@ -733,6 +733,8 @@ mod tests {
     }
 }
 
+#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
+#[allow(unused_imports)]
 mod benchmarks {
     use super::*;
     use std::time::Instant;

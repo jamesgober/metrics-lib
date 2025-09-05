@@ -21,13 +21,22 @@
 ### Added
 - Codecov configuration `codecov.yml` with project and patch coverage thresholds (target: 85%).
 - Coverage status checks integrated via Codecov for PRs and main.
+- Optional Cargo feature `bench-tests` to enable running benchmark-style tests on demand.
 
 ### Changed
 - CI workflow `.github/workflows/ci.yml`: set `codecov/codecov-action@v4` to `fail_ci_if_error: true` to harden coverage enforcement.
 - Repository-wide formatting normalized with `cargo fmt --all`.
+- Benchmarks are now gated behind `bench-tests` and ignored by default using `#[cfg_attr(not(feature = "bench-tests"), ignore)]` across modules:
+  - `src/counter.rs`
+  - `src/gauge.rs`
+  - `src/timer.rs`
+  - `src/rate_meter.rs`
+  - `src/system_health.rs`
+- Relaxed benchmark timing thresholds slightly to reduce flakiness on slower or variable runners.
 
 ### Fixed
 - Lint hygiene: repository is Clippy-clean under `--all-features`.
+- Flaky CI failures caused by strict benchmark timing assertions; benchmarks no longer run by default in CI.
 
 ### Quality Gates
 - Local and CI parity established:
