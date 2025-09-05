@@ -55,15 +55,39 @@ async fn main() -> anyhow::Result<()> {
 
     // Exercise routes in-process using tower::ServiceExt::oneshot
     // Health
-    let res = app.clone().oneshot(Request::builder().method("GET").uri("/health").body(Body::empty())?).await?;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())?,
+        )
+        .await?;
     assert_eq!(res.status(), StatusCode::OK);
 
     // Update metrics
-    let res = app.clone().oneshot(Request::builder().method("GET").uri("/metrics-demo").body(Body::empty())?).await?;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics-demo")
+                .body(Body::empty())?,
+        )
+        .await?;
     assert!(res.status().is_success());
 
     // Export JSON snapshot
-    let res = app.clone().oneshot(Request::builder().method("GET").uri("/export").body(Body::empty())?).await?;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/export")
+                .body(Body::empty())?,
+        )
+        .await?;
     assert!(res.status().is_success());
     // For demonstration, print the body; convert Bytes to JSON (cap at 64KiB)
     let bytes = to_bytes(res.into_body(), 64 * 1024).await?;
