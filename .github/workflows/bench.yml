@@ -21,13 +21,15 @@ on:
         default: "true"
         type: choice
         options: ["true", "false"]
+  schedule:
+    - cron: '0 5 * * *' # Nightly at 05:00 UTC
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   bench-tests:
-    if: ${{ inputs.run_bench_tests == 'true' }}
+    if: ${{ github.event_name == 'schedule' || inputs.run_bench_tests == 'true' }}
     name: Bench Tests (feature-flagged)
     runs-on: ubuntu-latest
     steps:
@@ -48,7 +50,7 @@ jobs:
       run: cargo test --features bench-tests -- --ignored
 
   benchmark:
-    if: ${{ inputs.run_criterion == 'true' || inputs.run_examples == 'true' }}
+    if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' || inputs.run_examples == 'true' }}
     name: Performance Benchmarks
     runs-on: ${{ matrix.os }}
     strategy:
@@ -66,18 +68,47 @@ jobs:
           ~/.cargo/git
           target
         key: bench-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Prepare CPU governor (Linux only)
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        set -euxo pipefail
+        mkdir -p "$RUNNER_TEMP"
+        GOV_BAK="$RUNNER_TEMP/governors.bak"
+        : > "$GOV_BAK"
+        for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+          if [ -f "$f" ]; then
+            echo "$f $(cat $f)" >> "$GOV_BAK"
+            echo performance | sudo tee "$f" >/dev/null || true
+          fi
+        done
+        echo "Saved governors to $GOV_BAK and set to performance where available."
     - name: Run benchmark comparison
-      if: ${{ inputs.run_examples == 'true' }}
+      if: ${{ github.event_name == 'schedule' || inputs.run_examples == 'true' }}
       run: cargo run --example benchmark_comparison --release
     - name: Run criterion benchmarks
-      if: ${{ inputs.run_criterion == 'true' }}
+      if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
       run: cargo bench --all-features
     - name: Archive benchmark results
-      if: ${{ inputs.run_criterion == 'true' }}
+      if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
       uses: actions/upload-artifact@v4
       with:
         name: benchmark-results-${{ matrix.os }}
         path: target/criterion/
+    - name: Restore CPU governor (Linux only)
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        set -euxo pipefail
+        GOV_BAK="$RUNNER_TEMP/governors.bak"
+        if [ -f "$GOV_BAK" ]; then
+          while read -r path mode; do
+            if [ -n "$path" ] && [ -n "$mode" ] && [ -f "$path" ]; then
+              echo "$mode" | sudo tee "$path" >/dev/null || true
+            fi
+          done < "$GOV_BAK"
+          echo "Restored CPU governors from $GOV_BAK."
+        else
+          echo "No governor backup found; skipping restore."
+        fi
 
   cross-platform-test:
     name: Cross-Platform Compatibility

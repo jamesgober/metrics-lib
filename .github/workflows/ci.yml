@@ -167,3 +167,29 @@ jobs:
       run: |
         cargo package
         cargo publish --dry-run
+
+  smoke-bench:
+    name: Benchmarks (smoke)
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: smoke-bench-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Run Criterion (short)
+      run: |
+        # Shorten warmup/measurement for CI speed; pass through to Criterion
+        cargo bench -- -w 0.3 -m 1.0 -n 20
+    - name: Upload Criterion reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: criterion-reports
+        path: target/criterion
