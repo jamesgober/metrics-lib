@@ -160,12 +160,6 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
-    - name: Install jq (for Criterion JSON aggregation)
-      run: |
-        if ! command -v jq >/dev/null 2>&1; then
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-        fi
     - name: Cache
       uses: actions/cache@v4
       with:
@@ -247,6 +241,7 @@ jobs:
       run: |
         cargo bench --all-features
     - name: Inspect Criterion output (debug)
+      shell: bash
       run: |
         set -euo pipefail
         echo "Listing target/criterion contents (if any):"
@@ -260,6 +255,7 @@ jobs:
           echo "No estimates.json files found yet."
         fi
     - name: Aggregate Criterion results to custom NDJSON (smaller is better)
+      shell: bash
       run: |
         set -euo pipefail
         OUT=criterion-summary.ndjson
