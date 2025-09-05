@@ -134,3 +134,6 @@ rand = "0.8"
 # Use reqwest 0.11.x with default (native-tls) to remain MSRV 1.70-compatible
 reqwest = { version = "=0.11.27", default-features = true, features = ["json"] }
 anyhow = "1"
+# Pin transitive URL stack to pre-ICU to maintain MSRV 1.70.0 in CI
+url = "=2.4.1"
+idna = "=0.3.0"
