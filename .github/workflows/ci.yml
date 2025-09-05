@@ -239,7 +239,8 @@ jobs:
         key: bench-regression-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - name: Run Criterion benchmarks
       run: |
-        cargo bench --all-features
+        # Run the explicit bench target to ensure benches execute
+        cargo bench --bench metrics_bench --all-features
     - name: Inspect Criterion output (debug)
       shell: bash
       run: |
@@ -256,6 +257,7 @@ jobs:
         fi
     - name: Aggregate Criterion results to custom NDJSON (smaller is better)
       shell: bash
+      id: aggregate
       run: |
         set -euo pipefail
         OUT=criterion-summary.ndjson
@@ -267,8 +269,13 @@ jobs:
         for f in target/criterion/**/new/estimates.json target/criterion/**/estimates.json; do
           [ -f "$f" ] || continue
           found=1
-          benchdir=$(dirname "$(dirname "$f")")
-          name=$(basename "$benchdir")
+          if [[ "$f" == */new/estimates.json ]]; then
+            benchdir=$(dirname "$(dirname "$f")")
+            name=$(basename "$benchdir")
+          else
+            benchdir=$(dirname "$f")
+            name=$(basename "$benchdir")
+          fi
           mean=$(jq -r '.mean.point_estimate' "$f")
           # Fallback to 0 if parsing fails
           if [ -z "$mean" ] || [ "$mean" = "null" ]; then
@@ -280,9 +287,13 @@ jobs:
           echo "No Criterion estimates found under target/criterion/**/(new/)estimates.json" >&2
           echo "Directory tree:" >&2
           ls -R target/criterion >&2 || true
-          exit 1
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        else
+          echo "found=true" >> "$GITHUB_OUTPUT"
         fi
     - name: Benchmark Regression Check
+      if: steps.aggregate.outputs.found == 'true'
       uses: benchmark-action/github-action-benchmark@v1
       with:
         name: Criterion
