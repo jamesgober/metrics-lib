@@ -18,84 +18,73 @@
     </sup>
 </div>
 <br>
-<h4 align="center">RUST PERFORMANCE ENGINEERING</h4><abbr title="Rust Lang"><b>Rust</b></abbr>
+<h4 align="center">RUST PERFORMANCE ENGINEERING</h4>
 <p>
-    This document defines my highly-strict development guidelines created for high-performance Rust p
+    This document contains <b>strictly enforced</b> developer guidelines created exclusively for the high-performance <abbr title="Rust Lang"><b>Rust projects</b></abbr> within <a href="https://github.com/jamesgober" title="James Gober - GitHub">my repository</a>.
     <br>
 </p>
 <p>
-    This document contains <b>STRICTLY REQUIRED</b> developer guidelines created exclusively for high-performance <abbr title="Rust Lang"><b>Rust projects</b></abbr>.
-    <br>
-    These guidelines set tight boundaries with strict expectations which require 
-     development and <b>code contributions</b>.
-    
-    that each developer and <b>code contribution</b>, or any modifications made to  attempts made, or intended for any <abbr title="Rust Lang"><b>Rust project</b></abbr>
-    
-    
-     that all <b>code contributions</b> to <abbr title="Rust Lang"><b>Rust projects</b></abbr> within <a href="https://github.com/jamesgober" title="James Gober - GitHub">my repository</a> (<a href="https://github.com/jamesgober" title="James Gober - GitHub">https://github.com/jamesgober</a>) shall be subject to.
-    
-    
-    rules for development contributions for <b>Rust</b> projects . All code contributions <b>MUST</b> adhere to these principles.
+    All code contributions to <abbr title="Rust Lang"><b>Rust projects</b></abbr> within <a href="https://github.com/jamesgober" title="James Gober - GitHub">my repository</a> must adhere to these guidelines.
 </p>
 
-<br><br><hr><br>
+<hr><br>
 
 ## CORE PRINCIPLES (REQUIRED)
 
 ### 1. **HIGH PERFORMANCE** 
-- Target: Sub-nanosecond overhead for timing operations
-- All hot paths must be `#[inline(always)]`
-- Zero allocations in timing-critical sections
-- Benchmark every optimization decision
+- Target: Sub-nanosecond overhead for timing operations.
+- All hot paths must be `#[inline(always)]`.
+- Zero allocations in timing-critical sections.
+- Benchmark every optimization decision.
 
 ### 2. **HIGH CONCURRENCY**
-- Support 100,000+ concurrent measurements
-- Lock-free data structures where possible
-- Thread-local storage for per-thread metrics
-- Atomic operations for shared state
+- Support 100,000+ concurrent measurements.
+- Lock-free data structures where possible.
+- Thread-local storage for per-thread metrics.
+- Atomic operations for shared state.
 
 ### 3. **MAXIMUM EFFICIENCY**
-- Peak energy efficiency - lowest CPU/memory overhead
-- Pre-allocated buffers (capacity hints: 32 for spans, 1024 for metrics)
-- Reuse allocations through object pools
-- Compile-time feature elimination
+- Peak energy efficiency - lowest CPU/memory overhead.
+- Pre-allocated buffers (capacity hints: 32 for spans, 1024 for metrics).
+- Reuse allocations through object pools.
+- Compile-time feature elimination.
 
 ### 4. **ASYNCHRONOUS NATIVE**
-- First-class async/await support
-- Thread-safe by default
-- Compatible with all major async runtimes (Tokio, async-std)
-- Non-blocking operations only
+- First-class async/await support.
+- Thread-safe by default.
+- Compatible with all major async runtimes (Tokio, async-std).
+- Non-blocking operations only.
 
 ### 5. **MAXIMUM SCALABILITY**
-- Horizontal scaling through aggregation
-- Future-proof API design
-- Backward compatibility guaranteed
-- Modular architecture for extensibility
+- Horizontal scaling through aggregation.
+- Future-proof API design.
+- Backward compatibility guaranteed.
+- Modular architecture for extensibility.
 
 ### 6. **CROSS-PLATFORM**
-- Equal support for Linux, macOS, Windows
-- Platform-specific optimizations behind abstractions
-- Consistent behavior across all platforms
-- CI testing on all target platforms
+- Equal support for Linux, macOS, Windows.
+- Platform-specific optimizations behind abstractions.
+- Consistent behavior across all platforms.
+- CI testing on all target platforms.
 
 ### 7. **ROBUST**
-- Graceful degradation under load
-- Never panic in production code
-- Comprehensive error handling
-- Recovery from all failure modes
+- Graceful degradation under load.
+- Never panic in production code.
+- Comprehensive error handling.
+- Recovery from all failure modes.
 
 ### 8. **SECURITY**
-- No timing attacks through benchmark data
-- Sanitized output options
-- Authentication for metrics endpoints
-- Constant-time operations where security matters
+- No timing attacks through benchmark data.
+- Sanitized output options.
+- Authentication for metrics endpoints.
+- Constant-time operations where security matters.
 
 ### 9. **BEST PRACTICES**
-- **SOLID**: Single responsibility for each component
-- **DRY**: Centralized timing logic, no duplication
-- **KISS**: Simple API, complex implementation
+- **SOLID**: Single responsibility for each component.
+- **DRY**: Centralized timing logic, no duplication.
+- **KISS**: Simple API, complex implementation.
 - **YAGNI**: Start minimal, expand based on real needs
-- **MODULAR**: Libraries must be modular with clear boundaries and minimal coupling; prefer small, composable units with feature-gated extensions
+- **MODULAR**: Libraries must be modular with clear boundaries and minimal coupling; prefer small, composable units with feature-gated extensions.
 
 <hr>
 <br>
@@ -208,63 +197,63 @@ static DATA: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
 Before ANY code is written:
 - [ ] Will this work with zero overhead when disabled?
 - [ ] Is this the simplest solution that works?
-- [ unexpected char ��️ and expect behavior edge cases
+- [ ] Are there unexpected char ��️ and expect behavior edge cases?
 - [ ] Does this maintain backward compatibility?
 - [ ] Are errors handled gracefully?
 
 During implementation:
-- [ ] Profile before optimizing
-- [ ] Benchmark the implementation
-- [ ] Document performance characteristics
-- [ ] Add comprehensive tests
-- [ ] Update examples
+- [ ] Profile before optimizing.
+- [ ] Benchmark the implementation.
+- [ ] Document performance characteristics.
+- [ ] Add comprehensive tests.
+- [ ] Update examples.
 
 Before merging:
-- [ ] All CI checks pass on all platforms
-- [ ] Benchmarks show no regression
-- [ ] Documentation is complete
-- [ ] Breaking changes are justified
-- [ ] Security implications considered
+- [ ] All CI checks pass on all platforms.
+- [ ] Benchmarks show no regression.
+- [ ] Documentation is complete.
+- [ ] Breaking changes are justified.
+- [ ] Security implications considered.
 
 ## 🔍 SPECIFIC REQUIREMENTS
 
 ### API Design
-- Intuitive naming that follows Rust conventions
-- Builder pattern for complex configuration
-- Sane defaults that work out of the box
-- Progressive disclosure of complexity
+- Intuitive naming that follows Rust conventions.
+- Builder pattern for complex configuration.
+- Sane defaults that work out of the box.
+- Progressive disclosure of complexity.
 
 ### Error Handling
-- Custom error types implementing std::error::Error
-- Descriptive error messages with context
-- Actionable error recovery suggestions
-- Chain errors to preserve root cause
+- Custom error types implementing std::error::Error.
+- Descriptive error messages with context.
+- Actionable error recovery suggestions.
+- Chain errors to preserve root cause.
 
 ### Dependency Management
-- Minimal dependencies (audit every addition)
-- Optional features for heavy dependencies
-- Regular dependency updates and audits
-- Pin only when absolutely necessary
+- Minimal dependencies (audit every addition).
+- Optional features for heavy dependencies.
+- Regular dependency updates and audits.
+- Pin only when absolutely necessary.
 
 ## 🚫 ANTI-PATTERNS TO AVOID
 
-1. **String Allocations**: Use `&'static str` for names
-2. **Dynamic Dispatch**: Prefer generics over trait objects
-3. **Blocking Operations**: Everything must be non-blocking
-4. **Global State**: Use thread-local or passed context
-5. **Unsafe Code**: Only with extensive justification
-6. **Complex APIs**: If it needs extensive docs, simplify it
-7. **Feature Creep**: Start minimal, expand based on usage
+1. **String Allocations**: Use `&'static str` for names.
+2. **Dynamic Dispatch**: Prefer generics over trait objects.
+3. **Blocking Operations**: Everything must be non-blocking.
+4. **Global State**: Use thread-local or passed context.
+5. **Unsafe Code**: Only with extensive justification.
+6. **Complex APIs**: If it needs extensive docs, simplify it.
+7. **Feature Creep**: Start minimal, expand based on usage.
 
 ## 📊 SUCCESS METRICS
 
 A library succeeds when:
-- It solves a real problem elegantly
-- API is intuitive without reading docs
-- Performance meets or exceeds alternatives
-- Works identically across all platforms
-- Zero surprises in production
-- Community chooses it over alternatives
+- It solves a real problem elegantly.
+- API is intuitive without reading docs.
+- Performance meets or exceeds alternatives.
+- Works identically across all platforms.
+- Zero surprises in production.
+- Community chooses it over alternatives.
 
 ## 🎓 EXAMPLE: PERFECT LIBRARY API
 
