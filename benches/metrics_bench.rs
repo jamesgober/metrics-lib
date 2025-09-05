@@ -35,6 +35,27 @@ fn counter_benchmarks(c: &mut Criterion) {
         });
     });
 
+    // High-contention: multiple threads add in bursts
+    group.bench_function("concurrent_add_bursts_4_threads", |b| {
+        b.iter(|| {
+            let c = Arc::new(Counter::new());
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let c = Arc::clone(&c);
+                    std::thread::spawn(move || {
+                        for _ in 0..1000 {
+                            c.add(5);
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        })
+    });
+
     group.finish();
 }
 
@@ -52,6 +73,31 @@ fn gauge_benchmarks(c: &mut Criterion) {
     group.bench_function("set_min", |b| b.iter(|| gauge.set_min(black_box(10.0))));
 
     group.bench_function("set_max", |b| b.iter(|| gauge.set_max(black_box(100.0))));
+
+    // High-contention: concurrent add and set operations
+    group.bench_function("concurrent_add_set_4_threads", |b| {
+        b.iter(|| {
+            let g = Arc::new(Gauge::new());
+            let handles: Vec<_> = (0..4)
+                .map(|tid| {
+                    let g = Arc::clone(&g);
+                    std::thread::spawn(move || {
+                        for i in 0..2000 {
+                            if (i + tid) % 4 == 0 {
+                                g.set((i as f64) * 0.001);
+                            } else {
+                                g.add(0.1);
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        })
+    });
 
     group.finish();
 }
