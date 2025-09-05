@@ -1,6 +1,26 @@
 (function(){
   function byId(id){return document.getElementById(id)}
   function fmt(v){ if(typeof v==='number'){return v.toFixed(2)} return String(v) }
+  // Alert thresholds (percent deltas e.g., 0.08 == 8%)
+  // With >20 runs on the dashboard, tighten to production levels.
+  var THRESHOLDS = {
+    geomean: 0.08, // 8% geomean guard
+    perBenchmark: {
+      'counter.inc': 0.08,
+      'counter.add': 0.08,
+      'timer.record': 0.08,
+      'timer.record_ns': 0.08,
+      'timer.start_stop': 0.08,
+      'rate.tick': 0.08,
+      'rate.tick_n': 0.08,
+      'rate.tick_n.concurrent(4)': 0.10,
+      // Sub-ns gauge operations can be noisier; keep looser
+      'gauge.set': 0.18,
+      'gauge.set_max': 0.18,
+      'gauge.set_min': 0.18,
+      'gauge.access': 0.18
+    }
+  };
   function friendlyName(name){
     if(name === 'tick_n') return 'rate.tick_n';
     if(name === 'tick') return 'rate.tick';
@@ -156,6 +176,12 @@
       el.appendChild(card);
     }});
   }
+  function geomean(arr){
+    var xs = arr.filter(function(v){ return typeof v==='number' && isFinite(v) && v>0 });
+    if(!xs.length) return null;
+    var sum = xs.reduce(function(a,b){ return a + Math.log(b) }, 0);
+    return Math.exp(sum / xs.length);
+  }
   function tryKnownGlobals(){
     var keys = Object.keys(window);
     for(var i=0;i<keys.length;i++){
@@ -185,11 +211,30 @@
           // Trend note: compare last two points for key series if available
           var tn = ensureTrendCallout();
           if(tn && history && history.series){
-            function lastDelta(key){ var s=history.series[key]; if(!s||s.length<2) return null; var a=s[s.length-2], b=s[s.length-1]; return (b-a)/a*100; }
-            var keys = ['rate.tick','rate.tick_n'];
+            function lastDeltaRatio(key){ var s=history.series[key]; if(!s||s.length<2) return null; var a=s[s.length-2], b=s[s.length-1]; if(!(a>0)) return null; return (b-a)/a; }
+            var keys = Object.keys(history.series||{});
             var msgs = [];
-            keys.forEach(function(k){ var d=lastDelta(k); if(d!==null){ msgs.push(k+': '+(d<0? 'improved ':'regressed ')+fmt(Math.abs(d))+'%'); }});
-            if(msgs.length){ tn.textContent = 'Latest trend — '+msgs.join(' | '); }
+            var breaches = [];
+            keys.forEach(function(k){
+              var d = lastDeltaRatio(k); if(d===null) return;
+              var name = k; var thr = THRESHOLDS.perBenchmark[name];
+              if(typeof thr==='number'){
+                if(d>thr){ breaches.push(name+': +'+fmt(d*100)+'%'); }
+              }
+            });
+            // Geomean across core benches (exclude thread-scaling series)
+            var coreKeys = ['counter.inc','counter.add','timer.record','timer.record_ns','rate.tick','rate.tick_n'];
+            var geos = [];
+            coreKeys.forEach(function(k){ var s=history.series[k]; if(s&&s.length>1){ var a=s[s.length-2], b=s[s.length-1]; if(a>0&&b>0){ geos.push(b/a); } }});
+            var gm = geomean(geos);
+            if(gm!==null && (gm-1) > THRESHOLDS.geomean){ breaches.unshift('geomean: +'+fmt((gm-1)*100)+'%'); }
+            if(breaches.length){ tn.textContent = 'Regression alert — '+breaches.join(' | '); }
+            else {
+              // Fallback to simple trend note if no breaches
+              var simple = [];
+              ['rate.tick','rate.tick_n'].forEach(function(k){ var d=lastDeltaRatio(k); if(d!==null){ simple.push(k+': '+(d<0? 'improved ':'regressed ')+fmt(Math.abs(d*100))+'%'); }});
+              if(simple.length){ tn.textContent = 'Latest trend — '+simple.join(' | '); }
+            }
           }
         }catch(_){ }
         return;
