@@ -87,7 +87,9 @@ jobs:
       run: cargo run --example benchmark_comparison --release
     - name: Run criterion benchmarks (stabilized config)
       if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
-      run: cargo bench --all-features -- -w 2.0 -m 3.0 -n 50
+      run: >-
+        cargo bench --all-features --bench metrics_bench --
+        --warm-up-time 2.0 --measurement-time 3.0 --sample-size 50
     # Temporary: make nightly gate non-blocking to allow release to proceed.
     # TODO: Re-enable hard gate after release by removing continue-on-error.
     - name: Regression gate (nightly, non-blocking temporarily)
