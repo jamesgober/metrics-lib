@@ -1,4 +1,4 @@
-name: Benchmarks (opt-in)
+name: Benchmarks
 
 on:
   workflow_dispatch:
