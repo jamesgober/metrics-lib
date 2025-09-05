@@ -318,7 +318,9 @@ mod tests {
 
         // Build a no-op waker/context to poll manually
         fn dummy_raw_waker() -> std::task::RawWaker {
-            fn clone(_: *const ()) -> std::task::RawWaker { dummy_raw_waker() }
+            fn clone(_: *const ()) -> std::task::RawWaker {
+                dummy_raw_waker()
+            }
             fn wake(_: *const ()) {}
             fn wake_by_ref(_: *const ()) {}
             fn drop(_: *const ()) {}
