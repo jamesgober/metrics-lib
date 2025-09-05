@@ -30,14 +30,22 @@ Edge cases
     to avoid absurd totals. This only affects example formatting; percentages remain consistent by construction.
   - Negative intermediate values are avoided by construction; saturating arithmetic is used upstream when needed.
 */
-fn normalize_sysinfo_memory_to_mb(total_raw: f64, used_raw: f64, avail_raw: f64) -> (f64, f64, f64) {
-    let free_raw = if avail_raw > 0.0 { avail_raw } else { total_raw - used_raw };
+fn normalize_sysinfo_memory_to_mb(
+    total_raw: f64,
+    used_raw: f64,
+    avail_raw: f64,
+) -> (f64, f64, f64) {
+    let free_raw = if avail_raw > 0.0 {
+        avail_raw
+    } else {
+        total_raw - used_raw
+    };
 
     // Consider both KiB and bytes; choose the one yielding plausible total GB [1, 4096]
-    let total_mb_kib = total_raw / 1024.0;                 // KiB -> MB
-    let total_gb_kib = total_mb_kib / 1024.0;              // KiB -> GB
-    let total_mb_bytes = total_raw / (1024.0 * 1024.0);    // bytes -> MB
-    let total_gb_bytes = total_mb_bytes / 1024.0;          // bytes -> GB
+    let total_mb_kib = total_raw / 1024.0; // KiB -> MB
+    let total_gb_kib = total_mb_kib / 1024.0; // KiB -> GB
+    let total_mb_bytes = total_raw / (1024.0 * 1024.0); // bytes -> MB
+    let total_gb_bytes = total_mb_bytes / 1024.0; // bytes -> GB
 
     let kib_plausible = (1.0..=4096.0).contains(&total_gb_kib);
     let bytes_plausible = (1.0..=4096.0).contains(&total_gb_bytes);
@@ -50,7 +58,11 @@ fn normalize_sysinfo_memory_to_mb(total_raw: f64, used_raw: f64, avail_raw: f64)
     };
 
     if use_bytes {
-        (total_mb_bytes, used_raw / (1024.0 * 1024.0), free_raw / (1024.0 * 1024.0))
+        (
+            total_mb_bytes,
+            used_raw / (1024.0 * 1024.0),
+            free_raw / (1024.0 * 1024.0),
+        )
     } else {
         (total_mb_kib, used_raw / 1024.0, free_raw / 1024.0)
     }
@@ -69,41 +81,72 @@ fn main() {
     let total_raw = sys.total_memory() as f64;
     let used_raw = sys.used_memory() as f64;
     let avail_raw = sys.available_memory() as f64;
-    let (total_mb, used_mb, free_mb) = normalize_sysinfo_memory_to_mb(total_raw, used_raw, avail_raw);
+    let (total_mb, used_mb, free_mb) =
+        normalize_sysinfo_memory_to_mb(total_raw, used_raw, avail_raw);
 
     let total_gb = total_mb / 1024.0;
     let used_gb = used_mb / 1024.0;
     let free_gb = free_mb / 1024.0;
 
-    let used_pct = if total_mb > 0.0 { (used_mb / total_mb) * 100.0 } else { 0.0 };
-    let free_pct = if total_mb > 0.0 { (free_mb / total_mb) * 100.0 } else { 0.0 };
+    let used_pct = if total_mb > 0.0 {
+        (used_mb / total_mb) * 100.0
+    } else {
+        0.0
+    };
+    let free_pct = if total_mb > 0.0 {
+        (free_mb / total_mb) * 100.0
+    } else {
+        0.0
+    };
 
     // Process memory via SystemHealth (MB)
     let proc_mb = sys_h.process_mem_used_mb();
-    let proc_pct_of_total = if total_mb > 0.0 { (proc_mb / total_mb) * 100.0 } else { 0.0 };
-    let proc_pct_of_used = if used_mb > 0.0 { (proc_mb / used_mb) * 100.0 } else { 0.0 };
+    let proc_pct_of_total = if total_mb > 0.0 {
+        (proc_mb / total_mb) * 100.0
+    } else {
+        0.0
+    };
+    let proc_pct_of_used = if used_mb > 0.0 {
+        (proc_mb / used_mb) * 100.0
+    } else {
+        0.0
+    };
 
     // Adaptive formatter to avoid printing tiny non-zero percentages as 0.00%
     fn fmt_pct(p: f64) -> String {
-        if p == 0.0 { return "0%".to_string(); }
-        if p < 0.01 { format!("{:.4}%", p) } else { format!("{:.2}%", p) }
+        if p == 0.0 {
+            return "0%".to_string();
+        }
+        if p < 0.01 {
+            format!("{:.4}%", p)
+        } else {
+            format!("{:.2}%", p)
+        }
     }
 
     println!("=== Memory Overview ===");
     println!(
         "system.mem.total     : {:>10.2} MB ({:>8.2} GB) {}",
-        total_mb, total_gb, fmt_pct(100.0)
+        total_mb,
+        total_gb,
+        fmt_pct(100.0)
     );
     println!(
         "system.mem.used      : {:>10.2} MB ({:>8.2} GB) {}",
-        used_mb, used_gb, fmt_pct(used_pct)
+        used_mb,
+        used_gb,
+        fmt_pct(used_pct)
     );
     println!(
         "system.mem.free      : {:>10.2} MB ({:>8.2} GB) {}",
-        free_mb, free_gb, fmt_pct(free_pct)
+        free_mb,
+        free_gb,
+        fmt_pct(free_pct)
     );
     println!(
         "process.mem.used     : {:>10.2} MB  (of total: {}, of used: {})",
-        proc_mb, fmt_pct(proc_pct_of_total), fmt_pct(proc_pct_of_used)
+        proc_mb,
+        fmt_pct(proc_pct_of_total),
+        fmt_pct(proc_pct_of_used)
     );
 }
