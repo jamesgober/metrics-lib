@@ -169,14 +169,21 @@ jobs:
               if(!suite){ var ks=Object.keys(obj.entries); for(var i=0;i<ks.length;i++){ if(Array.isArray(obj.entries[ks[i]])){ suite=obj.entries[ks[i]]; break; }}}
               if(!suite) return null;
               var series = {}; var labels = [];
-              suite.forEach(function(run){
+              suite.forEach(function(run, runIdx){
                 var ts = (run.date || (run.commit && run.commit.timestamp)) || '';
                 labels.push(ts);
+                // pad existing series for this run with nulls; will fill real values below
+                Object.keys(series).forEach(function(k){ series[k].push(null); });
+                var present = {};
                 (run.benches||[]).forEach(function(b){
                   if(b.name==='base'||b.name==='change') return;
                   var name = friendlyName(b.name);
-                  if(!series[name]) series[name]=[];
-                  series[name].push(b.value);
+                  if(!series[name]){
+                    // backfill prior runs with nulls
+                    series[name] = new Array(runIdx).fill(null);
+                  }
+                  series[name][runIdx] = b.value;
+                  present[name] = true;
                 });
               });
               return { labels: labels, series: series };
@@ -191,8 +198,8 @@ jobs:
               if(!history) return;
               function mkChart(el, keys){
                 var ctx = byId(el).getContext('2d');
-                var datasets = keys.map(function(k, i){ return { label:k, data:history.series[k]||[], borderColor:color(i), backgroundColor:'transparent', tension:0.2 } });
-                new Chart(ctx, { type:'line', data:{ labels: history.labels, datasets: datasets }, options:{ responsive:true, scales:{ y:{ title:{ display:true, text:'ns/op' }}, x:{ ticks:{ maxRotation:45, minRotation:0 } } } } });
+                var datasets = keys.map(function(k, i){ return { label:k, data:history.series[k]||[], borderColor:color(i), backgroundColor:'transparent', tension:0.2, spanGaps:true, pointRadius:2 } });
+                new Chart(ctx, { type:'line', data:{ labels: history.labels, datasets: datasets }, options:{ responsive:true, interaction:{ mode:'nearest', intersect:false }, scales:{ y:{ title:{ display:true, text:'ns/op' }}, x:{ ticks:{ maxRotation:45, minRotation:0 } } } } });
               }
               // Choose groups
               var counterKeys = ['counter.inc','counter.add','get'];
