@@ -18,7 +18,7 @@
 </div>
 <br>
 <p align="center">
-    The fastest, most efficient metrics library for Rust. Built for high-performance applications that demand sub-nanosecond operations, lock-free concurrency, and zero-allocation hot paths.
+    A high‑performance, in‑process metrics library for Rust. It provides ultra‑low‑overhead counters, gauges (atomic f64), timers (nanosecond precision), and sliding‑window rate meters designed for production hot paths. The core is lock‑free on the hot path, allocation‑free during steady state, and cache‑aligned for minimal contention. Optional async helpers, adaptive controls, and system health snapshots are available without imposing overhead when unused. MSRV is 1.70+. CI enforces formatting, lints, coverage (85% threshold), rustdoc warnings, and publish dry‑runs for reliability.
 </p>
 
 <div align="center">
@@ -241,6 +241,28 @@ Run these self-contained examples to see the library in action:
     - `GET /metrics-demo` — updates metrics (counter/gauge/timer/rate)
     - `GET /export` — returns a JSON snapshot of selected metrics
 
+- CPU Stats Overview
+  - File: `examples/cpu_stats.rs`
+  - Run:
+    ```bash
+    cargo run --example cpu_stats --release
+    ```
+
+- Memory Stats Overview
+  - File: `examples/memory_stats.rs`
+  - Run:
+    ```bash
+    cargo run --example memory_stats --release
+    ```
+
+### More Real-World Examples (API Reference)
+
+- Building a Custom Exporter — see `docs/API.md` → [Building a Custom Exporter](./docs/API.md#real-world-custom-exporter)
+- Memory Stats: total/used/free + percentages — see `docs/API.md` → [Memory Stats](./docs/API.md#real-world-memory-stats)
+- Memory % used for an operation (estimate) — see `docs/API.md` → [Memory % for an operation](./docs/API.md#real-world-memory-percent-operation)
+- CPU Stats: total/used/free + percentages — see `docs/API.md` → [CPU Stats](./docs/API.md#real-world-cpu-stats)
+- CPU % used for an operation (estimate) — see `docs/API.md` → [CPU % for an operation](./docs/API.md#real-world-cpu-percent-operation)
+
 ### Resilience Features
 
 ```rust
@@ -325,6 +347,18 @@ Mixed Operations:  106.39 ns/op (9.40 M ops/sec)
 ```
 
 <sub>Notes: Latest numbers taken from local Criterion means under `target/criterion/**/new/estimates.json`. Actual throughput varies by CPU and environment; use the GitHub Pages benchmark history for trends.</sub>
+
+### Methodology
+
+- Tooling: Criterion with release builds.
+- Flags for stability on local runs: `cargo bench -- -w 3.0 -m 5.0 -n 100` (increase on dedicated runners).
+- Environment disclosure (example):
+  - CPU: Apple M1 Pro (performance cores)
+  - Rust: stable toolchain
+  - Target: aarch64-apple-darwin
+  - Governor: default (for CI use a performance governor where applicable)
+
+See also: `docs/zero-overhead-proof.md` for assembly inspection and binary size analysis, and `docs/performance-tuning.md` for environment hardening.
 
 ## Architecture
 
@@ -469,6 +503,13 @@ cargo clippy --all-features -- -D warnings
 - 📦 [Crates.io](https://crates.io/crates/metrics-lib)  
 - 🐛 [Issues](https://github.com/jamesgober/metrics-lib/issues)
 - 💬 [Discussions](https://github.com/jamesgober/metrics-lib/discussions)
+
+### Guides
+
+- Migrating from metrics-rs: [`docs/migrating-from-metrics-rs.md`](./docs/migrating-from-metrics-rs.md)
+- Performance Tuning: [`docs/performance-tuning.md`](./docs/performance-tuning.md)
+- Zero-Overhead Proof: [`docs/zero-overhead-proof.md`](./docs/zero-overhead-proof.md)
+- API Stability Guarantees: [`docs/api-stability.md`](./docs/api-stability.md)
 
 <br>
 <hr>
