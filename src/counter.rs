@@ -127,6 +127,7 @@ impl Counter {
     }
 
     /// Get current value - single atomic load
+    #[must_use]
     #[inline(always)]
     pub fn get(&self) -> u64 {
         self.value.load(Ordering::Relaxed)
@@ -160,6 +161,7 @@ impl Counter {
     /// Atomic compare-and-swap
     ///
     /// Returns Ok(previous_value) if successful, Err(current_value) if failed
+    #[must_use]
     #[inline]
     pub fn compare_and_swap(&self, expected: u64, new: u64) -> core::result::Result<u64, u64> {
         match self
@@ -172,6 +174,7 @@ impl Counter {
     }
 
     /// Add amount and return previous value
+    #[must_use]
     #[inline]
     pub fn fetch_add(&self, amount: u64) -> u64 {
         self.value.fetch_add(amount, Ordering::Relaxed)
@@ -189,6 +192,7 @@ impl Counter {
     /// assert_eq!(c.try_fetch_add(1).unwrap(), u64::MAX - 1);
     /// assert!(matches!(c.try_fetch_add(1), Err(MetricsError::Overflow)));
     /// ```
+    #[must_use]
     #[inline]
     pub fn try_fetch_add(&self, amount: u64) -> Result<u64> {
         if amount == 0 {
@@ -202,12 +206,14 @@ impl Counter {
     }
 
     /// Add amount and return new value
+    #[must_use]
     #[inline]
     pub fn add_and_get(&self, amount: u64) -> u64 {
         self.value.fetch_add(amount, Ordering::Relaxed) + amount
     }
 
     /// Increment and return new value
+    #[must_use]
     #[inline]
     pub fn inc_and_get(&self) -> u64 {
         self.value.fetch_add(1, Ordering::Relaxed) + 1
@@ -235,6 +241,7 @@ impl Counter {
     }
 
     /// Get comprehensive statistics
+    #[must_use]
     pub fn stats(&self) -> CounterStats {
         let value = self.get();
         let age = self.created_at.elapsed();
@@ -255,18 +262,21 @@ impl Counter {
     }
 
     /// Get age since creation
+    #[must_use]
     #[inline]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
     /// Check if counter is zero
+    #[must_use]
     #[inline]
     pub fn is_zero(&self) -> bool {
         self.get() == 0
     }
 
     /// Get rate per second since creation
+    #[must_use]
     #[inline]
     pub fn rate_per_second(&self) -> f64 {
         let age_seconds = self.age().as_secs_f64();
