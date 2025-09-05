@@ -10,6 +10,14 @@
 
 ## [Unreleased]
 
+
+
+
+<br>
+
+## [0.9.0] - 2025-09-05
+Beta/Release-Candidate: Optimized, Stable, and Ready for Production.
+
 ### Added
 - Build script registers `cfg(coverage)` via `cargo:rustc-check-cfg=cfg(coverage)` to silence unexpected cfg warnings when using `cfg!(coverage)` in tests.
 - Benchmarks: added high-contention Criterion benches for `RateMeter::tick_n` and symmetric contention benches for `Counter` (bursts) and `Gauge` (add/set mix).
@@ -44,6 +52,8 @@
 - Axum example: updated server startup for axum 0.7+ (use `tokio::net::TcpListener` + `axum::serve`) and fixed RAII timer temporary borrow by binding the timer before `start()`.
 - Formatting: addressed rustfmt suggestions in examples (`async_batch_timing.rs`, `cpu_stats.rs`, `axum_middleware_metrics.rs`, `memory_stats.rs`) to keep CI "rustfmt --check" clean.
 - MSRV compatibility: pinned `sysinfo = { version = "0.29", default-features = false }` and adjusted calls to 0.29 APIs; removed unnecessary casts flagged by clippy.
+
+
 
 <br>
 
@@ -408,7 +418,7 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/jamesgober/metrics-lib/compare/v0.8.6...v0.9.0
 [0.8.6]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...v0.8.6
 [0.8.3]: https://github.com/jamesgober/metrics-lib/compare/v0.8.0...v0.8.3
