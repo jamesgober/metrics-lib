@@ -10,8 +10,19 @@
 
 ## [Unreleased]
 
+### Added
+- Build script registers `cfg(coverage)` via `cargo:rustc-check-cfg=cfg(coverage)` to silence unexpected cfg warnings when using `cfg!(coverage)` in tests.
+- Benchmarks: added high-contention Criterion benches for `RateMeter::tick_n` and symmetric contention benches for `Counter` (bursts) and `Gauge` (add/set mix).
 
+### Changed
+- API hardening: annotated return-value APIs in `src/counter.rs` (e.g., `get`, `stats`, `rate_per_second`, `fetch_add`, `try_fetch_add`, etc.) with `#[must_use]` to prevent accidental ignoring of important results.
+- Clippy hygiene: replaced uninlined format args with captured formatting in tests/examples to keep `-D warnings` clean.
+- Rustdoc: added concise notes to `#[must_use]` methods across `RateMeter`, `Gauge`, and `Timer` explaining why results should be consumed.
+- CI/Viewer: gh-pages bootstrap now injects CPU MHz (`cpu-mhz.js`) and includes a dedicated `#trend-note` callout so the dashboard can render cycles/op and a “Latest trend” summary automatically.
 
+### Fixed
+- Corrected `src/rate_meter.rs::get_unix_timestamp()` to use system time directly and avoid double-counting with `created_at.elapsed()`, which could skew window transitions.
+- Addressed minor test lints: unused imports/variables in `tests/longevity_tests.rs` and `tests/chaos_tests.rs`.
 
 <br>
 

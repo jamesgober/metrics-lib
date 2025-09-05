@@ -21,6 +21,7 @@
 - **[Examples](#examples)**
 - **[Quick Start](#quick-start)**
 - **[Public APIs](#public-apis)**
+ - **[API Safety](#api-safety)**
   - [Global initialization](#global-initialization)
   - [`MetricsCore`](#metricscore)
   - [`Registry`](#registry)
@@ -552,6 +553,55 @@ fn main() {
     metrics().counter("ready").inc();
 }
 ```
+
+<hr>
+<br>
+<a href="#top">&uarr; <b>TOP</b></a>
+<br>
+
+## API Safety
+
+The library prioritizes performance while preventing common misuse. Several read/return-value APIs are annotated with `#[must_use]`. This means the compiler warns if the return value is ignored. Ignoring these values usually indicates a logic bug or a lost control decision.
+
+Key `#[must_use]` examples:
+
+- `Counter`: `get()`, `stats()`, `age()`, `is_zero()`, `rate_per_second()`
+- `Gauge`: `get()`, `stats()`, `age()`, `is_zero()`, `is_positive()`, `is_negative()`, `is_finite()`
+- `Timer`: `count()`, `total()`, `average()`, `min()`, `max()`, `stats()`, `age()`, `is_empty()`, `rate_per_second()`, `RunningTimer::elapsed()`
+- `RateMeter`: `rate()`, `rate_per_second()`, `rate_per_minute()`, `rate_per_hour()`, `total()`, `exceeds_rate()`, `can_allow()`, `tick_if_under_limit()`, `tick_burst_if_under_limit()`, `stats()`, `age()`, `is_empty()`
+
+Misuse patterns to avoid:
+
+- Dropping results without checking:
+  ```rust
+  // BAD: discards the admission decision
+  let _ = metrics().rate("api").tick_if_under_limit(1000.0);
+  ```
+
+- Computing values and not using them:
+  ```rust
+  // BAD: computes but ignores the current rate
+  metrics().rate("api").rate();
+  ```
+
+Prefer explicit handling:
+
+```rust
+let r = metrics().rate("api");
+if r.tick_if_under_limit(1000.0) {
+    // admitted
+} else {
+    // throttled
+}
+
+let s = r.stats();
+log::debug!("rate: {:.1}/s total: {} age: {:?}", s.per_second, s.total_events, s.age);
+```
+
+Notes:
+
+- `Result<…>`-returning APIs are not additionally marked with `#[must_use]` since `Result` already carries it.
+- Methods that mutate state (e.g., `Counter::inc()`, `Gauge::set()`) intentionally do not return values.
 
 <hr>
 <br>
