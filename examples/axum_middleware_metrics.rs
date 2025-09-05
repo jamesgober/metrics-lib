@@ -1,6 +1,6 @@
 use axum::{routing::get, Router};
 use metrics_lib::{init, metrics};
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
@@ -13,7 +13,8 @@ async fn main() {
         m.counter("http_requests_total").inc();
         m.gauge("inflight_requests").add(1.0);
         {
-            let _t = m.timer("handler_latency").start();
+            let t = m.timer("handler_latency");
+            let _guard = t.start();
             // Simulate work
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -46,10 +47,8 @@ async fn main() {
         .route("/", get(handle_index))
         .route("/metrics-lite", get(handle_metrics));
 
-    let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
-    println!("Serving on http://{addr}  →  GET /, GET /metrics-lite");
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let addr = "127.0.0.1:3000";
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    println!("Serving on http://{}  →  GET /, GET /metrics-lite", addr);
+    axum::serve(listener, app).await.unwrap();
 }
