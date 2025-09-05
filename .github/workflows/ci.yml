@@ -237,17 +237,39 @@ jobs:
           ~/.cargo/git
           target
         key: bench-regression-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run Criterion benchmarks (bencher format)
+    - name: Run Criterion benchmarks
       run: |
-        # Run Criterion and emit bencher-compatible output for github-action-benchmark
-        cargo bench --all-features -- --output-format bencher | tee criterion-output.txt
+        cargo bench --all-features
+    - name: Aggregate Criterion results to custom JSON
+      run: |
+        set -euo pipefail
+        OUT=criterion-summary.json
+        echo '{"benchmarks":[' > "$OUT"
+        first=true
+        shopt -s nullglob
+        for f in target/criterion/*/new/estimates.json; do
+          benchdir=$(dirname "$(dirname "$f")")
+          name=$(basename "$benchdir")
+          mean=$(jq -r '.mean.point_estimate' "$f")
+          # Fallback to 0 if parsing fails
+          if [ -z "$mean" ] || [ "$mean" = "null" ]; then
+            mean=0
+          fi
+          if [ "$first" = true ]; then
+            first=false
+          else
+            echo ',' >> "$OUT"
+          fi
+          printf '{"name":"%s","value":%s,"unit":"ns/op"}' "$name" "$mean" >> "$OUT"
+        done
+        echo ']}' >> "$OUT"
     - name: Benchmark Regression Check
       uses: benchmark-action/github-action-benchmark@v1
       with:
         name: Criterion
-        tool: 'cargo'
-        # Path to bencher-format output captured from cargo bench
-        output-file-path: 'criterion-output.txt'
+        tool: 'customSmallerIsBetter'
+        # Path to aggregated Criterion summary in custom JSON format
+        output-file-path: 'criterion-summary.json'
         github-token: ${{ secrets.GITHUB_TOKEN }}
         auto-push: ${{ github.ref == 'refs/heads/main' }}
         # Store results on gh-pages branch under benchmark-data/
