@@ -33,6 +33,8 @@
     </sup>
  </div>
 
+<hr>
+
 ## Performance First
 
 **World-class performance** with industry-leading benchmarks:
@@ -41,6 +43,8 @@
 - **Gauge**: 0.23ns/op (4303.60M ops/sec) - 30x faster than competitors  
 - **Timer**: 45.66ns/op (21.90M ops/sec) - 10x faster than competitors
 - **Memory**: 64 bytes per metric (cache-aligned, 4x smaller footprint)
+
+<hr>
 
 ## Features
 
@@ -57,6 +61,8 @@
 - **Resilience** - Circuit breakers, adaptive sampling, and backpressure control
 - **Cross-Platform** - Linux, macOS, Windows with optimized system integrations
 - **Cache-Aligned** - 64-byte alignment prevents false sharing
+
+<hr>
 
 ## API Overview
 
@@ -99,6 +105,9 @@ let allowed = r.try_tick_if_under_limit(1000.0)?; // Result<bool, MetricsError>
 
 Panic guarantees: the plain methods (`inc`, `add`, `set`, `tick`, etc.) prioritize speed and may saturate or assume valid inputs. Prefer `try_` variants when you need explicit error handling.
 
+<hr>
+<br>
+
 ## Installation
 
 Add to your `Cargo.toml`:
@@ -110,6 +119,9 @@ metrics-lib = "0.8.6"
 # Optional features
 metrics-lib = { version = "0.8.6", features = ["async"] }
 ```
+
+<hr>
+<br>
 
 ## Quick Start
 
@@ -328,11 +340,15 @@ pub struct Counter {
     // 56 bytes padding to cache line boundary
 }
 ```
+<br>
 
 ### Zero-Cost Abstractions
 - **RAII Timers**: Compile-time guaranteed cleanup
 - **Async Guards**: No allocation futures for timing
 - **Batch Operations**: Vectorized updates for efficiency
+
+<hr>
+<br>
 
 ## Testing
 
@@ -355,6 +371,9 @@ cargo bench
 cargo test --target x86_64-unknown-linux-gnu
 ```
 
+<hr>
+<br>
+
 ## Cross-Platform Support
 
 **Tier 1 Support:**
@@ -371,6 +390,9 @@ cargo test --target x86_64-unknown-linux-gnu
 - Unsupported platforms default to portable implementations
 - Feature detection at runtime
 - No panics on missing system features
+
+<hr>
+<br>
 
 ## Comparison
 
@@ -408,6 +430,9 @@ let config = Config {
 init_with_config(config);
 ```
 
+<hr>
+<br>
+
 ## Contributing
 
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md).
@@ -430,9 +455,8 @@ cargo fmt --all -- --check
 cargo clippy --all-features -- -D warnings
 ```
 
-## License
-
-This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
+<hr>
+<br>
 
 ## Links
 
@@ -440,6 +464,20 @@ This project is licensed under the **Apache License 2.0** - see the [LICENSE](LI
 - 📦 [Crates.io](https://crates.io/crates/metrics-lib)  
 - 🐛 [Issues](https://github.com/jamesgober/metrics-lib/issues)
 - 💬 [Discussions](https://github.com/jamesgober/metrics-lib/discussions)
+
+<br>
+<hr>
+<br>
+
+<!-- LICENSE
+############################################# -->
+<div id="license">
+    <h2>⚖️ License</h2>
+    <p>Licensed under the <b>Apache License</b>, version 2.0 (the <b>"License"</b>); you may not use this software, including, but not limited to the source code, media files, ideas, techniques, or any other associated property or concept belonging to, associated with, or otherwise packaged with this software except in compliance with the <b>License</b>.</p>
+    <p>You may obtain a copy of the <b>License</b> at: <a href="http://www.apache.org/licenses/LICENSE-2.0" title="Apache-2.0 License" target="_blank">http://www.apache.org/licenses/LICENSE-2.0</a>.</p>
+    <p>Unless required by applicable law or agreed to in writing, software distributed under the <b>License</b> is distributed on an "<b>AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND</b>, either express or implied.</p>
+    <p>See the <a href="./LICENSE" title="Software License file">LICENSE</a> file included with this project for the specific language governing permissions and limitations under the <b>License</b>.</p>
+</div>
 
 <!-- FOOT COPYRIGHT
 ################################################# -->
