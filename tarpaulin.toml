@@ -1,0 +1,13 @@
+# Tarpaulin configuration for metrics-lib
+# Exclude non-library and legacy/dev paths from coverage to keep signal high.
+exclude-files = [
+  "dev/**",
+  "docs/**",
+  "benches/**",
+  "examples/**"
+]
+
+# Optional defaults (CLI may override these in CI/local runs)
+# out = ["Xml"]
+# output-dir = "target/tarpaulin"
+# timeout = 180
