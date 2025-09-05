@@ -20,18 +20,18 @@
 <br>
 <h4 align="center">RUST PERFORMANCE ENGINEERING</h4>
 <p>
-    This document contains <b>strictly enforced</b> developer guidelines created exclusively for the high-performance <abbr title="Rust Lang"><b>Rust projects</b></abbr> within <a href="https://github.com/jamesgober" title="James Gober - GitHub">my repository</a>.
+    This document contains <b>strictly enforced</b> developer guidelines for high‑performance <abbr title="Rust Lang"><b>Rust projects</b></abbr> in this repository.
     <br>
 </p>
 <p>
-    All code contributions to <abbr title="Rust Lang"><b>Rust projects</b></abbr> within <a href="https://github.com/jamesgober" title="James Gober - GitHub">my repository</a> must adhere to these guidelines.
+    All code contributions to <abbr title="Rust Lang"><b>Rust projects</b></abbr> in this repository must adhere to these guidelines.
 </p>
 
 <hr><br>
 
 ## CORE PRINCIPLES (REQUIRED)
 
-### 1. **HIGH PERFORMANCE** 
+### 1. **HIGH PERFORMANCE**
 - Target: Sub-nanosecond overhead for timing operations.
 - All hot paths must be `#[inline(always)]`.
 - Zero allocations in timing-critical sections.
@@ -61,7 +61,7 @@
 - Backward compatibility guaranteed.
 - Modular architecture for extensibility.
 
-### 6. **CROSS-PLATFORM**
+### 6. **CROSS‑PLATFORM**
 - Equal support for Linux, macOS, Windows, etc.
 - Platform-specific optimizations behind abstractions.
 - Consistent behavior across all platforms.
@@ -114,11 +114,11 @@ pub fn measure<T>(name: &str, f: impl FnOnce() -> T) -> T {
 ```
 
 ### Testing Requirements
-- **Unit Tests**: 100% coverage for core functionality
-- **Benchmark Tests**: Prove zero overhead when disabled
-- **Integration Tests**: Real-world usage patterns
-- **Property Tests**: For statistical functions
-- **Regression Tests**: Performance regression detection
+- **Unit Tests**: Aim for comprehensive coverage of core functionality (focus on correctness and edge cases).
+- **Benchmark Tests**: Demonstrate near‑zero overhead for disabled paths where claims are made.
+- **Integration Tests**: Real‑world usage patterns.
+- **Property Tests**: For statistical or probabilistic functions.
+- **Regression Tests**: Detect performance regressions.
 
 > Note: For detailed instructions on running microbenchmarks with Criterion, short/fast runs for PRs, comparing results across runs (baselines and directory-to-directory via `critcmp`), and minimizing variance on Linux self-hosted runners, see `CONTRIBUTING.md` → Benchmarks and Comparing Criterion Results.
 
@@ -197,10 +197,10 @@ static DATA: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
 
 ## 🚀 IMPLEMENTATION CHECKLIST
 
-Before ANY code is written:
+Before any code is written:
 - [ ] Will this work with zero overhead when disabled?
 - [ ] Is this the simplest solution that works?
-- [ ] Are there unexpected char ��️ and expect behavior edge cases?
+- [ ] Are there unexpected character/encoding issues and expected‑behavior edge cases?
 - [ ] Does this maintain backward compatibility?
 - [ ] Are errors handled gracefully?
 
@@ -238,7 +238,7 @@ Before merging:
 - Regular dependency updates and audits.
 - Pin only when absolutely necessary.
 
-## 🚫 ANTI-PATTERNS TO AVOID
+## 🚫 ANTI‑PATTERNS TO AVOID
 
 1. **String Allocations**: Use `&'static str` for names.
 2. **Dynamic Dispatch**: Prefer generics over trait objects.
@@ -305,7 +305,7 @@ Create a hybrid benchmarking library that serves both development benchmarking (
 - Standard format compliance (OpenTelemetry, Prometheus)
 - Compression for historical data
 
-#### Benchmark-Specific Success Metrics
+#### Benchmark‑Specific Success Metrics
 - Zero overhead proven by benchmarks (< 1ns when disabled)
 - Scales to 1M+ measurements/second
 - Production users report no performance impact
