@@ -455,6 +455,27 @@ println!(
 );
 ```
 
+<h4 id="systemhealth-platform-notes">Platform Notes</h4>
+
+- Linux: Uses `/proc` for system and process sampling (CPU, memory, load, threads, FDs) for maximum performance and fidelity.
+- Non‑Linux (macOS/Windows): Uses the `sysinfo` crate for cross‑platform values.
+  - System CPU, memory, and load are reported via `sysinfo`.
+  - Process CPU and memory are reported via `sysinfo`.
+  - Thread count and file descriptor/handle count are placeholders for now (1 and 0 respectively) where not exposed portably.
+- Future enhancement: native macOS (sysctl/mach) and Windows (PDH/WMI/WinAPI) backends can be added for per‑platform fidelity (e.g., accurate thread/FD counts) without adding dependencies.
+
+Examples:
+
+- CPU overview (system/process): `examples/cpu_stats.rs`
+- Memory overview (system/process): `examples/memory_stats.rs`
+
+<br>
+<h5 id="systemhealth-memory-units-note">Memory Units Note</h5>
+
+- Depending on platform and sysinfo version, raw memory values may be reported in KiB or bytes. The provided `examples/memory_stats.rs` auto‑detects units for display (MB/GB) while keeping percentage calculations consistent.
+- For production use, prefer using percentages for alerts and apply consistent conversion for display. If you need exact byte precision on macOS or Windows, consider platform APIs (e.g., `sysctl` on macOS, WinAPI on Windows) in a background task, or contribute native backends to `SystemHealth`.
+- The example includes a small documented helper `normalize_sysinfo_memory_to_mb(...)` explaining invariants and edge cases; see `examples/memory_stats.rs` (comment block above the function) for details.
+
 <br>
 
 ### Async support
