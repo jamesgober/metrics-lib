@@ -131,5 +131,6 @@ serde_json = "1.0"
 # Tokio runtime for examples
 tokio = { version = "1.0", features = ["full"] }
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Use reqwest 0.11.x with default (native-tls) to remain MSRV 1.70-compatible
+reqwest = { version = "=0.11.27", default-features = true, features = ["json"] }
 anyhow = "1"
