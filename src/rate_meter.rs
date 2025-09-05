@@ -190,7 +190,7 @@ impl RateMeter {
 
     /// Get rate per second
     ///
-    /// Note: `#[must_use]` — see [`rate`].
+    /// Note: `#[must_use]` — see [`Self::rate`].
     #[must_use]
     #[inline]
     pub fn rate_per_second(&self) -> f64 {
