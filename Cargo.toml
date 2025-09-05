@@ -10,7 +10,7 @@
 # ╚══════════════════════════╝
 [package]
 name    = "metrics-lib"
-version = "0.5.1"
+version = "0.8.0"
 edition = "2021"
 
 # Minimum Supported Rust Version (MSRV)
@@ -20,7 +20,8 @@ rust-version = "1.70"
 license = "Apache-2.0"
 
 # Description
-description = "High-performance metrics library for server applications"
+description = "Lock-free, high-performance metrics for Rust: counters, gauges, timers, rate meters, async timing, adaptive sampling, and system health."
+readme = "README.md"
 
 # Keywords (5 total)
 keywords = [
@@ -119,3 +120,4 @@ parking_lot = "0.12"
 criterion = { version = "0.4", default-features = false }
 tokio-test = "0.4"
 half = "=2.2.1" # Pin transitive resolution (via plotters) to MSRV-compatible half version
+doc-comment = "0.3"

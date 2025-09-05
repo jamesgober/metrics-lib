@@ -18,6 +18,18 @@
     The fastest, most efficient metrics library for Rust. Built for high-performance applications that demand sub-nanosecond operations, lock-free concurrency, and zero-allocation hot paths.
 </p>
 
+<div align="center">
+    <sup>
+        <a href="https://github.com/jamesgober/metrics-lib/blob/main/README.md" title="Project Home"><b>HOME</b></a>
+        <span>&nbsp;│&nbsp;</span>
+        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/README.md" title="Documentation"><b>DOCS</b></a>
+        <span>&nbsp;│&nbsp;</span>
+        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/API.md" title="API Reference"><b>API</b></a>
+        <span>&nbsp;│&nbsp;</span>
+        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/GUIDELINES.md" title="Developer Guidelines"><b>GUIDELINES</b></a>
+    </sup>
+ </div>
+
 ## Performance First
 
 **World-class performance** with industry-leading benchmarks:
@@ -43,16 +55,29 @@
 - **Cross-Platform** - Linux, macOS, Windows with optimized system integrations
 - **Cache-Aligned** - 64-byte alignment prevents false sharing
 
+## API Overview
+
+For a complete reference with examples, see `docs/API.md`.
+
+- [`Counter`](./docs/API.md#counter) — ultra-fast atomic counters with batch and conditional ops
+- [`Gauge`](./docs/API.md#gauge) — atomic f64 gauges with math ops, EMA, and min/max helpers
+- [`Timer`](./docs/API.md#timer) — nanosecond timers, RAII guards, and closure/async timing
+- [`RateMeter`](./docs/API.md#ratemeter) — sliding-window rate tracking and bursts
+- [`SystemHealth`](./docs/API.md#systemhealth) — CPU, memory, load, threads, FDs, health score
+- [Async support](./docs/API.md#async-support) — `AsyncTimerExt`, `AsyncMetricBatch`
+- [Adaptive controls](./docs/API.md#adaptive-controls) — sampling, circuit breaker, backpressure
+- [Prelude](./docs/API.md#prelude) — convenient re-exports
+
 ## Installation
 
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.5.1"
+metrics-lib = "0.8.0"
 
 # Optional features
-metrics-lib = { version = "0.5.1", features = ["async"] }
+metrics-lib = { version = "0.8.0", features = ["async"] }
 ```
 
 ## Quick Start
@@ -85,13 +110,10 @@ let result = metrics().time("db_query", || {
 
 // System health monitoring
 let cpu = metrics().system().cpu_used();
-let memory = metrics().system().mem_used_mb();
+let memory_gb = metrics().system().mem_used_gb();
 
-// Rate limiting and burst detection
+// Rate metering
 metrics().rate("api_calls").tick();
-if metrics().rate("api_calls").is_over_limit(100.0) {
-    // Handle rate limit
-}
 ```
 
 ## Advanced Usage
@@ -99,19 +121,23 @@ if metrics().rate("api_calls").is_over_limit(100.0) {
 ### Async Support
 
 ```rust
-use metrics_lib::{AsyncTimerExt, metrics};
+use std::time::Duration;
+use metrics_lib::{metrics, AsyncMetricBatch, AsyncTimerExt};
 
-// Async timing with zero overhead
-let result = metrics().timer("async_work").time_async(|| async {
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    "completed"
-}).await;
+// Async timing with zero overhead and typed result
+let result: &str = metrics()
+    .timer("async_work")
+    .time_async(|| async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        "completed"
+    })
+    .await;
 
-// Batched async updates
+// Batched async updates (flush takes &MetricsCore)
 let mut batch = AsyncMetricBatch::new();
 batch.counter_inc("requests", 1);
 batch.gauge_set("cpu", 85.2);
-batch.flush(&metrics());
+batch.flush(metrics());
 ```
 
 ### Resilience Features
@@ -147,11 +173,8 @@ let health = metrics().system();
 
 println!("CPU: {:.1}%", health.cpu_used());
 println!("Memory: {:.1} GB", health.mem_used_gb());
-println!("Load: {:.2}", health.load_average());
-
-// Process-specific metrics
-println!("RSS: {} MB", health.process_memory_mb());
-println!("Threads: {}", health.process_threads());
+println!("Load: {:.2}", health.load_avg());
+println!("Threads: {}", health.thread_count());
 ```
 
 ## Benchmarks
@@ -252,7 +275,7 @@ cargo test --target x86_64-unknown-linux-gnu
 
 ```toml
 [dependencies]
-metrics-lib = { version = "0.5.1", features = [
+metrics-lib = { version = "0.8.0", features = [
     "async",     # Async/await support (requires tokio)
     "histogram", # Advanced histogram support
     "all"        # Enable all features

@@ -10,25 +10,43 @@
 
 ## [Unreleased]
 
-### CI
-- Added Docs job that builds rustdoc with warnings treated as errors (`RUSTDOCFLAGS=-D warnings`) and uploads artifacts.
-- Coverage is enforced tokenlessly via tarpaulin with a gate set to `--fail-under 75`; Cobertura XML (`cobertura.xml`) is uploaded as a build artifact.
-- Main test matrix runs with default features (no benches) to prevent benchmark-style tests from running on CI by default.
-- Security audit runs `cargo audit` directly (no integration permissions required).
-- Fixed malformed workflow structure in `.github/workflows/ci.yml` by ensuring `name`/`on` are top-level and moving `build-matrix` and `publish-dry-run` under `jobs:`.
-- Stabilized coverage: tarpaulin now runs with default features (removed `--all-features`) to align with common consumer paths and avoid penalizing optional modules.
 
-### Documentation
-- Ensured test and docs commands in README cover bench-gated tests and Criterion benches.
 
-### Housekeeping
-- Removed Codecov integration in CI; legacy `codecov.yml` archived to `docs/legacy/codecov.yml`.
-- Minor workflow refactors and naming clarifications in `.github/workflows/ci.yml`.
 
-### Tests
-- Added deterministic unit tests to raise and stabilize coverage without flakiness:
-  - `src/lib.rs`: cover `MetricsCore::time()`, `system()`, `registry()`, `Default` impl, and `Display` for `MetricsError` variants.
-  - `src/async_support.rs`: cover `AsyncTimerGuard::elapsed()` and `stop()`; added manual poll test for `TimedFuture` Ready branch without requiring an async runtime.
+
+
+<br>
+
+## [0.8.0] - STABLE
+
+### Added
+- Doctesting for external Markdown examples using `doc-comment`:
+  - `Cargo.toml` dev-dependency: `doc-comment = "0.3"`
+  - `tests/api_md_doctest.rs` to compile-check `docs/API.md` Rust code blocks
+- Documentation landing page `docs/README.md` with Quick Links and Table of Contents
+- Top-level README navigation buttons (HOME | DOCS | API | GUIDELINES) with absolute links for crates.io compatibility
+
+### Changed
+- Refined crate description in `Cargo.toml` and added `readme = "README.md"` for crates.io presentation
+- Expanded `docs/API.md`:
+  - Comprehensive Table of Contents
+  - Gauge, Async support, and SystemHealth sections aligned to source APIs and updated examples
+- Updated `README.md`:
+  - Added API Overview linking to `docs/API.md`
+  - Corrected examples to match actual async batching (`AsyncMetricBatch::flush(metrics())`) and SystemHealth method names (`load_avg`, `thread_count`, `mem_used_gb`)
+- CI pipeline improvements (Keep a Changelog: categorized as Changed):
+  - Docs job builds rustdoc with warnings as errors (`RUSTDOCFLAGS=-D warnings`) and uploads artifacts
+  - Tokenless coverage enforced with tarpaulin (`--fail-under 75`) and Cobertura XML artifact
+  - Main test matrix runs with default features (benchmarks gated) to reduce flakiness
+  - `cargo audit` runs without requiring integration permissions
+  - Workflow structure corrected in `.github/workflows/ci.yml`; coverage stabilized by running tarpaulin with default features
+
+### Fixed
+- Hardened `Registry` behavior on poisoned `RwLock` to avoid panics
+- Removed redundant `unsafe impl Send/Sync` for `Registry` (type is Send+Sync via fields)
+
+### Removed
+- Codecov integration removed; legacy `codecov.yml` archived to `docs/legacy/codecov.yml`
 
 
 <br>
@@ -191,7 +209,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jamesgober/metrics-lib/compare/v0.5.1...v0.8.0
 [0.5.1]: https://github.com/jamesgober/metrics-lib/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jamesgober/metrics-lib/compare/v0.2.0...v0.5.0
 [0.2.0]: https://github.com/jamesgober/metrics-lib/compare/v0.1.0...v0.2.0

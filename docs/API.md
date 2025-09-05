@@ -45,7 +45,7 @@
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-metrics-lib = "0.5.1"
+metrics-lib = "0.8.0"
 ```
 
 <br>
