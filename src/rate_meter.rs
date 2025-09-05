@@ -342,11 +342,13 @@ impl RateMeter {
 
     #[inline(always)]
     fn get_unix_timestamp(&self) -> u64 {
-        self.created_at.elapsed().as_secs()
-            + std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
+        // Use the current system time in seconds since UNIX_EPOCH.
+        // The previous implementation added `created_at.elapsed()` to now, which
+        // double-counted time and could skew window transitions.
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     #[inline]
@@ -834,14 +836,11 @@ mod tests {
         let upper_bound = if cfg!(coverage) { 160 } else { 120 };
         assert!(
             total_successful <= upper_bound,
-            "total_successful={} > upper_bound={}",
-            total_successful,
-            upper_bound,
+            "total_successful={total_successful} > upper_bound={upper_bound}",
         );
         assert!(
             total_successful >= 90,
-            "total_successful={} < lower_bound=90",
-            total_successful,
+            "total_successful={total_successful} < lower_bound=90",
         ); // Account for timing variations
     }
 

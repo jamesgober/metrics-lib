@@ -502,7 +502,7 @@ mod tests {
         let counter = Counter::new();
         counter.set(42);
 
-        let display_str = format!("{}", counter);
+        let display_str = format!("{counter}");
         assert!(display_str.contains("42"));
 
         let debug_str = format!("{counter:?}");
