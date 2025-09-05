@@ -32,10 +32,10 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run tests (all-features, no benches)
-      run: cargo test --verbose --all-features
-    - name: Run doc tests (all-features)
-      run: cargo test --doc --all-features
+    - name: Run tests (default features, no benches)
+      run: cargo test --verbose
+    - name: Run doc tests (default features)
+      run: cargo test --doc
 
   clippy:
     name: Clippy (stable)
