@@ -13,16 +13,37 @@
 ### Added
 - Build script registers `cfg(coverage)` via `cargo:rustc-check-cfg=cfg(coverage)` to silence unexpected cfg warnings when using `cfg!(coverage)` in tests.
 - Benchmarks: added high-contention Criterion benches for `RateMeter::tick_n` and symmetric contention benches for `Counter` (bursts) and `Gauge` (add/set mix).
+- Documentation: new guides — `docs/migrating-from-metrics-rs.md`, `docs/performance-tuning.md`, `docs/zero-overhead-proof.md`, `docs/api-stability.md`.
+- API Reference: added real-world examples in `docs/API.md` — Custom Exporter, Memory stats (total/used/free, %), Memory % for an operation, CPU stats (total/used/free, %), CPU % for an operation.
+- Examples: added `examples/cpu_stats.rs` and `examples/memory_stats.rs` demonstrating formatted size and percentage outputs.
+- SystemHealth: cross-platform backend using `sysinfo` on non-Linux (macOS/Windows) while retaining `/proc` on Linux.
+- API Reference: added `SystemHealth` Platform Notes (Linux `/proc`; non-Linux `sysinfo`; placeholders for threads/FDS; path to native backends), and linked new examples.
+- Examples: added `quick_tour.rs`, `async_batch_timing.rs`, `token_bucket_limiter.rs`,
+  `custom_exporter_openmetrics.rs`, `axum_middleware_metrics.rs`, and `contention_admission.rs`.
+- CPU example enhancements: `examples/cpu_stats.rs` now demonstrates instantaneous, warm-up, and post-work process CPU readings using `SystemHealth`; tuned sampling windows for moderate utilization.
+- Memory example enhancements: `examples/memory_stats.rs` now displays total/used/free in MB/GB with percentages and includes a documented helper `normalize_sysinfo_memory_to_mb` to auto-detect units (KiB vs bytes) across platforms.
+- API Reference: "Example Pointers" section linking all runnable examples for quick discovery.
 
 ### Changed
 - API hardening: annotated return-value APIs in `src/counter.rs` (e.g., `get`, `stats`, `rate_per_second`, `fetch_add`, `try_fetch_add`, etc.) with `#[must_use]` to prevent accidental ignoring of important results.
 - Clippy hygiene: replaced uninlined format args with captured formatting in tests/examples to keep `-D warnings` clean.
 - Rustdoc: added concise notes to `#[must_use]` methods across `RateMeter`, `Gauge`, and `Timer` explaining why results should be consumed.
 - CI/Viewer: gh-pages bootstrap now injects CPU MHz (`cpu-mhz.js`) and includes a dedicated `#trend-note` callout so the dashboard can render cycles/op and a “Latest trend” summary automatically.
+- README: refreshed headline benchmark numbers from latest local Criterion means and added a "Methodology" note documenting flags/environment.
+- Docs navigation: linked new guides from `docs/README.md` and added a Guides section to top-level `README.md`.
+- Guidelines: polished wording, fixed typos/encoding artifacts, and clarified testing standards in `docs/GUIDELINES.md` while preserving structure and principles.
+- SystemHealth (non-Linux): switched to a persistent `sysinfo::System` instance with cached `pid` for accurate delta-based sampling; normalized process CPU to per-core (0..100%) and clamped.
+- CPU example tuning: increased warm-up window and adjusted work phase to yield stable, moderate CPU percentages on typical hosts; removed flaky raw sysinfo two-sample printout.
+- Docs/API.md: added `SystemHealth` Platform Notes, Memory Units Note (with pointer to the helper), and expanded integration/example references.
+- README: expanded Examples section with run commands for all new examples.
 
 ### Fixed
 - Corrected `src/rate_meter.rs::get_unix_timestamp()` to use system time directly and avoid double-counting with `created_at.elapsed()`, which could skew window transitions.
 - Addressed minor test lints: unused imports/variables in `tests/longevity_tests.rs` and `tests/chaos_tests.rs`.
+- Rustdoc: fixed broken intra-doc link in `src/rate_meter.rs` by referencing [`Self::rate`].
+- Axum example: updated server startup for axum 0.7+ (use `tokio::net::TcpListener` + `axum::serve`) and fixed RAII timer temporary borrow by binding the timer before `start()`.
+- Formatting: addressed rustfmt suggestions in examples (`async_batch_timing.rs`, `cpu_stats.rs`, `axum_middleware_metrics.rs`, `memory_stats.rs`) to keep CI "rustfmt --check" clean.
+- MSRV compatibility: pinned `sysinfo = { version = "0.29", default-features = false }` and adjusted calls to 0.29 APIs; removed unnecessary casts flagged by clippy.
 
 <br>
 
