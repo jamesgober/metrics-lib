@@ -883,7 +883,7 @@ mod tests {
         let total_attempts = num_threads * 10;
         let strict_cap = 2 * 100; // 2x limit
         let upper_bound = if cfg!(coverage) {
-            total_attempts.min( strict_cap.max(160) )
+            total_attempts.min(strict_cap.max(160))
         } else {
             total_attempts.min(strict_cap)
         };
