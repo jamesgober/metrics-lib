@@ -20,7 +20,8 @@ async fn main() {
     // Producer task: generate ticks with light burstiness
     let producer = tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_millis(10));
-        for _ in 0..400u32 { // ~4 seconds
+        for _ in 0..400u32 {
+            // ~4 seconds
             t.tick().await;
             let n = 1 + (rng.gen::<u8>() % 5) as u32; // 1..=5 ticks
             r.tick_n(n);
@@ -30,7 +31,8 @@ async fn main() {
     // Reporter: sample and print current rate
     let reporter = tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_millis(250));
-        for _ in 0..16 { // ~4 seconds
+        for _ in 0..16 {
+            // ~4 seconds
             t.tick().await;
             let rate = metrics().rate("demo.stream.rps").rate();
             println!("stream rate ~{:.2} events/sec", rate);
