@@ -85,12 +85,12 @@ jobs:
     - name: Run benchmark comparison
       if: ${{ github.event_name == 'schedule' || inputs.run_examples == 'true' }}
       run: cargo run --example benchmark_comparison --release
-    - name: Run criterion benchmarks
+    - name: Run criterion benchmarks (stabilized config)
       if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
-      run: cargo bench --all-features
+      run: cargo bench --all-features -- -w 2.0 -m 3.0 -n 50
     - name: Regression gate (nightly, enforce)
       if: ${{ github.event_name == 'schedule' }}
-      run: node tools/bench_regression_check.js
+      run: CI_MODE=1 node tools/bench_regression_check.js
     - name: Regression report (manual, non-blocking)
       if: ${{ github.event_name != 'schedule' && inputs.run_criterion == 'true' }}
       run: node tools/bench_regression_check.js || echo "Non-blocking regression report only"

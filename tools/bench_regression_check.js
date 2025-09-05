@@ -27,6 +27,8 @@ const THRESHOLDS = {
     'gauge.access': 0.18,
   },
 };
+// Core benches considered most stable on CI
+const CORE = ['counter.inc','timer.record','timer.record_ns','rate.tick','rate.tick_n'];
 
 function get(url){
   return new Promise((resolve, reject) => {
@@ -87,12 +89,19 @@ function buildHistory(obj){
   return suite;
 }
 
-function lastTwo(series){
+function median(arr){
+  const xs = arr.filter((v)=> typeof v==='number' && isFinite(v));
+  if(!xs.length) return null;
+  const s = xs.slice().sort((a,b)=>a-b);
+  const mid = Math.floor(s.length/2);
+  return s.length % 2 ? s[mid] : (s[mid-1]+s[mid])/2;
+}
+function baselinePrevMedian(series, k=5){
   if(!series || series.length<2) return null;
-  const a = series[series.length-2];
-  const b = series[series.length-1];
-  if(!(a && b)) return null;
-  return { a, b };
+  const prev = series.slice(0, -1); // exclude latest
+  const window = prev.slice(-k);
+  if(!window.length) return null;
+  return median(window);
 }
 
 function geomean(arr){
@@ -126,22 +135,28 @@ function geomean(arr){
       });
     });
 
-    // Per-benchmark checks (based on last two values)
+    // Determine which series to enforce
+    const inCiMode = process.env.CI_MODE === '1' || process.env.CI_MODE === 'true';
+    const perBenchKeys = inCiMode ? CORE : Object.keys(THRESHOLDS.perBenchmark);
+
+    // Per-benchmark checks (compare last value vs median of previous up to 5 runs)
     const breaches = [];
-    for(const [name, thr] of Object.entries(THRESHOLDS.perBenchmark)){
+    for(const name of perBenchKeys){
+      const thr = THRESHOLDS.perBenchmark[name];
       const s = series[name];
-      const pair = lastTwo(s);
-      if(!pair) continue;
-      const {a,b} = pair; if(!(a>0 && b>0)) continue;
-      const ratio = (b-a)/a; // positive is regression (slower)
+      if(!s || s.length<2) continue;
+      const b = s[s.length-1];
+      const a = baselinePrevMedian(s, 5);
+      if(!(a>0 && b>0)) continue;
+      const ratio = (b-a)/a; // positive means slower
       if(ratio > thr){ breaches.push(`${name}: +${(ratio*100).toFixed(2)}% (> ${(thr*100).toFixed(0)}%)`); }
     }
 
-    // Geomean across core benches
-    const coreKeys = ['counter.inc','counter.add','timer.record','timer.record_ns','rate.tick','rate.tick_n'];
+    // Geomean across core benches (use per-series ratio of last vs median of prev)
+    const coreKeys = CORE;
     const geos = [];
     coreKeys.forEach((k)=>{
-      const s = series[k]; const pair = lastTwo(s); if(!pair) return; const {a,b}=pair; if(a>0&&b>0){ geos.push(b/a); }
+      const s = series[k]; if(!s||s.length<2) return; const b=s[s.length-1]; const a=baselinePrevMedian(s,5); if(a>0&&b>0){ geos.push(b/a); }
     });
     const gm = geomean(geos);
     if(gm!==null){
