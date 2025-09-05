@@ -16,6 +16,24 @@
 </div>
 <br>
 
+<h4 id="example-pointers">Example Pointers</h4>
+
+- Quick Tour: `examples/quick_tour.rs` — counter/gauge/timer/ratemeter/system health in one file.
+- Async Batch + Timing: `examples/async_batch_timing.rs` — `AsyncTimerExt::time_async` and `AsyncMetricBatch`.
+- Token Bucket Limiter: `examples/token_bucket_limiter.rs` — admission control with `RateMeter::tick_if_under_limit`.
+- Custom Exporter (OpenMetrics-like): `examples/custom_exporter_openmetrics.rs` — text snapshot.
+- Axum Middleware (minimal): `examples/axum_middleware_metrics.rs` — per-request metrics + lightweight endpoint.
+- Contention & Admission: `examples/contention_admission.rs` — multi-threaded admission under target rate.
+- Health Dashboard: `examples/health_dashboard.rs` — periodic snapshot of CPU/mem/load/threads/FDS/health.
+- Cache Hit/Miss: `examples/cache_hit_miss.rs` — counters for hits/misses, ratio, and lookup latency.
+- Broker Throughput: `examples/broker_throughput.rs` — producer/consumer RPS via `RateMeter`.
+- CPU Stats Overview: `examples/cpu_stats.rs` — system CPU/load and process CPU sampling windows.
+- Memory Stats Overview: `examples/memory_stats.rs` — total/used/free MB/GB and percentages (unit auto-detect).
+- Axum Registry Integration: `examples/axum_registry_integration.rs` — minimal web service wiring.
+- Streaming Rate Window: `examples/streaming_rate_window.rs` — periodic rate sampling demo.
+- Benchmark Comparison: `examples/benchmark_comparison.rs` — microbench comparison runner.
+- Quick Start: `examples/quick_start.rs` — shortest end-to-end usage.
+
 ## Table of Contents
 - **[Installation](#installation)**
 - **[Examples](#examples)**
@@ -63,6 +81,7 @@
   - [9. Serverless (AWS Lambda) Cold-Start and Duration](#serverless-cold-start-and-duration)
   - [10.  Kubernetes Scraping & Pod-level Dashboards](#kubernetes-scraping)
   - [11. OpenTelemetry Export Bridge (example skeleton)](#open-telemetry-export)
+  - [Example Pointers](#example-pointers)
   - [12. NATS-Specific Queue Depth and Consumers](#nats-specific-queue)
   - [13. Redis Latency Histogram and Dashboard Queries](#redis-latency-histogram)
   - [14. AWS Lambda EMF (Embedded Metric Format) Emission](#aws-lambda-emf)
