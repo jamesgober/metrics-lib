@@ -22,7 +22,11 @@ fn longevity_counter_throughput() {
     let m = metrics();
     let c = m.counter("longevity.counter");
 
-    let default_ops = if std::env::var("CI").is_ok() { 10_000_000 } else { 100_000_000 };
+    let default_ops = if std::env::var("CI").is_ok() {
+        10_000_000
+    } else {
+        100_000_000
+    };
     let ops = parse_ops(default_ops);
 
     let start = Instant::now();
@@ -32,7 +36,10 @@ fn longevity_counter_throughput() {
     let dur = start.elapsed();
 
     let rps = (ops as f64) / dur.as_secs_f64();
-    eprintln!("longevity ops={} duration={:?} ops/sec={:.0}", ops, dur, rps);
+    eprintln!(
+        "longevity ops={} duration={:?} ops/sec={:.0}",
+        ops, dur, rps
+    );
 
     // Sanity
     assert_eq!(c.get(), ops);
@@ -46,14 +53,24 @@ fn longevity_mixed_operations() {
     let c = m.counter("longevity.mixed.counter");
     let g = m.gauge("longevity.mixed.gauge");
 
-    let default_ops = if std::env::var("CI").is_ok() { 5_000_000 } else { 50_000_000 };
+    let default_ops = if std::env::var("CI").is_ok() {
+        5_000_000
+    } else {
+        50_000_000
+    };
     let ops = parse_ops(default_ops);
 
     let start = Instant::now();
     for i in 0..ops {
         c.inc();
-        if i % 2 == 0 { c.add(1); }
-        if i % 4 == 0 { g.add(0.001); } else if i % 4 == 2 { g.sub(0.001); }
+        if i % 2 == 0 {
+            c.add(1);
+        }
+        if i % 4 == 0 {
+            g.add(0.001);
+        } else if i % 4 == 2 {
+            g.sub(0.001);
+        }
     }
     let dur = start.elapsed();
 

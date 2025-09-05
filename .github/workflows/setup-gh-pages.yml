@@ -34,7 +34,8 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         run: |
           git checkout --orphan gh-pages
-          rm -rf ./* .[^.]* || true
+          # Remove all files except the .git directory to keep repo metadata intact
+          find . -mindepth 1 -maxdepth 1 ! -name ".git" -exec rm -rf {} +
           mkdir -p benchmark-data
           cat > README.md << 'EOF'
           # Benchmark Data

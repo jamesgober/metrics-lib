@@ -239,13 +239,13 @@ jobs:
         key: bench-regression-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - name: Run Criterion benchmarks (short)
       run: |
-        cargo bench --all-features -- -w 0.5 -m 1.5 -n 50
+        cargo bench --all-features -- --warm-up-time 0.5 --measurement-time 1.5 --sample-size 50
     - name: Benchmark Regression Check
       uses: benchmark-action/github-action-benchmark@v1
       with:
         name: Criterion
-        tool: 'cargo'
-        # Target Criterion output directory
+        tool: 'criterion'
+        # Target Criterion output directory (JSON)
         output-file-path: 'target/criterion'
         github-token: ${{ secrets.GITHUB_TOKEN }}
         auto-push: ${{ github.ref == 'refs/heads/main' }}
