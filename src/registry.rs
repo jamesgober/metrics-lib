@@ -40,7 +40,7 @@ impl Registry {
         }
 
         // Slow path: write lock to create new counter
-        let mut counters = self.counters.write().unwrap();
+        let mut counters = self.counters.write().unwrap_or_else(|e| e.into_inner());
         counters
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Counter::new()))
@@ -57,7 +57,7 @@ impl Registry {
         }
 
         // Slow path: write lock to create new gauge
-        let mut gauges = self.gauges.write().unwrap();
+        let mut gauges = self.gauges.write().unwrap_or_else(|e| e.into_inner());
         gauges
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Gauge::new()))
@@ -74,7 +74,7 @@ impl Registry {
         }
 
         // Slow path: write lock to create new timer
-        let mut timers = self.timers.write().unwrap();
+        let mut timers = self.timers.write().unwrap_or_else(|e| e.into_inner());
         timers
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Timer::new()))
@@ -91,7 +91,7 @@ impl Registry {
         }
 
         // Slow path: write lock to create new rate meter
-        let mut rate_meters = self.rate_meters.write().unwrap();
+        let mut rate_meters = self.rate_meters.write().unwrap_or_else(|e| e.into_inner());
         rate_meters
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(RateMeter::new()))
@@ -100,38 +100,77 @@ impl Registry {
 
     /// Get all registered counter names.
     pub fn counter_names(&self) -> Vec<String> {
-        self.counters.read().unwrap().keys().cloned().collect()
+        self.counters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Get all registered gauge names.
     pub fn gauge_names(&self) -> Vec<String> {
-        self.gauges.read().unwrap().keys().cloned().collect()
+        self.gauges
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Get all registered timer names.
     pub fn timer_names(&self) -> Vec<String> {
-        self.timers.read().unwrap().keys().cloned().collect()
+        self.timers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Get all registered rate meter names.
     pub fn rate_meter_names(&self) -> Vec<String> {
-        self.rate_meters.read().unwrap().keys().cloned().collect()
+        self.rate_meters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Get total number of registered metrics.
     pub fn metric_count(&self) -> usize {
-        self.counters.read().unwrap().len()
-            + self.gauges.read().unwrap().len()
-            + self.timers.read().unwrap().len()
-            + self.rate_meters.read().unwrap().len()
+        self.counters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+            + self.gauges.read().unwrap_or_else(|e| e.into_inner()).len()
+            + self.timers.read().unwrap_or_else(|e| e.into_inner()).len()
+            + self
+                .rate_meters
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len()
     }
 
     /// Clear all metrics from the registry.
     pub fn clear(&self) {
-        self.counters.write().unwrap().clear();
-        self.gauges.write().unwrap().clear();
-        self.timers.write().unwrap().clear();
-        self.rate_meters.write().unwrap().clear();
+        self.counters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.gauges
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.timers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.rate_meters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -141,8 +180,8 @@ impl Default for Registry {
     }
 }
 
-unsafe impl Send for Registry {}
-unsafe impl Sync for Registry {}
+// `Registry` is Send + Sync automatically because all fields are `RwLock<...>`
+// whose contents are Send + Sync. No unsafe impls required.
 
 #[cfg(test)]
 mod tests {
