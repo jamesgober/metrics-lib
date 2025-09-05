@@ -119,6 +119,8 @@ pub fn measure<T>(name: &str, f: impl FnOnce() -> T) -> T {
 - **Property Tests**: For statistical functions
 - **Regression Tests**: Performance regression detection
 
+> Note: For detailed instructions on running microbenchmarks with Criterion, short/fast runs for PRs, comparing results across runs (baselines and directory-to-directory via `critcmp`), and minimizing variance on Linux self-hosted runners, see `CONTRIBUTING.md` → Benchmarks and Comparing Criterion Results.
+
 ### Documentation Standards
 ```rust
 /// Measures the execution time of a code block.
