@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = axum::serve(listener, app).await;
     });
 
-    // Exercise routes with reqwest then stop
+    // Exercise routes with request then stop
     let base = format!("http://{}", addr);
     let client = reqwest::Client::new();
 
