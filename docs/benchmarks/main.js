@@ -4,12 +4,15 @@
   function friendlyName(name){
     if(name === 'tick_n') return 'rate.tick_n';
     if(name === 'tick') return 'rate.tick';
+    if(name === 'tick_n_concurrent_4_threads') return 'rate.tick_n.concurrent(4)';
     if(name === 'increment') return 'counter.inc';
     if(name === 'add') return 'counter.add';
     if(name === 'get') return 'get';
     if(name === 'set') return 'gauge.set';
     if(name === 'set_max') return 'gauge.set_max';
     if(name === 'set_min') return 'gauge.set_min';
+    if(name === 'concurrent_add_bursts_4_threads') return 'counter.add.concurrent(4)';
+    if(name === 'concurrent_add_set_4_threads') return 'gauge.add_set.concurrent(4)';
     if(name === 'counter_access') return 'counter.access';
     if(name === 'gauge_access') return 'gauge.access';
     if(name === 'record') return 'timer.record';
@@ -19,6 +22,19 @@
     if(['1','2','4','8','16','32','64'].indexOf(String(name))>=0) return 'threads:'+name;
     return name;
   }
+  function readCpuMhz(){
+    if(window.CPU_MHZ) return window.CPU_MHZ;
+    if(window.BENCHMARK_DATA && window.BENCHMARK_DATA.meta && window.BENCHMARK_DATA.meta.cpu_mhz) return window.BENCHMARK_DATA.meta.cpu_mhz;
+    var meta = document.querySelector('meta[name="cpu-mhz"]');
+    if(meta){ var v = parseFloat(meta.getAttribute('content')); if(!isNaN(v) && v>0) return v; }
+    return null;
+  }
+  function ensureTrendCallout(){
+    var host = document.getElementById('summary-cards') || document.body;
+    var tn = byId('trend-note');
+    if(!tn){ tn = document.createElement('div'); tn.id='trend-note'; tn.className='note'; if(host && host.parentNode){ host.parentNode.insertBefore(tn, host); } else { document.body.insertBefore(tn, document.body.firstChild); } }
+    return tn;
+  }
   function render(entries){
     if(!entries || !entries.length){ return false }
     var cont = byId('content'); if(!cont) return false;
@@ -27,8 +43,24 @@
     table.style.borderCollapse='collapse';
     table.innerHTML = '<thead><tr><th style="text-align:left;padding:6px;border-bottom:1px solid #e1e4e8">Name</th><th style="text-align:right;padding:6px;border-bottom:1px solid #e1e4e8">Value</th><th style="text-align:left;padding:6px;border-bottom:1px solid #e1e4e8">Unit</th></tr></thead>';
     var tbody = document.createElement('tbody');
+    var mhz = readCpuMhz();
     var filtered = entries.filter(function(e){ return e.name !== 'base' && e.name !== 'change' });
-    filtered.slice(-100).forEach(function(e){
+    // Optionally augment with derived cycles/op for contention benches
+    var augmented = filtered.slice();
+    if(mhz){
+      var rateConc = filtered.filter(function(e){ return /tick_n_concurrent_/.test(e.name) });
+      var others = filtered.filter(function(e){ return /concurrent_/.test(e.name) && !/tick_n_concurrent_/.test(e.name) });
+      function pushDerived(arr){
+        arr.forEach(function(e){
+          if(typeof e.value==='number' || typeof e.mean==='number' || typeof e.time==='number'){
+            var val = e.value||e.mean||e.time; // ns/op
+            augmented.push({ name: (friendlyName(e.name)||e.name)+'.cycles', value: val * mhz, unit: 'cycles/op' });
+          }
+        });
+      }
+      pushDerived(rateConc); pushDerived(others);
+    }
+    augmented.slice(-120).forEach(function(e){
       var tr = document.createElement('tr');
       tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #f0f0f0">'+friendlyName(e.name||e.benchmark||'unknown')+'</td>'+
                      '<td style="padding:6px;text-align:right;border-bottom:1px solid #f0f0f0">'+fmt(e.value||e.mean||e.score||e.result||e.time)+'</td>'+
@@ -103,7 +135,7 @@
     }
     var counterKeys = ['counter.inc','counter.add','get'];
     var timerKeys = ['timer.record','timer.record_ns','timer.start_stop','timer.stats'];
-    var rateKeys = ['rate.tick','rate.tick_n'];
+    var rateKeys = ['rate.tick','rate.tick_n','rate.tick_n.concurrent(4)'];
     var threadKeys = Object.keys(history.series).filter(function(k){ return k.indexOf('threads:')===0; }).sort(function(a,b){ return parseInt(a.split(':')[1]) - parseInt(b.split(':')[1])});
     counterKeys = counterKeys.filter(function(k){return history.series[k]});
     timerKeys = timerKeys.filter(function(k){return history.series[k]});
@@ -116,7 +148,7 @@
   function renderCards(latest){
     var el = byId('summary-cards'); if(!el) return;
     el.innerHTML='';
-    var pick = ['counter.inc','counter.add','timer.record','timer.record_ns','rate.tick','rate.tick_n'];
+    var pick = ['counter.inc','counter.add','timer.record','timer.record_ns','rate.tick','rate.tick_n','rate.tick_n.concurrent(4)'];
     var map = {}; latest.forEach(function(e){ map[friendlyName(e.name)] = e; });
     pick.forEach(function(k){ if(map[k]){
       var v = map[k]; var card = document.createElement('div'); card.className='card';
@@ -150,6 +182,15 @@
           if(latest) { renderCards(latest); }
           var history = buildHistory(data);
           renderCharts(history);
+          // Trend note: compare last two points for key series if available
+          var tn = ensureTrendCallout();
+          if(tn && history && history.series){
+            function lastDelta(key){ var s=history.series[key]; if(!s||s.length<2) return null; var a=s[s.length-2], b=s[s.length-1]; return (b-a)/a*100; }
+            var keys = ['rate.tick','rate.tick_n'];
+            var msgs = [];
+            keys.forEach(function(k){ var d=lastDelta(k); if(d!==null){ msgs.push(k+': '+(d<0? 'improved ':'regressed ')+fmt(Math.abs(d))+'%'); }});
+            if(msgs.length){ tn.textContent = 'Latest trend — '+msgs.join(' | '); }
+          }
         }catch(_){ }
         return;
       }

@@ -17,6 +17,28 @@ This document explains how to run and interpret benchmarks for `metrics-lib`, ho
   - Criterion HTML + JSON reports: `target/criterion/`
   - Open `target/criterion/report/index.html` for the overview
 
+### Showing cycles/op in the GitHub Pages dashboard
+
+The benchmarks viewer (`docs/benchmarks/main.js`) can derive and display a cycles-per-operation metric for contention benches if it knows the CPU frequency (in MHz).
+
+Provide CPU MHz in any of these ways:
+
+- Inject a global before loading `data.js`:
+  ```html
+  <script>window.CPU_MHZ = 3800; // 3.8 GHz CPU</script>
+  ```
+- Add a meta tag in the page head:
+  ```html
+  <meta name="cpu-mhz" content="3800">
+  ```
+- Populate `BENCHMARK_DATA.meta.cpu_mhz` in the data payload (advanced; set in CI generation step).
+
+If present, the viewer appends derived rows with the suffix `.cycles` alongside contention benches, computed as `cycles/op = ns/op × cpu_mhz`.
+
+### Trend callout on the dashboard
+
+The viewer will display a small callout summarizing the latest trend for `rate.tick` and `rate.tick_n` if sufficient history is available. It looks for an element with `id="trend-note"`; if none exists, it auto-inserts a callout above the summary cards. No configuration is required.
+
 ## Comparing Results
 
 - Using Criterion baselines:
