@@ -37,11 +37,11 @@
 - **💾 System Health** - Built-in CPU, memory, and process monitoring
 
 ### Advanced Features
-- ** Lock-Free** - Zero locks in hot paths, pure atomic operations
-- ** Async Native** - First-class async/await support with zero-cost abstractions
-- ** Resilience** - Circuit breakers, adaptive sampling, and backpressure control
-- ** Cross-Platform** - Linux, macOS, Windows with optimized system integrations
-- ** Cache-Aligned** - 64-byte alignment prevents false sharing
+- **Lock-Free** - Zero locks in hot paths, pure atomic operations
+- **Async Native** - First-class async/await support with zero-cost abstractions
+- **Resilience** - Circuit breakers, adaptive sampling, and backpressure control
+- **Cross-Platform** - Linux, macOS, Windows with optimized system integrations
+- **Cache-Aligned** - 64-byte alignment prevents false sharing
 
 ## Installation
 
