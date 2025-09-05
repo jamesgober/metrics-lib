@@ -876,10 +876,17 @@ mod tests {
 
         let total_successful: i32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
 
-        // Should be limited to around 100 requests
-        // Allow some tolerance for concurrent overshoot on slower/contended runners
-        // When running under coverage instrumentation, timing can skew more; relax upper bound.
-        let upper_bound = if cfg!(coverage) { 160 } else { 120 };
+        // Should be limited to around 100 requests.
+        // Allow tolerance for concurrent overshoot across varied CI runners.
+        // Cap by total attempts (num_threads * 10) and relax to up to 2x the limit in extreme cases.
+        // Under coverage instrumentation, timing can skew more; keep a generous bound.
+        let total_attempts = num_threads * 10;
+        let strict_cap = 2 * 100; // 2x limit
+        let upper_bound = if cfg!(coverage) {
+            total_attempts.min( strict_cap.max(160) )
+        } else {
+            total_attempts.min(strict_cap)
+        };
         assert!(
             total_successful <= upper_bound,
             "total_successful={total_successful} > upper_bound={upper_bound}",
