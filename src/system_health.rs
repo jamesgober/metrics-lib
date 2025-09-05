@@ -15,6 +15,9 @@ use std::io;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_os = "linux"))]
+use sysinfo::{get_current_pid, CpuExt, ProcessExt, System, SystemExt};
+
 /// System health monitor with process introspection
 ///
 /// Tracks both system-wide and process-specific resource usage.
@@ -387,9 +390,10 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_system_cpu(&self) -> io::Result<f64> {
-        // Fallback for non-Linux systems
-        // Could implement using sysctl on macOS, WMI on Windows, etc.
-        Ok(0.0)
+        // Cross-platform via sysinfo
+        let mut sys = System::new();
+        sys.refresh_cpu();
+        Ok(sys.global_cpu_info().cpu_usage() as f64)
     }
 
     #[cfg(target_os = "linux")]
@@ -433,7 +437,11 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_system_memory_mb(&self) -> io::Result<u64> {
-        Ok(0)
+        let mut sys = System::new();
+        sys.refresh_memory();
+        // sysinfo reports memory in KiB
+        let used_kib = sys.used_memory();
+        Ok(used_kib / 1024)
     }
 
     #[cfg(target_os = "linux")]
@@ -449,7 +457,9 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_load_average(&self) -> io::Result<f64> {
-        Ok(0.0)
+        let sys = System::new();
+        let la = sys.load_average();
+        Ok(la.one)
     }
 
     #[cfg(target_os = "linux")]
@@ -472,6 +482,13 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_process_cpu(&self) -> io::Result<f64> {
+        let mut sys = System::new();
+        if let Ok(pid) = get_current_pid() {
+            sys.refresh_process(pid);
+            if let Some(proc_) = sys.process(pid) {
+                return Ok(proc_.cpu_usage() as f64);
+            }
+        }
         Ok(0.0)
     }
 
@@ -492,6 +509,14 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_process_memory_mb(&self) -> io::Result<u64> {
+        let mut sys = System::new();
+        if let Ok(pid) = get_current_pid() {
+            sys.refresh_process(pid);
+            if let Some(proc_) = sys.process(pid) {
+                // memory() in KiB
+                return Ok(proc_.memory() / 1024);
+            }
+        }
         Ok(0)
     }
 
@@ -512,6 +537,8 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_thread_count(&self) -> io::Result<u32> {
+        // sysinfo doesn't expose per-process thread count uniformly; approximate with 1
+        // until a portable method is added.
         Ok(1)
     }
 
@@ -525,6 +552,7 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_fd_count(&self) -> io::Result<u32> {
+        // Not portable via sysinfo; return 0 on non-Linux.
         Ok(0)
     }
 }
