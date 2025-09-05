@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     // For demonstration, print the body; convert Bytes to JSON (cap at 64KiB)
     let bytes = to_bytes(res.into_body(), 64 * 1024).await?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-    println!("export snapshot: {}", v);
+    println!("export snapshot: {v}");
 
     Ok(())
 }

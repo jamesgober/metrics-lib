@@ -35,7 +35,7 @@ async fn main() {
             // ~4 seconds
             t.tick().await;
             let rate = metrics().rate("demo.stream.rps").rate();
-            println!("stream rate ~{:.2} events/sec", rate);
+            println!("stream rate ~{rate:.2} events/sec");
         }
     });
 

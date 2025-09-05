@@ -5,7 +5,7 @@
 #![cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
 
 use std::env;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use metrics_lib::{init, metrics};
 
@@ -37,10 +37,7 @@ fn longevity_counter_throughput() {
     let dur = start.elapsed();
 
     let rps = (ops as f64) / dur.as_secs_f64();
-    eprintln!(
-        "longevity ops={} duration={:?} ops/sec={:.0}",
-        ops, dur, rps
-    );
+    eprintln!("longevity ops={ops} duration={dur:?} ops/sec={rps:.0}");
 
     // Sanity
     assert_eq!(c.get(), ops);
@@ -75,6 +72,6 @@ fn longevity_mixed_operations() {
     }
     let dur = start.elapsed();
 
-    eprintln!("longevity.mixed ops={} duration={:?}", ops, dur);
+    eprintln!("longevity.mixed ops={ops} duration={dur:?}");
     assert!(g.get().is_finite());
 }

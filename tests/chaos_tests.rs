@@ -26,14 +26,14 @@ fn chaos_concurrent_counter_and_gauge_updates() {
         let c = Arc::clone(&counter);
         let g = Arc::clone(&gauge);
         handles.push(thread::spawn(move || {
-            let mut local = 0.0f64;
+            let mut _local = 0.0f64;
             for i in 0..iters {
                 // Mixed operations to exercise CAS paths
                 c.inc();
                 if i % 4 == 0 {
                     c.add(3);
                 }
-                local += (tid as f64) * 0.000_001 + (i as f64 % 7.0);
+                _local += (tid as f64) * 0.000_001 + (i as f64 % 7.0);
                 if i % 8 == 0 {
                     g.add(0.5);
                 } else if i % 8 == 4 {
@@ -62,10 +62,7 @@ fn chaos_concurrent_counter_and_gauge_updates() {
     assert!(gval.is_finite());
 
     // Prevent optimizer dropping values
-    eprintln!(
-        "chaos checksum={}, counter={}, gauge={}",
-        checksum, cval, gval
-    );
+    eprintln!("chaos checksum={checksum}, counter={cval}, gauge={gval}");
 }
 
 #[ignore]
