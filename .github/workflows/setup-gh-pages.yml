@@ -21,23 +21,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify if gh-pages branch exists
-        id: check
+      - name: Prepare site content
         run: |
-          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create gh-pages branch (orphan)
-        if: steps.check.outputs.exists == 'false'
-        run: |
-          git checkout --orphan gh-pages
-          # Remove all files except the .git directory to keep repo metadata intact
-          find . -mindepth 1 -maxdepth 1 ! -name ".git" -exec rm -rf {} +
-          mkdir -p benchmark-data
-          cat > README.md << 'EOF'
+          mkdir -p _ghpages/benchmark-data
+          cat > _ghpages/README.md << 'EOF'
           # Benchmark Data
 
           This branch stores benchmark history for github-action-benchmark.
@@ -45,7 +32,7 @@ jobs:
           - Raw data: `benchmark-data/`
           - Dashboard: `index.html`
           EOF
-          cat > index.html << 'EOF'
+          cat > _ghpages/index.html << 'EOF'
           <!doctype html>
           <html lang="en">
           <head>
@@ -74,48 +61,14 @@ jobs:
           </body>
           </html>
           EOF
-          touch .nojekyll
-          git add -A
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "${{ inputs.default_commit_message }}"
-          git push origin gh-pages
+          touch _ghpages/.nojekyll
 
-      - name: Ensure branch protection friendly default files
-        if: steps.check.outputs.exists == 'true'
-        run: |
-          git checkout gh-pages
-          mkdir -p benchmark-data
-          touch .nojekyll
-          if [ ! -f index.html ]; then
-            cat > index.html << 'EOF'
-            <!doctype html>
-            <html lang="en">
-            <head>
-              <meta charset="utf-8" />
-              <meta name="viewport" content="width=device-width, initial-scale=1" />
-              <title>metrics-lib Benchmark Dashboard</title>
-              <style>
-                body{font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:2rem;}
-                h1{font-size:1.6rem;margin-bottom:0.5rem}
-                .note{color:#555}
-                ul{line-height:1.8}
-                code{background:#f6f8fa;padding:2px 4px;border-radius:4px}
-                a{color:#0366d6;text-decoration:none}
-                a:hover{text-decoration:underline}
-              </style>
-            </head>
-            <body>
-              <h1>metrics-lib Benchmark Dashboard</h1>
-              <p class="note">This page hosts benchmark history produced by <code>github-action-benchmark</code>.</p>
-              <ul>
-                <li>Raw data directory: <a href="./benchmark-data/">benchmark-data/</a></li>
-                <li>Project README: <a href="https://github.com/jamesgober/metrics-lib#benchmarks">Benchmarks section</a></li>
-                <li>Docs: <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/benchmarks/README.md">docs/benchmarks/README.md</a></li>
-              </ul>
-              <p class="note">Tip: After a few CI runs on <code>main</code>, you will see data accumulate under <code>benchmark-data/</code>. We can enhance this dashboard later to visualize trends.</p>
-            </body>
-            </html>
-            EOF
-          fi
-          git add -A
-          git diff --cached --quiet || git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore(ci): ensure gh-pages scaffolding present"
-          git push origin gh-pages
+      - name: Publish to gh-pages (force orphan)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: _ghpages
+          publish_branch: gh-pages
+          force_orphan: true
+          enable_jekyll: false
+          commit_message: ${{ inputs.default_commit_message }}
