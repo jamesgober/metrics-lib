@@ -228,4 +228,54 @@ mod tests {
         metrics().counter("global_test").inc();
         assert_eq!(metrics().counter("global_test").get(), 1);
     }
+
+    #[test]
+    fn test_time_function_records_and_returns() {
+        let metrics = MetricsCore::new();
+
+        let result = metrics.time("timed_op", || 123usize);
+        assert_eq!(result, 123);
+        // Ensure timer recorded exactly one sample
+        assert_eq!(metrics.timer("timed_op").count(), 1);
+    }
+
+    #[test]
+    fn test_accessors_system_and_registry() {
+        let metrics = MetricsCore::new();
+
+        // Access system and call a method to ensure it is used
+        let _ = metrics.system().cpu_used();
+
+        // Access registry and use it to create a metric directly
+        let reg = metrics.registry();
+        let c = reg.get_or_create_counter("from_registry");
+        c.add(2);
+        assert_eq!(metrics.counter("from_registry").get(), 2);
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let metrics: MetricsCore = Default::default();
+        metrics.counter("default_impl").inc();
+        assert_eq!(metrics.counter("default_impl").get(), 1);
+    }
+
+    #[test]
+    fn test_metrics_error_display() {
+        let e1 = MetricsError::CircuitOpen;
+        let e2 = MetricsError::Overloaded;
+        let e3 = MetricsError::InvalidName;
+        let e4 = MetricsError::Config("bad cfg".to_string());
+
+        let s1 = format!("{}", e1);
+        let s2 = format!("{}", e2);
+        let s3 = format!("{}", e3);
+        let s4 = format!("{}", e4);
+
+        assert!(s1.contains("Circuit breaker is open"));
+        assert!(s2.contains("System is overloaded"));
+        assert!(s3.contains("Invalid metric name"));
+        assert!(s4.contains("Configuration error"));
+        assert!(s4.contains("bad cfg"));
+    }
 }

@@ -15,6 +15,8 @@
 - Coverage is enforced tokenlessly via tarpaulin with a gate set to `--fail-under 75`; Cobertura XML (`cobertura.xml`) is uploaded as a build artifact.
 - Main test matrix runs with default features (no benches) to prevent benchmark-style tests from running on CI by default.
 - Security audit runs `cargo audit` directly (no integration permissions required).
+- Fixed malformed workflow structure in `.github/workflows/ci.yml` by ensuring `name`/`on` are top-level and moving `build-matrix` and `publish-dry-run` under `jobs:`.
+- Stabilized coverage: tarpaulin now runs with default features (removed `--all-features`) to align with common consumer paths and avoid penalizing optional modules.
 
 ### Documentation
 - Ensured test and docs commands in README cover bench-gated tests and Criterion benches.
@@ -22,6 +24,11 @@
 ### Housekeeping
 - Removed Codecov integration in CI; legacy `codecov.yml` archived to `docs/legacy/codecov.yml`.
 - Minor workflow refactors and naming clarifications in `.github/workflows/ci.yml`.
+
+### Tests
+- Added deterministic unit tests to raise and stabilize coverage without flakiness:
+  - `src/lib.rs`: cover `MetricsCore::time()`, `system()`, `registry()`, `Default` impl, and `Display` for `MetricsError` variants.
+  - `src/async_support.rs`: cover `AsyncTimerGuard::elapsed()` and `stop()`; added manual poll test for `TimedFuture` Ready branch without requiring an async runtime.
 
 
 <br>

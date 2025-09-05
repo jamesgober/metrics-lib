@@ -295,6 +295,51 @@ mod tests {
         metrics.rate("test").tick_n(1); // Simulate a tick
     }
 
+    #[test]
+    fn test_async_timer_guard_elapsed_and_stop() {
+        let timer = Timer::new();
+
+        let guard = timer.start_async();
+        // Exercise elapsed path
+        let _elapsed = guard.elapsed();
+        // Exercise explicit stop path
+        guard.stop();
+
+        assert_eq!(timer.count(), 1);
+    }
+
+    // Manually poll a TimedFuture that is immediately ready to cover the Ready branch
+    #[test]
+    fn test_timed_future_manual_poll_ready() {
+        let timer = Timer::new();
+
+        // Create a future that is immediately ready without needing an async runtime
+        let mut timed = timer.time_async(|| async { 7 });
+
+        // Build a no-op waker/context to poll manually
+        fn dummy_raw_waker() -> std::task::RawWaker {
+            fn clone(_: *const ()) -> std::task::RawWaker { dummy_raw_waker() }
+            fn wake(_: *const ()) {}
+            fn wake_by_ref(_: *const ()) {}
+            fn drop(_: *const ()) {}
+            const VTABLE: std::task::RawWakerVTable =
+                std::task::RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+            std::task::RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+
+        let waker = unsafe { std::task::Waker::from_raw(dummy_raw_waker()) };
+        let mut cx = std::task::Context::from_waker(&waker);
+
+        let mut pinned = unsafe { std::pin::Pin::new_unchecked(&mut timed) };
+        match std::future::Future::poll(pinned.as_mut(), &mut cx) {
+            std::task::Poll::Ready(v) => assert_eq!(v, 7),
+            std::task::Poll::Pending => panic!("future should be immediately ready"),
+        }
+
+        // Ensure the timer recorded the elapsed time on Ready
+        assert_eq!(timer.count(), 1);
+    }
+
     #[cfg(feature = "async")]
     #[tokio::test]
     async fn test_timed_future() {
