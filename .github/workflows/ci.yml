@@ -237,16 +237,17 @@ jobs:
           ~/.cargo/git
           target
         key: bench-regression-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run Criterion benchmarks
+    - name: Run Criterion benchmarks (bencher format)
       run: |
-        cargo bench --all-features
+        # Run Criterion and emit bencher-compatible output for github-action-benchmark
+        cargo bench --all-features -- --output-format bencher | tee criterion-output.txt
     - name: Benchmark Regression Check
       uses: benchmark-action/github-action-benchmark@v1
       with:
         name: Criterion
         tool: 'cargo'
-        # Target Criterion output directory (JSON)
-        output-file-path: 'target/criterion'
+        # Path to bencher-format output captured from cargo bench
+        output-file-path: 'criterion-output.txt'
         github-token: ${{ secrets.GITHUB_TOKEN }}
         auto-push: ${{ github.ref == 'refs/heads/main' }}
         # Store results on gh-pages branch under benchmark-data/
