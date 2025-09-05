@@ -244,7 +244,7 @@ jobs:
       uses: benchmark-action/github-action-benchmark@v1
       with:
         name: Criterion
-        tool: 'criterion'
+        tool: 'cargo'
         # Target Criterion output directory (JSON)
         output-file-path: 'target/criterion'
         github-token: ${{ secrets.GITHUB_TOKEN }}
