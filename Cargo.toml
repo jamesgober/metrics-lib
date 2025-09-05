@@ -102,6 +102,10 @@ nightly     = []
 # BENCHMARKS
 # #################################
 
+[[bench]]
+name = "metrics_bench"
+harness = false
+
 
 
 

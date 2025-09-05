@@ -10,6 +10,46 @@
 
 ## [Unreleased]
 
+### Added
+- Non-panicking `try_` variants for core metric operations returning `Result<T, MetricsError>`:
+  - `Counter`: `try_inc`, `try_add`, `try_set`, `try_fetch_add`, `try_inc_and_get` (overflow-checked)
+  - `Gauge`: `try_set`, `try_add`, `try_sub`, `try_set_max`, `try_set_min` (rejects non-finite values; overflow-checked)
+  - `Timer`: `try_record_ns`, `try_record`, `try_record_batch` (overflow-checked on internal counters)
+  - `RateMeter`: `try_tick`, `try_tick_n`, `try_tick_if_under_limit` (overflow-checked; respects rate limit)
+- Unit tests for `RateMeter` `try_` variants including total/window overflow guards and limit behavior.
+- Criterion bench target declared in `Cargo.toml` (`[[bench]] metrics_bench`, `harness = false`) so `cargo bench` runs Criterion main.
+- CI smoke benchmark job in `.github/workflows/ci.yml`:
+  - Runs on pull_request with short durations: `cargo bench -- -w 0.3 -m 1.0 -n 20`.
+  - Uploads `criterion-reports` artifact containing `target/criterion/`.
+- Nightly scheduled benchmarks in `.github/workflows/bench.yml`:
+  - Cron at 05:00 UTC across Linux/macOS/Windows matrix.
+  - Uploads full-duration results as `benchmark-results-<os>` artifacts.
+- Guarded CPU governor prepare/restore steps in `.github/workflows/bench.yml` for self-hosted Linux runners to reduce variance (no effect on hosted runners or non-Linux OSes).
+- `CONTRIBUTING.md` documenting local benchmarking, interpreting Criterion, and Linux CPU governor/taskset guidance for reducing variance on self-hosted runners.
+- `CONTRIBUTING.md` section on comparing Criterion result sets (baselines and directory-to-directory with `critcmp`).
+- `docs/API.md` new "Integration Examples" section covering: Web Framework Integration (Axum middleware), Database Pool Monitoring, Background Job Processing, Observability Stack Integration (metrics endpoint), Correlation with Tracing, and Grafana Dashboard Setup.
+  - Added more examples: NATS queue depth/consumers, Redis latency + dashboard queries, AWS Lambda EMF emission, Kubernetes Helm scrape annotations, and a fuller OTLP exporter skeleton.
+  - Added Real-World examples: High-Frequency Trading (HFT), Web Service Under Load, Batch Processing Pipeline, and Token Bucket Rate Limiter.
+  - Added ready-to-import assets:
+    - `docs/observability/grafana-dashboard.json`
+    - `docs/observability/recording-rules.yaml`
+    - `docs/k8s/service.yaml`
+    - `docs/k8s/servicemonitor.yaml`
+    - `docs/k8s/servicemonitor-secured.yaml`
+    - Helm snippets:
+      - `docs/k8s/helm/kube-prometheus-stack-values.yaml`
+      - `docs/k8s/helm/app-chart/values.yaml`
+      - `docs/k8s/helm/app-chart/templates/servicemonitor.yaml`
+      - `docs/k8s/helm/app-chart/templates/prometheusrule.yaml`
+
+### Changed
+- `README.md` Benchmarks section now explicitly references Criterion and adds:
+  - "Interpreting Criterion Results" guidance.
+  - "CI Artifacts" subsection describing smoke and nightly artifact names and locations.
+- `.github/workflows/bench.yml` jobs now also run under scheduled events via `if: ${{ github.event_name == 'schedule' || ... }}` conditions.
+- `README.md` now links to the Benchmarks workflow runs page under "Latest CI Benchmarks" for quick artifact access.
+- `docs/GUIDELINES.md` now references `CONTRIBUTING.md` for detailed benchmarking and comparison guidance so contributors can find it quickly.
+
 
 
 

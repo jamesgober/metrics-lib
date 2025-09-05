@@ -68,6 +68,34 @@ For a complete reference with examples, see `docs/API.md`.
 - [Adaptive controls](./docs/API.md#adaptive-controls) — sampling, circuit breaker, backpressure
 - [Prelude](./docs/API.md#prelude) — convenient re-exports
 
+### Error handling: try_ variants
+
+All core metrics expose non-panicking `try_` methods that validate inputs and return `Result<_, MetricsError>` instead of panicking:
+
+- `Counter`: `try_inc`, `try_add`, `try_set`, `try_fetch_add`, `try_inc_and_get`
+- `Gauge`: `try_set`, `try_add`, `try_sub`, `try_set_max`, `try_set_min`
+- `Timer`: `try_record_ns`, `try_record`, `try_record_batch`
+- `RateMeter`: `try_tick`, `try_tick_n`, `try_tick_if_under_limit`
+
+Error semantics:
+- `MetricsError::Overflow` — arithmetic would overflow/underflow an internal counter.
+- `MetricsError::InvalidValue { reason }` — non-finite or otherwise invalid input (e.g., NaN for `Gauge`).
+- `MetricsError::OverLimit` — operation would exceed a configured limit (e.g., rate limiting helpers).
+
+Example:
+
+```rust
+use metrics_lib::{init, metrics, MetricsError};
+
+init();
+let c = metrics().counter("jobs");
+c.try_add(10)?;      // Result<(), MetricsError>
+let r = metrics().rate("qps");
+let allowed = r.try_tick_if_under_limit(1000.0)?; // Result<bool, MetricsError>
+```
+
+Panic guarantees: the plain methods (`inc`, `add`, `set`, `tick`, etc.) prioritize speed and may saturate or assume valid inputs. Prefer `try_` variants when you need explicit error handling.
+
 ## Installation
 
 Add to your `Cargo.toml`:
@@ -114,6 +142,35 @@ let memory_gb = metrics().system().mem_used_gb();
 
 // Rate metering
 metrics().rate("api_calls").tick();
+```
+
+## Observability Quick Start
+
+- Integration Examples: see `docs/API.md#integration-examples`
+- Grafana dashboard (ready to import): `docs/observability/grafana-dashboard.json`
+- Prometheus recording rules: `docs/observability/recording-rules.yaml`
+- Kubernetes Service: `docs/k8s/service.yaml`
+- Prometheus Operator ServiceMonitor: `docs/k8s/servicemonitor.yaml`
+- Secured ServiceMonitor (TLS/Bearer): `docs/k8s/servicemonitor-secured.yaml`
+
+Commands
+
+```bash
+# Import Grafana dashboard via API
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <GRAFANA_API_TOKEN>" \
+  http://<grafana-host>/api/dashboards/db \
+  -d @docs/observability/grafana-dashboard.json
+
+# Validate Prometheus recording rules
+promtool check rules docs/observability/recording-rules.yaml
+
+# Apply Kubernetes manifests
+kubectl apply -f docs/k8s/service.yaml
+kubectl apply -f docs/k8s/servicemonitor.yaml
+# For secured endpoints
+kubectl apply -f docs/k8s/servicemonitor-secured.yaml
 ```
 
 ## Advanced Usage
@@ -185,12 +242,31 @@ Run the included benchmarks to see performance on your system:
 # Basic performance comparison
 cargo run --example benchmark_comparison --release
 
-# Comprehensive benchmarks
+# Comprehensive benchmarks (Criterion)
 cargo bench
 
 # Cross-platform system tests
 cargo test --all-features
 ```
+
+### Interpreting Criterion Results
+
+- Criterion writes reports to `target/criterion/` with per-benchmark statistics and comparisons.
+- Key numbers to watch: `time: [low … mean … high]` and outlier percentages.
+- Compare runs over time to detect regressions. Store artifacts from CI for historical comparison.
+- Benchmarks are microbenchmarks; validate with end-to-end measurements as needed.
+
+#### CI Artifacts
+
+- Pull Requests: CI runs a fast smoke bench and uploads `criterion-reports` with `target/criterion`.
+- Nightly: The `Benchmarks` workflow runs full-duration benches on Linux/macOS/Windows and uploads artifacts as `benchmark-results-<os>`.
+- You can download these artifacts from the GitHub Actions run page to compare results across commits.
+
+#### Latest CI Benchmarks
+
+View the latest nightly results and artifacts here:
+
+[Latest CI Benchmarks (Benchmarks workflow)](https://github.com/jamesgober/metrics-lib/actions/workflows/bench.yml)
 
 **Sample Results** (M1 MacBook Pro):
 ```
