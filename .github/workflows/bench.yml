@@ -98,6 +98,7 @@ jobs:
       run: CI_MODE=1 node tools/bench_regression_check.js
     - name: Regression report (manual, non-blocking)
       if: ${{ github.event_name != 'schedule' && inputs.run_criterion == 'true' }}
+      continue-on-error: true
       run: node tools/bench_regression_check.js || echo "Non-blocking regression report only"
     - name: Archive benchmark results
       if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
