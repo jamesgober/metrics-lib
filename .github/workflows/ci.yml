@@ -202,7 +202,20 @@ jobs:
     - name: Clippy (examples)
       run: cargo clippy --examples -- -D warnings
     - name: Run quick_start example
-      run: cargo run --example quick_start --release
+      run: |
+        mkdir -p examples-out
+        cargo run --example quick_start --release | tee examples-out/quick_start.txt
+    - name: Run streaming_rate_window example
+      run: |
+        mkdir -p examples-out
+        cargo run --example streaming_rate_window --release | tee examples-out/streaming_rate_window.txt
+    - name: Upload example outputs
+      uses: actions/upload-artifact@v4
+      with:
+        name: example-outputs
+        path: examples-out
+        if-no-files-found: error
+        retention-days: 7
 
   smoke-bench:
     name: Benchmarks (smoke)
@@ -314,6 +327,22 @@ jobs:
         else
           echo "found=true" >> "$GITHUB_OUTPUT"
         fi
+    - name: Upload Criterion summary artifact
+      if: steps.aggregate.outputs.found == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: criterion-summary
+        path: criterion-summary.json
+        if-no-files-found: error
+        retention-days: 7
+    - name: Upload raw Criterion reports (optional)
+      if: steps.aggregate.outputs.found == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: criterion-reports-raw
+        path: target/criterion
+        if-no-files-found: ignore
+        retention-days: 7
     - name: Benchmark Regression Check
       if: steps.aggregate.outputs.found == 'true'
       uses: benchmark-action/github-action-benchmark@v1

@@ -22,7 +22,7 @@ async fn main() {
         let mut t = tokio::time::interval(Duration::from_millis(10));
         for _ in 0..400u32 { // ~4 seconds
             t.tick().await;
-            let n = 1 + (rng.gen::<u8>() % 5) as u64; // 1..=5 ticks
+            let n = 1 + (rng.gen::<u8>() % 5) as u32; // 1..=5 ticks
             r.tick_n(n);
         }
     });

@@ -21,6 +21,10 @@
   - Repository README now links to the public history: `https://jamesgober.github.io/metrics-lib/benchmark-data/`.
 - Examples quality gate:
   - `cargo build --examples` and `cargo clippy --examples -D warnings` verified clean.
+  - CI job added to build, lint, and run `quick_start` example on every PR/push.
+  - New example: `examples/quick_start.rs` demonstrating counter, gauge, timer (RAII), and rate usage.
+  - New example: `examples/streaming_rate_window.rs` demonstrating rate sampling over time with a Tokio producer/consumer.
+  - New example: `examples/axum_registry_integration.rs` demonstrating a minimal Axum server updating metrics and exporting a JSON snapshot.
 - Chaos Testing Suite (concurrency and system pressure):
   - File: `tests/chaos_tests.rs`
   - Gated via `#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]` and `#[ignore]` by default.
@@ -88,6 +92,8 @@ Beta: Error Hardened, Stable.
   - Explicit bench invocation in CI: `cargo bench --bench metrics_bench --all-features` to guarantee benchmark execution.
   - CI skips regression check gracefully when no estimates are produced (logs tree and continues), avoiding red builds in edge cases.
   - CI shell portability fixes: `jq` install only on Linux; bash forced for steps using bashisms.
+  - CI now uploads artifacts for visibility: `criterion-summary.json` and raw `target/criterion` directory (7-day retention).
+  - Pinned Criterion dev-dependency to `=0.4.0` for reproducible output layout.
 
 - Formatting and style conformance in long-running tests:
   - `tests/chaos_tests.rs`: header spacing normalized; long `eprintln!` formatted across lines.

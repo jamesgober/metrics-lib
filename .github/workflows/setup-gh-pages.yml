@@ -68,6 +68,11 @@ jobs:
               code{background:#f6f8fa;padding:2px 4px;border-radius:4px}
               a{color:#0366d6;text-decoration:none}
               a:hover{text-decoration:underline}
+              .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:1rem}
+              .card{border:1px solid #e1e4e8;border-radius:8px;padding:12px}
+              .title{font-weight:600;margin-bottom:4px}
+              .value{font-size:1.2rem}
+              .unit{font-size:0.9rem;color:#666}
             </style>
           </head>
           <body>
@@ -78,7 +83,10 @@ jobs:
               <li>Project README: <a href="https://github.com/jamesgober/metrics-lib#benchmarks">Benchmarks section</a></li>
               <li>Docs: <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/benchmarks/README.md">docs/benchmarks/README.md</a></li>
             </ul>
-            <p class="note">Tip: After a few CI runs on <code>main</code>, you will see data accumulate under <code>benchmark-data/</code>. We can enhance this dashboard later to visualize trends.</p>
+            <div id="content">
+              <p class="note">Tip: After a few CI runs on <code>main</code>, you will see data accumulate under <code>benchmark-data/</code>. This dashboard will attempt to render a simple summary automatically.</p>
+            </div>
+            <script src="./main.js"></script>
           </body>
           </html>
           EOF

@@ -18,6 +18,7 @@
 
 ## Table of Contents
 - **[Installation](#installation)**
+- **[Examples](#examples)**
 - **[Quick Start](#quick-start)**
 - **[Public APIs](#public-apis)**
   - [Global initialization](#global-initialization)
@@ -123,6 +124,47 @@ let r = metrics().rate("api");
 let ok = r.try_tick_if_under_limit(1000.0)?; // Result<bool, MetricsError>
 if ok { /* proceed */ }
 ```
+
+<hr>
+<br>
+<a href="#top">&uarr; <b>TOP</b></a>
+<br>
+
+
+## Examples
+
+Run these self-contained examples to see the library in action:
+
+- Quick Start
+  - File: `examples/quick_start.rs`
+  - Run:
+    ```bash
+    cargo run --example quick_start --release
+    ```
+
+- Streaming Rate Window
+  - File: `examples/streaming_rate_window.rs`
+  - Run:
+    ```bash
+    cargo run --example streaming_rate_window --release
+    ```
+
+- Axum Registry Integration (minimal web service)
+  - File: `examples/axum_registry_integration.rs`
+  - Run:
+    ```bash
+    cargo run --example axum_registry_integration --release
+    ```
+  - Endpoints:
+    - `GET /health` — liveness probe
+    - `GET /metrics-demo` — updates metrics (counter/gauge/timer/rate)
+    - `GET /export` — returns a JSON snapshot of selected metrics
+
+
+<hr>
+<br>
+<a href="#top">&uarr; <b>TOP</b></a>
+<br>
 
 
 ## Quick Start
@@ -1511,3 +1553,17 @@ spec:
 - For specialized meters/gauges, see the `specialized` submodules re-exported as `gauge_specialized` and `rate_meter_specialized`.
 - Keep limiter metrics sparse; avoid per-user limiters unless cardinality is controlled.
 - For multi-tenant systems, expose only tier-level or route-level aggregates.
+
+
+<hr>
+<br>
+<a href="#top">&uarr; <b>TOP</b></a>
+<br>
+
+
+<!-- FOOT COPYRIGHT
+################################################# -->
+<div align="center">
+  <h2></h2>
+  <sup>COPYRIGHT <small>&copy;</small> 2025 <strong>JAMES GOBER.</strong></sup>
+</div>

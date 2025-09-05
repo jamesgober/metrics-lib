@@ -200,6 +200,35 @@ batch.gauge_set("cpu", 85.2);
 batch.flush(metrics());
 ```
 
+## Examples
+
+Run these self-contained examples to see the library in action:
+
+- Quick Start
+  - File: `examples/quick_start.rs`
+  - Run:
+    ```bash
+    cargo run --example quick_start --release
+    ```
+
+- Streaming Rate Window
+  - File: `examples/streaming_rate_window.rs`
+  - Run:
+    ```bash
+    cargo run --example streaming_rate_window --release
+    ```
+
+- Axum Registry Integration (minimal web service)
+  - File: `examples/axum_registry_integration.rs`
+  - Run:
+    ```bash
+    cargo run --example axum_registry_integration --release
+    ```
+  - Endpoints:
+    - `GET /health` — liveness probe
+    - `GET /metrics-demo` — updates metrics (counter/gauge/timer/rate)
+    - `GET /export` — returns a JSON snapshot of selected metrics
+
 ### Resilience Features
 
 ```rust

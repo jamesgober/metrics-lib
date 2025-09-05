@@ -84,3 +84,13 @@ kubectl apply -f docs/k8s/servicemonitor-secured.yaml
 
 - MSRV (Minimum Supported Rust Version): 1.70+
 - See [`Cargo.toml`](../Cargo.toml) for feature flags and defaults
+
+
+<br>
+
+<!-- FOOT COPYRIGHT
+################################################# -->
+<div align="center">
+  <h2></h2>
+  <sup>COPYRIGHT <small>&copy;</small> 2025 <strong>JAMES GOBER.</strong></sup>
+</div>
