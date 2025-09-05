@@ -95,10 +95,12 @@ Beta: Error Hardened, Stable.
   - CI now uploads artifacts for visibility: `criterion-summary.json` and raw `target/criterion` directory (7-day retention).
   - Pinned Criterion dev-dependency to `=0.4.0` for reproducible output layout.
  - MSRV stability (Rust 1.70.0) for examples/dev-deps:
-   - Downgraded `reqwest` to `=0.11.27` with default `native-tls` (and `json`) to avoid `hyper-rustls` MSRV >= 1.71.
-   - Pinned transitive URL stack to pre-ICU to avoid `zerotrie` MSRV >= 1.82 via `icu/idna` chain:
-     - `url = "=2.4.1"`, `idna = "=0.3.0"`.
-
+  - Downgraded `reqwest` to `=0.11.27` with default `native-tls` (and `json`) to avoid `hyper-rustls` MSRV >= 1.71.
+  - Pinned transitive URL stack to pre-ICU to avoid `zerotrie` MSRV >= 1.82 via `icu/idna` chain:
+    - `url = "=2.4.1"`, `idna = "=0.3.0"`.
+  - Subsequently removed `reqwest`, `url`, and `idna` from dev-dependencies entirely to address security advisories and MSRV constraints.
+  - Refactored `examples/axum_registry_integration.rs` to use in-process requests via `tower::util::ServiceExt::oneshot` and `axum::body::to_bytes` (no external HTTP client).
+  - Added `tower = "0.5"` as a dev-dependency for the example.
 - Formatting and style conformance in long-running tests:
   - `tests/chaos_tests.rs`: header spacing normalized; long `eprintln!` formatted across lines.
   - `tests/longevity_tests.rs`: header spacing normalized; chained `env::var(...).ok().and_then(...).unwrap_or(...)` split across lines; long `eprintln!` and inline `if` bodies expanded for rustfmt/MSRV.

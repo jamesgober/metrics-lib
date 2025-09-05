@@ -8,9 +8,11 @@
 //!   cargo run --example axum_registry_integration --release
 
 use axum::{routing::get, Json, Router};
+use axum::http::{Request, StatusCode};
+use axum::body::{Body, to_bytes};
 use serde_json::json;
-use std::{net::SocketAddr, time::Duration};
-use tokio::net::TcpListener;
+use std::time::Duration;
+use tower::util::ServiceExt; // for `oneshot`
 
 use metrics_lib::{init, metrics};
 
@@ -51,34 +53,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics-demo", get(metrics_demo))
         .route("/export", get(export_metrics));
 
-    // Bind to an ephemeral port
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let addr: SocketAddr = listener.local_addr()?;
-
-    // Serve in background
-    let handle = tokio::spawn(async move {
-        // Run the server until aborted by the example
-        let _ = axum::serve(listener, app).await;
-    });
-
-    // Exercise routes with request then stop
-    let base = format!("http://{}", addr);
-    let client = reqwest::Client::new();
-
+    // Exercise routes in-process using tower::ServiceExt::oneshot
     // Health
-    let r = client.get(format!("{}/health", base)).send().await?;
-    assert!(r.status().is_success());
+    let res = app.clone().oneshot(Request::builder().method("GET").uri("/health").body(Body::empty())?).await?;
+    assert_eq!(res.status(), StatusCode::OK);
 
     // Update metrics
-    let r = client.get(format!("{}/metrics-demo", base)).send().await?;
-    assert!(r.status().is_success());
+    let res = app.clone().oneshot(Request::builder().method("GET").uri("/metrics-demo").body(Body::empty())?).await?;
+    assert!(res.status().is_success());
 
     // Export JSON snapshot
-    let r = client.get(format!("{}/export", base)).send().await?;
-    let v: serde_json::Value = r.json().await?;
+    let res = app.clone().oneshot(Request::builder().method("GET").uri("/export").body(Body::empty())?).await?;
+    assert!(res.status().is_success());
+    // For demonstration, print the body; convert Bytes to JSON (cap at 64KiB)
+    let bytes = to_bytes(res.into_body(), 64 * 1024).await?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
     println!("export snapshot: {}", v);
 
-    // Done — cancel server task
-    handle.abort();
     Ok(())
 }
