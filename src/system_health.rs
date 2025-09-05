@@ -46,6 +46,10 @@ pub struct SystemHealth {
     update_interval_ms: u64,
     /// Creation timestamp
     created_at: Instant,
+    #[cfg(not(target_os = "linux"))]
+    sys: std::sync::Mutex<System>,
+    #[cfg(not(target_os = "linux"))]
+    pid: Option<sysinfo::Pid>,
 }
 
 /// System resource usage snapshot
@@ -102,6 +106,10 @@ impl SystemHealth {
             last_update: AtomicU64::new(0),
             update_interval_ms: 1000, // 1 second default
             created_at: Instant::now(),
+            #[cfg(not(target_os = "linux"))]
+            sys: std::sync::Mutex::new(System::new()),
+            #[cfg(not(target_os = "linux"))]
+            pid: get_current_pid().ok(),
         };
 
         // Do initial update
@@ -391,9 +399,9 @@ impl SystemHealth {
     #[cfg(not(target_os = "linux"))]
     fn get_system_cpu(&self) -> io::Result<f64> {
         // Cross-platform via sysinfo
-        let mut sys = System::new();
-        sys.refresh_cpu();
-        Ok(sys.global_cpu_info().cpu_usage() as f64)
+        let mut guard = self.sys.lock().unwrap();
+        guard.refresh_cpu();
+        Ok(guard.global_cpu_info().cpu_usage() as f64)
     }
 
     #[cfg(target_os = "linux")]
@@ -437,10 +445,10 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_system_memory_mb(&self) -> io::Result<u64> {
-        let mut sys = System::new();
-        sys.refresh_memory();
+        let mut guard = self.sys.lock().unwrap();
+        guard.refresh_memory();
         // sysinfo reports memory in KiB
-        let used_kib = sys.used_memory();
+        let used_kib = guard.used_memory();
         Ok(used_kib / 1024)
     }
 
@@ -457,8 +465,8 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_load_average(&self) -> io::Result<f64> {
-        let sys = System::new();
-        let la = sys.load_average();
+        let guard = self.sys.lock().unwrap();
+        let la = guard.load_average();
         Ok(la.one)
     }
 
@@ -482,10 +490,10 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_process_cpu(&self) -> io::Result<f64> {
-        let mut sys = System::new();
-        if let Ok(pid) = get_current_pid() {
-            sys.refresh_process(pid);
-            if let Some(proc_) = sys.process(pid) {
+        let mut guard = self.sys.lock().unwrap();
+        if let Some(pid) = self.pid {
+            guard.refresh_process(pid);
+            if let Some(proc_) = guard.process(pid) {
                 return Ok(proc_.cpu_usage() as f64);
             }
         }
@@ -509,10 +517,10 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_process_memory_mb(&self) -> io::Result<u64> {
-        let mut sys = System::new();
-        if let Ok(pid) = get_current_pid() {
-            sys.refresh_process(pid);
-            if let Some(proc_) = sys.process(pid) {
+        let mut guard = self.sys.lock().unwrap();
+        if let Some(pid) = self.pid {
+            guard.refresh_process(pid);
+            if let Some(proc_) = guard.process(pid) {
                 // memory() in KiB
                 return Ok(proc_.memory() / 1024);
             }
