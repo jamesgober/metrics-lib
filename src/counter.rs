@@ -10,6 +10,7 @@
 //! - **Cache optimized** - Aligned to prevent false sharing
 //! - **Overflow safe** - Handles u64::MAX gracefully
 
+use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -68,6 +69,29 @@ impl Counter {
         self.value.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Try to increment by 1 with overflow check
+    ///
+    /// Returns `Ok(())` on success, or `Err(MetricsError::Overflow)` if the
+    /// increment would overflow `u64::MAX`.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Counter, MetricsError};
+    /// let c = Counter::with_value(u64::MAX - 1);
+    /// c.try_inc().unwrap();
+    /// assert_eq!(c.get(), u64::MAX);
+    /// assert!(matches!(c.try_inc(), Err(MetricsError::Overflow)));
+    /// ```
+    #[inline(always)]
+    pub fn try_inc(&self) -> Result<()> {
+        let current = self.value.load(Ordering::Relaxed);
+        if current == u64::MAX {
+            return Err(MetricsError::Overflow);
+        }
+        self.value.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Add arbitrary amount - also blazingly fast
     ///
     /// Zero branch optimization - if amount is 0, still does the atomic
@@ -75,6 +99,31 @@ impl Counter {
     #[inline(always)]
     pub fn add(&self, amount: u64) {
         self.value.fetch_add(amount, Ordering::Relaxed);
+    }
+
+    /// Try to add an arbitrary amount with overflow check
+    ///
+    /// Returns `Ok(())` on success, or `Err(MetricsError::Overflow)` if the
+    /// addition would overflow `u64::MAX`.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Counter, MetricsError};
+    /// let c = Counter::with_value(u64::MAX - 5);
+    /// assert!(c.try_add(4).is_ok());
+    /// assert!(matches!(c.try_add(2), Err(MetricsError::Overflow)));
+    /// ```
+    #[inline(always)]
+    pub fn try_add(&self, amount: u64) -> Result<()> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let current = self.value.load(Ordering::Relaxed);
+        if current.checked_add(amount).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+        self.value.fetch_add(amount, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Get current value - single atomic load
@@ -99,11 +148,20 @@ impl Counter {
         self.value.store(value, Ordering::SeqCst);
     }
 
+    /// Try to set to a specific value (always succeeds for `u64`)
+    ///
+    /// This method never fails and always returns `Ok(())`.
+    #[inline]
+    pub fn try_set(&self, value: u64) -> Result<()> {
+        self.set(value);
+        Ok(())
+    }
+
     /// Atomic compare-and-swap
     ///
     /// Returns Ok(previous_value) if successful, Err(current_value) if failed
     #[inline]
-    pub fn compare_and_swap(&self, expected: u64, new: u64) -> Result<u64, u64> {
+    pub fn compare_and_swap(&self, expected: u64, new: u64) -> core::result::Result<u64, u64> {
         match self
             .value
             .compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst)
@@ -119,6 +177,30 @@ impl Counter {
         self.value.fetch_add(amount, Ordering::Relaxed)
     }
 
+    /// Checked fetch_add that returns the previous value or error on overflow
+    ///
+    /// Returns the previous value on success, or `Err(MetricsError::Overflow)`
+    /// if adding `amount` would overflow `u64::MAX`.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Counter, MetricsError};
+    /// let c = Counter::with_value(u64::MAX - 1);
+    /// assert_eq!(c.try_fetch_add(1).unwrap(), u64::MAX - 1);
+    /// assert!(matches!(c.try_fetch_add(1), Err(MetricsError::Overflow)));
+    /// ```
+    #[inline]
+    pub fn try_fetch_add(&self, amount: u64) -> Result<u64> {
+        if amount == 0 {
+            return Ok(self.get());
+        }
+        let current = self.value.load(Ordering::Relaxed);
+        if current.checked_add(amount).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+        Ok(self.value.fetch_add(amount, Ordering::Relaxed))
+    }
+
     /// Add amount and return new value
     #[inline]
     pub fn add_and_get(&self, amount: u64) -> u64 {
@@ -129,6 +211,27 @@ impl Counter {
     #[inline]
     pub fn inc_and_get(&self) -> u64 {
         self.value.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Checked increment that returns new value or error on overflow
+    ///
+    /// Returns the new value, or `Err(MetricsError::Overflow)` if the
+    /// increment would overflow `u64::MAX`.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Counter, MetricsError};
+    /// let c = Counter::with_value(u64::MAX - 1);
+    /// assert_eq!(c.try_inc_and_get().unwrap(), u64::MAX);
+    /// assert!(matches!(c.try_inc_and_get(), Err(MetricsError::Overflow)));
+    /// ```
+    #[inline]
+    pub fn try_inc_and_get(&self) -> Result<u64> {
+        let current = self.value.load(Ordering::Relaxed);
+        let new_val = current.checked_add(1).ok_or(MetricsError::Overflow)?;
+        let prev = self.value.fetch_add(1, Ordering::Relaxed);
+        debug_assert_eq!(prev, current);
+        Ok(new_val)
     }
 
     /// Get comprehensive statistics
@@ -402,7 +505,7 @@ mod tests {
         let display_str = format!("{}", counter);
         assert!(display_str.contains("42"));
 
-        let debug_str = format!("{:?}", counter);
+        let debug_str = format!("{counter:?}");
         assert!(debug_str.contains("Counter"));
         assert!(debug_str.contains("42"));
     }

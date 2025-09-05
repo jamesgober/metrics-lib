@@ -10,6 +10,7 @@
 //! - **Lock-free** - Never blocks, never waits
 //! - **Cache optimized** - Aligned to prevent false sharing
 
+use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -72,6 +73,44 @@ impl Timer {
         }
     }
 
+    /// Try to record nanoseconds directly with overflow checks
+    ///
+    /// Returns `Err(MetricsError::Overflow)` if adding `duration_ns` would
+    /// overflow internal counters (`total_nanos` or `count`). On success
+    /// updates min/max as needed.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Timer, MetricsError};
+    /// let t = Timer::new();
+    /// t.try_record_ns(1_000).unwrap();
+    /// assert_eq!(t.count(), 1);
+    /// assert!(matches!(t.try_record_ns(u64::MAX), Err(MetricsError::Overflow)));
+    /// ```
+    #[inline(always)]
+    pub fn try_record_ns(&self, duration_ns: u64) -> Result<()> {
+        // Check total_nanos overflow
+        let total = self.total_nanos.load(Ordering::Relaxed);
+        if total.checked_add(duration_ns).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+
+        // Check count overflow
+        let cnt = self.count.load(Ordering::Relaxed);
+        if cnt == u64::MAX {
+            return Err(MetricsError::Overflow);
+        }
+
+        // Apply updates
+        self.total_nanos.fetch_add(duration_ns, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+
+        // Update min and max
+        self.update_min(duration_ns);
+        self.update_max(duration_ns);
+        Ok(())
+    }
+
     /// Start timing - returns RAII guard that auto-records on drop
     #[inline(always)]
     pub fn start(&self) -> RunningTimer<'_> {
@@ -87,6 +126,24 @@ impl Timer {
     pub fn record(&self, duration: Duration) {
         let duration_ns = duration.as_nanos() as u64;
         self.record_ns(duration_ns);
+    }
+
+    /// Try to record a duration with overflow checks
+    ///
+    /// Returns `Err(MetricsError::Overflow)` if adding this sample would overflow
+    /// internal counters.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Timer, MetricsError};
+    /// use std::time::Duration;
+    /// let t = Timer::new();
+    /// assert!(t.try_record(Duration::from_millis(1)).is_ok());
+    /// ```
+    #[inline]
+    pub fn try_record(&self, duration: Duration) -> Result<()> {
+        let duration_ns = duration.as_nanos() as u64;
+        self.try_record_ns(duration_ns)
     }
 
     /// Record nanoseconds directly - fastest path
@@ -131,6 +188,59 @@ impl Timer {
         if local_max > 0 {
             self.update_max(local_max);
         }
+    }
+
+    /// Try to record multiple durations at once with overflow checks
+    ///
+    /// Returns `Err(MetricsError::Overflow)` if the aggregated additions would
+    /// overflow internal counters. Updates min/max based on batch extrema.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::Timer;
+    /// use std::time::Duration;
+    /// let t = Timer::new();
+    /// t.try_record_batch(&[Duration::from_micros(5), Duration::from_micros(10)]).unwrap();
+    /// assert_eq!(t.count(), 2);
+    /// ```
+    #[inline]
+    pub fn try_record_batch(&self, durations: &[Duration]) -> Result<()> {
+        if durations.is_empty() {
+            return Ok(());
+        }
+
+        let mut total_ns: u64 = 0;
+        let mut local_min = u64::MAX;
+        let mut local_max = 0u64;
+
+        for d in durations {
+            let ns = d.as_nanos() as u64;
+            total_ns = total_ns.checked_add(ns).ok_or(MetricsError::Overflow)?;
+            local_min = local_min.min(ns);
+            local_max = local_max.max(ns);
+        }
+
+        // Check counters will not overflow
+        let current_total = self.total_nanos.load(Ordering::Relaxed);
+        if current_total.checked_add(total_ns).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+        let current_count = self.count.load(Ordering::Relaxed);
+        let add_count = durations.len() as u64;
+        if current_count.checked_add(add_count).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+
+        // Apply updates
+        self.total_nanos.fetch_add(total_ns, Ordering::Relaxed);
+        self.count.fetch_add(add_count, Ordering::Relaxed);
+        if local_min < u64::MAX {
+            self.update_min(local_min);
+        }
+        if local_max > 0 {
+            self.update_max(local_max);
+        }
+        Ok(())
     }
 
     /// Get current count of samples
@@ -518,8 +628,7 @@ mod tests {
         let avg = timer.average();
         assert!(
             avg >= Duration::from_millis(46) && avg <= Duration::from_millis(47),
-            "Average {:?} should be between 46ms and 47ms",
-            avg
+            "Average {avg:?} should be between 46ms and 47ms",
         );
     }
 
@@ -569,7 +678,7 @@ mod tests {
                     for i in 0..recordings_per_thread {
                         // Record varying durations
                         let duration_ms = (thread_id * recordings_per_thread + i) % 100 + 1;
-                        timer.record(Duration::from_millis(duration_ms as u64));
+                        timer.record(Duration::from_millis(duration_ms));
                     }
                 })
             })
@@ -671,11 +780,11 @@ mod tests {
         let timer = Timer::new();
         timer.record(Duration::from_millis(100));
 
-        let display_str = format!("{}", timer);
+        let display_str = format!("{timer}");
         assert!(display_str.contains("Timer"));
         assert!(display_str.contains("count: 1"));
 
-        let debug_str = format!("{:?}", timer);
+        let debug_str = format!("{timer:?}");
         assert!(debug_str.contains("Timer"));
         assert!(debug_str.contains("count"));
         assert!(debug_str.contains("average"));

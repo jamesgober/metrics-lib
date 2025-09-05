@@ -16,9 +16,10 @@ fn main() {
     metrics_lib::init();
 
     println!("Configuration:");
-    println!("  Threads: {}", THREADS);
-    println!("  Iterations per thread: {}", ITERATIONS);
-    println!("  Total operations: {}\n", THREADS * ITERATIONS);
+    println!("  Threads: {THREADS}");
+    println!("  Iterations per thread: {ITERATIONS}");
+    let total_ops_init = THREADS * ITERATIONS;
+    println!("  Total operations: {total_ops_init}\n");
 
     // Benchmark counter increments
     benchmark_counter_ops();
@@ -61,9 +62,9 @@ fn benchmark_counter_ops() {
     let total_ops = THREADS * ITERATIONS;
     let ns_per_op = elapsed.as_nanos() as f64 / total_ops as f64;
 
-    println!("  Total time: {:?}", elapsed);
-    println!("  Operations: {}", total_ops);
-    println!("  Performance: {:.2} ns/op", ns_per_op);
+    println!("  Total time: {elapsed:?}");
+    println!("  Operations: {total_ops}");
+    println!("  Performance: {ns_per_op:.2} ns/op");
     println!("  Throughput: {:.2} M ops/sec", 1000.0 / ns_per_op);
 
     // Verify correctness
@@ -96,9 +97,9 @@ fn benchmark_gauge_ops(threads: usize, iterations: usize) {
     let total_ops = threads * iterations;
     let ns_per_op = elapsed.as_nanos() as f64 / total_ops as f64;
 
-    println!("  Total time: {:?}", elapsed);
-    println!("  Operations: {}", total_ops);
-    println!("  Performance: {:.2} ns/op", ns_per_op);
+    println!("  Total time: {elapsed:?}");
+    println!("  Operations: {total_ops}");
+    println!("  Performance: {ns_per_op:.2} ns/op");
     println!("  Throughput: {:.2} M ops/sec", 1000.0 / ns_per_op);
     println!();
 }
@@ -129,9 +130,9 @@ fn benchmark_timer_ops() {
     let total_ops = THREADS * ITERATIONS;
     let ns_per_op = elapsed.as_nanos() as f64 / total_ops as f64;
 
-    println!("  Total time: {:?}", elapsed);
-    println!("  Operations: {}", total_ops);
-    println!("  Performance: {:.2} ns/op", ns_per_op);
+    println!("  Total time: {elapsed:?}");
+    println!("  Operations: {total_ops}");
+    println!("  Performance: {ns_per_op:.2} ns/op");
     println!("  Throughput: {:.2} M ops/sec", 1000.0 / ns_per_op);
 
     // Verify correctness
@@ -176,9 +177,9 @@ fn benchmark_concurrent_ops() {
     let total_ops = THREADS * ITERATIONS;
     let ns_per_op = elapsed.as_nanos() as f64 / total_ops as f64;
 
-    println!("  Total time: {:?}", elapsed);
-    println!("  Operations: {}", total_ops);
-    println!("  Performance: {:.2} ns/op", ns_per_op);
+    println!("  Total time: {elapsed:?}");
+    println!("  Operations: {total_ops}");
+    println!("  Performance: {ns_per_op:.2} ns/op");
     println!("  Throughput: {:.2} M ops/sec", 1000.0 / ns_per_op);
     println!();
 }

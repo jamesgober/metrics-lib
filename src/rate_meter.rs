@@ -11,6 +11,7 @@
 //! - **Zero allocations** - Pure atomic operations
 //! - **Rate limiting** - Built-in support for throttling
 
+use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -93,6 +94,23 @@ impl RateMeter {
         self.tick_n(1);
     }
 
+    /// Try to record a single event with overflow checks
+    ///
+    /// Returns `Err(MetricsError::Overflow)` if incrementing the total or any
+    /// current window counter would overflow. On success returns `Ok(())`.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{RateMeter, MetricsError};
+    /// let m = RateMeter::new();
+    /// m.try_tick().unwrap();
+    /// assert_eq!(m.total(), 1);
+    /// ```
+    #[inline(always)]
+    pub fn try_tick(&self) -> Result<()> {
+        self.try_tick_n(1)
+    }
+
     /// Record N events at once
     #[inline(always)]
     pub fn tick_n(&self, n: u32) {
@@ -106,6 +124,54 @@ impl RateMeter {
         // Update windows (lazy - only when needed)
         let now = self.get_unix_timestamp();
         self.update_windows(now, n);
+    }
+
+    /// Try to record N events at once with overflow checks
+    ///
+    /// - Returns `Ok(())` on success.
+    /// - Returns `Err(MetricsError::Overflow)` if incrementing any of the
+    ///   involved counters would overflow (`total_events`, `current_second_events`,
+    ///   `current_minute_events`, or `current_hour_events`).
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{RateMeter, MetricsError};
+    /// let m = RateMeter::new();
+    /// assert!(m.try_tick_n(5).is_ok());
+    /// assert_eq!(m.total(), 5);
+    /// ```
+    #[inline(always)]
+    pub fn try_tick_n(&self, n: u32) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+
+        // Check total_events overflow
+        let total = self.total_events.load(Ordering::Relaxed);
+        if total.checked_add(n as u64).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+
+        // Pre-check window counters roughly (race-safe best-effort). Since windows reset, we
+        // only guard against immediate and obvious overflow.
+        let sec = self.current_second_events.load(Ordering::Relaxed);
+        if sec.checked_add(n).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+        let min = self.current_minute_events.load(Ordering::Relaxed);
+        if min.checked_add(n).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+        let hour = self.current_hour_events.load(Ordering::Relaxed);
+        if hour.checked_add(n).is_none() {
+            return Err(MetricsError::Overflow);
+        }
+
+        // Apply updates
+        self.total_events.fetch_add(n as u64, Ordering::Relaxed);
+        let now = self.get_unix_timestamp();
+        self.update_windows(now, n);
+        Ok(())
     }
 
     /// Get current rate (events per second in current window)
@@ -171,6 +237,30 @@ impl RateMeter {
             true
         } else {
             false
+        }
+    }
+
+    /// Try to tick if under limit, with overflow checks
+    ///
+    /// Attempts to record a single event only if the current rate would not
+    /// exceed `limit`. Returns:
+    /// - `Ok(true)` if the event was recorded.
+    /// - `Ok(false)` if the event would exceed the limit (no change made).
+    /// - `Err(MetricsError::Overflow)` if counters would overflow while recording.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::RateMeter;
+    /// let m = RateMeter::new();
+    /// assert!(m.try_tick_if_under_limit(10.0).unwrap());
+    /// ```
+    #[inline]
+    pub fn try_tick_if_under_limit(&self, limit: f64) -> Result<bool> {
+        if self.can_allow(1, limit) {
+            self.try_tick()?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -749,11 +839,11 @@ mod tests {
         let meter = RateMeter::new();
         meter.tick_n(42);
 
-        let display_str = format!("{}", meter);
+        let display_str = format!("{meter}");
         assert!(display_str.contains("RateMeter"));
         assert!(display_str.contains("42 total"));
 
-        let debug_str = format!("{:?}", meter);
+        let debug_str = format!("{meter:?}");
         assert!(debug_str.contains("RateMeter"));
         assert!(debug_str.contains("total_events"));
     }
@@ -768,6 +858,62 @@ mod tests {
 
         let stats = meter.stats();
         assert!(stats.window_fill >= 0.0);
+    }
+
+    // New tests for try_ variants and overflow/error conditions
+    #[test]
+    fn test_try_tick_and_try_tick_n_ok() {
+        let meter = RateMeter::new();
+        assert!(meter.try_tick().is_ok());
+        assert!(meter.try_tick_n(5).is_ok());
+        assert_eq!(meter.total(), 6);
+    }
+
+    #[test]
+    fn test_try_tick_n_total_overflow() {
+        let meter = RateMeter::new();
+        // Directly set near overflow
+        meter.total_events.store(u64::MAX - 1, Ordering::Relaxed);
+        // Adding 2 should overflow
+        let err = meter.try_tick_n(2).unwrap_err();
+        assert_eq!(err, MetricsError::Overflow);
+    }
+
+    #[test]
+    fn test_try_tick_n_window_overflow() {
+        let meter = RateMeter::new();
+        // Force current windows to near overflow and ensure we are in the same second/minute/hour
+        let now = meter.get_unix_timestamp();
+        meter.last_second.store(now, Ordering::Relaxed);
+        meter.last_minute.store(now / 60, Ordering::Relaxed);
+        meter.last_hour.store(now / 3600, Ordering::Relaxed);
+
+        meter
+            .current_second_events
+            .store(u32::MAX - 1, Ordering::Relaxed);
+        meter
+            .current_minute_events
+            .store(u32::MAX - 1, Ordering::Relaxed);
+        meter
+            .current_hour_events
+            .store(u32::MAX - 1, Ordering::Relaxed);
+
+        // Any n >= 2 should trip the pre-check overflow guard
+        let err = meter.try_tick_n(2).unwrap_err();
+        assert_eq!(err, MetricsError::Overflow);
+    }
+
+    #[test]
+    fn test_try_tick_if_under_limit() {
+        let meter = RateMeter::new();
+        // Under limit should tick and return true
+        assert!(meter.try_tick_if_under_limit(10.0).unwrap());
+        // Drive rate up close to limit
+        assert!(meter.try_tick_n(8).is_ok());
+        // Now at 9; allow one more at limit 10
+        assert!(meter.try_tick_if_under_limit(10.0).unwrap());
+        // Next should be denied (would exceed)
+        assert!(!meter.try_tick_if_under_limit(10.0).unwrap());
     }
 }
 

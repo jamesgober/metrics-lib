@@ -10,6 +10,7 @@
 //! - **Lock-free** - Never blocks, never waits
 //! - **Cache optimized** - Aligned to prevent false sharing
 
+use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -46,6 +47,69 @@ impl Gauge {
         }
     }
 
+    /// Try to add to current value with validation
+    ///
+    /// Returns `Err(MetricsError::InvalidValue)` if `delta` is not finite (NaN or ±inf)
+    /// or if the resulting value would become non-finite. Returns
+    /// `Err(MetricsError::Overflow)` if the sum overflows to a non-finite value.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Gauge, MetricsError};
+    /// let g = Gauge::with_value(1.5);
+    /// g.try_add(2.5).unwrap();
+    /// assert_eq!(g.get(), 4.0);
+    /// assert!(matches!(g.try_add(f64::INFINITY), Err(MetricsError::InvalidValue{..})));
+    /// ```
+    #[inline]
+    pub fn try_add(&self, delta: f64) -> Result<()> {
+        if delta == 0.0 {
+            return Ok(());
+        }
+        if !delta.is_finite() {
+            return Err(MetricsError::InvalidValue {
+                reason: "delta is not finite",
+            });
+        }
+
+        loop {
+            let current_bits = self.value.load(Ordering::Relaxed);
+            let current_value = f64::from_bits(current_bits);
+            let new_value = current_value + delta;
+            if !new_value.is_finite() {
+                return Err(MetricsError::Overflow);
+            }
+            let new_bits = new_value.to_bits();
+
+            match self.value.compare_exchange_weak(
+                current_bits,
+                new_bits,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Try to subtract from current value (validated)
+    ///
+    /// Validation semantics are identical to [`Gauge::try_add`] but apply to
+    /// subtraction (`-delta`).
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::Gauge;
+    /// let g = Gauge::with_value(10.0);
+    /// g.try_sub(4.0).unwrap();
+    /// assert_eq!(g.get(), 6.0);
+    /// ```
+    #[inline]
+    pub fn try_sub(&self, delta: f64) -> Result<()> {
+        self.try_add(-delta)
+    }
+
     /// Create gauge with initial value
     #[inline]
     pub fn with_value(initial: f64) -> Self {
@@ -65,6 +129,28 @@ impl Gauge {
     #[inline(always)]
     pub fn set(&self, value: f64) {
         self.value.store(value.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Try to set gauge value with validation
+    ///
+    /// Returns `Err(MetricsError::InvalidValue)` if `value` is not finite (NaN or ±inf).
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Gauge, MetricsError};
+    /// let g = Gauge::new();
+    /// assert!(g.try_set(42.0).is_ok());
+    /// assert!(matches!(g.try_set(f64::NAN), Err(MetricsError::InvalidValue{..})));
+    /// ```
+    #[inline]
+    pub fn try_set(&self, value: f64) -> Result<()> {
+        if !value.is_finite() {
+            return Err(MetricsError::InvalidValue {
+                reason: "value is not finite",
+            });
+        }
+        self.set(value);
+        Ok(())
     }
 
     /// Get current value - single atomic load
@@ -130,6 +216,45 @@ impl Gauge {
         }
     }
 
+    /// Try to set to maximum of current value and new value
+    ///
+    /// Returns `Err(MetricsError::InvalidValue)` if `value` is not finite.
+    /// Otherwise sets the gauge to `max(current, value)` and returns `Ok(())`.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Gauge, MetricsError};
+    /// let g = Gauge::with_value(5.0);
+    /// g.try_set_max(10.0).unwrap();
+    /// assert_eq!(g.get(), 10.0);
+    /// assert!(matches!(g.try_set_max(f64::INFINITY), Err(MetricsError::InvalidValue{..})));
+    /// ```
+    #[inline]
+    pub fn try_set_max(&self, value: f64) -> Result<()> {
+        if !value.is_finite() {
+            return Err(MetricsError::InvalidValue {
+                reason: "value is not finite",
+            });
+        }
+        loop {
+            let current_bits = self.value.load(Ordering::Relaxed);
+            let current_value = f64::from_bits(current_bits);
+            if value <= current_value {
+                return Ok(());
+            }
+            let new_bits = value.to_bits();
+            match self.value.compare_exchange_weak(
+                current_bits,
+                new_bits,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+    }
+
     /// Set to minimum of current value and new value
     #[inline]
     pub fn set_min(&self, value: f64) {
@@ -154,11 +279,50 @@ impl Gauge {
         }
     }
 
+    /// Try to set to minimum of current value and new value
+    ///
+    /// Returns `Err(MetricsError::InvalidValue)` if `value` is not finite.
+    /// Otherwise sets the gauge to `min(current, value)` and returns `Ok(())`.
+    ///
+    /// Example
+    /// ```
+    /// use metrics_lib::{Gauge, MetricsError};
+    /// let g = Gauge::with_value(10.0);
+    /// g.try_set_min(7.0).unwrap();
+    /// assert_eq!(g.get(), 7.0);
+    /// assert!(matches!(g.try_set_min(f64::NAN), Err(MetricsError::InvalidValue{..})));
+    /// ```
+    #[inline]
+    pub fn try_set_min(&self, value: f64) -> Result<()> {
+        if !value.is_finite() {
+            return Err(MetricsError::InvalidValue {
+                reason: "value is not finite",
+            });
+        }
+        loop {
+            let current_bits = self.value.load(Ordering::Relaxed);
+            let current_value = f64::from_bits(current_bits);
+            if value >= current_value {
+                return Ok(());
+            }
+            let new_bits = value.to_bits();
+            match self.value.compare_exchange_weak(
+                current_bits,
+                new_bits,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+    }
+
     /// Atomic compare-and-swap
     ///
     /// Returns Ok(previous_value) if successful, Err(current_value) if failed
     #[inline]
-    pub fn compare_and_swap(&self, expected: f64, new: f64) -> Result<f64, f64> {
+    pub fn compare_and_swap(&self, expected: f64, new: f64) -> core::result::Result<f64, f64> {
         let expected_bits = expected.to_bits();
         let new_bits = new.to_bits();
 
@@ -724,10 +888,10 @@ mod tests {
     fn test_display_and_debug() {
         let gauge = Gauge::with_value(42.5);
 
-        let display_str = format!("{}", gauge);
+        let display_str = format!("{gauge}");
         assert!(display_str.contains("42.5"));
 
-        let debug_str = format!("{:?}", gauge);
+        let debug_str = format!("{gauge:?}");
         assert!(debug_str.contains("Gauge"));
         assert!(debug_str.contains("42.5"));
     }

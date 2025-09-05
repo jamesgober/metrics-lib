@@ -89,7 +89,11 @@ pub fn init() -> &'static MetricsCore {
 
 /// Get the global metrics instance
 ///
-/// Panics if not initialized - call `init()` first
+/// Panics if not initialized - call `init()` first.
+///
+/// Panic conditions:
+/// - If [`init()`] has not been called yet, this function will panic with a clear message.
+///   Prefer passing `&MetricsCore` explicitly in library code to avoid relying on globals.
 pub fn metrics() -> &'static MetricsCore {
     METRICS
         .get()
@@ -171,13 +175,28 @@ pub type Result<T> = std::result::Result<T, MetricsError>;
 /// Metrics errors
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetricsError {
-    /// Circuit breaker is open
+    /// Circuit breaker is open and the operation is not allowed.
     CircuitOpen,
-    /// System overloaded
+    /// System is overloaded (e.g., adaptive sampler reduced acceptance) and rejected the operation.
     Overloaded,
-    /// Invalid metric name
+    /// Invalid metric name (empty, overly long, or otherwise rejected by a policy).
     InvalidName,
-    /// Configuration error
+    /// Invalid value supplied (NaN, non-finite, out-of-range, or otherwise invalid).
+    InvalidValue {
+        /// Short, static explanation of why the value was invalid (e.g., "value is not finite").
+        reason: &'static str,
+    },
+    /// Arithmetic would overflow the counter or index (checked variants only).
+    Overflow,
+    /// Arithmetic would underflow (checked variants only).
+    Underflow,
+    /// Operation would exceed a configured limit (rate limiting, quotas, etc.).
+    OverLimit,
+    /// Operation would block and a non-blocking/try path was requested.
+    WouldBlock,
+    /// Global metrics were not initialized and the operation requires initialization.
+    NotInitialized,
+    /// Configuration error with details.
     Config(String),
 }
 
@@ -187,6 +206,12 @@ impl std::fmt::Display for MetricsError {
             MetricsError::CircuitOpen => write!(f, "Circuit breaker is open"),
             MetricsError::Overloaded => write!(f, "System is overloaded"),
             MetricsError::InvalidName => write!(f, "Invalid metric name"),
+            MetricsError::InvalidValue { reason } => write!(f, "Invalid value: {reason}"),
+            MetricsError::Overflow => write!(f, "Operation would overflow"),
+            MetricsError::Underflow => write!(f, "Operation would underflow"),
+            MetricsError::OverLimit => write!(f, "Operation would exceed limit"),
+            MetricsError::WouldBlock => write!(f, "Operation would block"),
+            MetricsError::NotInitialized => write!(f, "Global metrics not initialized"),
             MetricsError::Config(msg) => write!(f, "Configuration error: {msg}"),
         }
     }
@@ -267,10 +292,10 @@ mod tests {
         let e3 = MetricsError::InvalidName;
         let e4 = MetricsError::Config("bad cfg".to_string());
 
-        let s1 = format!("{}", e1);
-        let s2 = format!("{}", e2);
-        let s3 = format!("{}", e3);
-        let s4 = format!("{}", e4);
+        let s1 = format!("{e1}");
+        let s2 = format!("{e2}");
+        let s3 = format!("{e3}");
+        let s4 = format!("{e4}");
 
         assert!(s1.contains("Circuit breaker is open"));
         assert!(s2.contains("System is overloaded"));

@@ -764,23 +764,23 @@ mod tests {
 
         // Should still be functional
         let final_score = health.health_score();
-        assert!(final_score >= 0.0 && final_score <= 100.0);
+        assert!((0.0..=100.0).contains(&final_score));
     }
 
     #[test]
     fn test_display_formatting() {
         let health = SystemHealth::new();
 
-        let display_str = format!("{}", health);
+        let display_str = format!("{health}");
         assert!(display_str.contains("SystemHealth"));
         assert!(display_str.contains("CPU"));
         assert!(display_str.contains("Mem"));
 
-        let debug_str = format!("{:?}", health);
+        let debug_str = format!("{health:?}");
         assert!(debug_str.contains("SystemHealth"));
 
         let status = health.quick_check();
-        let status_str = format!("{}", status);
+        let status_str = format!("{status}");
         assert!(!status_str.is_empty());
     }
 }
