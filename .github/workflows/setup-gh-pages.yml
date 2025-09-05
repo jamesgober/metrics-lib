@@ -24,6 +24,16 @@ jobs:
       - name: Prepare site content
         run: |
           mkdir -p _ghpages/benchmark-data
+          # Try to detect CPU MHz from the runner to enable cycles/op derivation in the viewer
+          CPU_MHZ="$(awk -F: '/cpu MHz/ {print int($2+0.5); exit}' /proc/cpuinfo 2>/dev/null || true)"
+          if [ -z "$CPU_MHZ" ]; then
+            CPU_MHZ=""
+          fi
+          # Provide CPU MHz as a small JS file loaded before data/main scripts
+          # (Viewer also supports BENCHMARK_DATA.meta.cpu_mhz and <meta name="cpu-mhz">)
+          cat > _ghpages/cpu-mhz.js << EOF
+          (function(){ try{ window.CPU_MHZ = ${CPU_MHZ:-0}; }catch(_){ } })();
+          EOF
           # Lightweight viewer logic used by both the root dashboard and the benchmark-data/ index
           cat > _ghpages/main.js << 'EOF'
           (function(){
@@ -306,6 +316,7 @@ jobs:
             <div id="content">
               <p class="note">No data parsed yet. If you recently pushed, please refresh in a minute.</p>
             </div>
+            <script src="../cpu-mhz.js"></script>
             <script src="../main.js"></script>
             <p>Return to the <a href="../">dashboard</a>.</p>
           </body>
@@ -361,6 +372,8 @@ jobs:
               <li>Project README: <a href="https://github.com/jamesgober/metrics-lib#benchmarks">Benchmarks section</a></li>
               <li>Docs: <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/benchmarks/README.md">docs/benchmarks/README.md</a></li>
             </ul>
+            <!-- Trend callout appears here; viewer will populate or auto-insert if missing -->
+            <div id="trend-note" class="note" style="margin: 8px 0;"></div>
             <div class="cards" id="summary-cards"></div>
             <div class="grid">
               <div class="panel"><h3>Counter ops (ns/op)</h3><canvas id="chart-counter"></canvas></div>
@@ -372,6 +385,7 @@ jobs:
               <h3>Latest Run (table)</h3>
               <p class="note">Rendered from the latest entry in <code>benchmark-data/data.js</code>.</p>
             </div>
+            <script src="./cpu-mhz.js"></script>
             <script src="./main.js"></script>
           </body>
           </html>
