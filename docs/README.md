@@ -35,6 +35,38 @@ Welcome to the metrics-lib documentation. This section is the entry point to the
 - Changelog: [`CHANGELOG.md`](../CHANGELOG.md)
 - License: [`LICENSE`](../LICENSE)
 
+### Integration Examples & Observability Assets
+- Integration Examples: see [`API.md` → Integration Examples](./API.md#integration-examples)
+- Grafana dashboard (ready to import): [`docs/observability/grafana-dashboard.json`](./observability/grafana-dashboard.json)
+- Prometheus recording rules: [`docs/observability/recording-rules.yaml`](./observability/recording-rules.yaml)
+- Kubernetes Service: [`docs/k8s/service.yaml`](./k8s/service.yaml)
+- Prometheus Operator ServiceMonitor: [`docs/k8s/servicemonitor.yaml`](./k8s/servicemonitor.yaml)
+- Secured ServiceMonitor (TLS/Bearer): [`docs/k8s/servicemonitor-secured.yaml`](./k8s/servicemonitor-secured.yaml)
+
+#### Quick Start Commands
+- Import Grafana dashboard (via UI): Dashboards → New → Import → Upload `grafana-dashboard.json`.
+- Import Grafana dashboard (via API):
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <GRAFANA_API_TOKEN>" \
+  http://<grafana-host>/api/dashboards/db \
+  -d @docs/observability/grafana-dashboard.json
+```
+
+- Validate Prometheus recording rules locally:
+```bash
+promtool check rules docs/observability/recording-rules.yaml
+```
+
+- Apply Kubernetes Service and ServiceMonitor:
+```bash
+kubectl apply -f docs/k8s/service.yaml
+kubectl apply -f docs/k8s/servicemonitor.yaml
+# For secured endpoints:
+kubectl apply -f docs/k8s/servicemonitor-secured.yaml
+```
+
 ## Table of Contents
 
 - Installation and Quick Start: see the top-level [`README.md`](../README.md#installation) and [`README.md#quick-start`](../README.md#quick-start)
