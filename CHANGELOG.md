@@ -10,6 +10,16 @@
 
 ## [Unreleased]
 
+
+
+
+
+
+<br>
+
+## [0.8.3] - 2025-09-05
+Beta: Error Hardened, Stable.
+
 ### Added
 - Targeted unit tests increasing coverage for critical modules:
   - `src/adaptive.rs`: time-based interval sampling and sampling percentage stats.
@@ -79,10 +89,10 @@
 
 
 
-
 <br>
 
-## [0.8.0] - STABLE
+## [0.8.0] - 2025-09-04
+Beta Release - Stable
 
 ### Added
 - Doctesting for external Markdown examples using `doc-comment`:
@@ -116,7 +126,8 @@
 
 <br>
 
-## [0.5.1] - STABLE
+## [0.5.1] - 2025-09-04
+Fixed and Stabilized
 
 ### Added
 - Codecov configuration `codecov.yml` with project and patch coverage thresholds (target: 85%).
@@ -161,7 +172,9 @@
 
 <br>
 
-## [0.5.0] - COMPLETE ARCHITECTURAL OVERHAUL
+## [0.5.0] - 2025-08-29
+Complete Architectural Overhaul
+
 ### Fixed
 - **Compilation Errors**: Fixed temporary value dropped while borrowed in timer closure
 - **Import Cleanup**: Removed unused imports (BufRead, BufReader, File) from system_health module
@@ -174,7 +187,7 @@
 
 <br>
 
-## [0.2.0] - COMPLETE ARCHITECTURAL OVERHAUL
+## [0.2.0] - 2025-08-29
 
 ### Added - Complete Rewrite
 - **COMPLETE ARCHITECTURAL OVERHAUL**: Rebuilt from ground up for ultimate performance
@@ -274,7 +287,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/jamesgober/metrics-lib/compare/v0.8.0...v0.8.3
 [0.8.0]: https://github.com/jamesgober/metrics-lib/compare/v0.5.1...v0.8.0
 [0.5.1]: https://github.com/jamesgober/metrics-lib/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jamesgober/metrics-lib/compare/v0.2.0...v0.5.0

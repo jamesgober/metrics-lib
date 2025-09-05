@@ -102,10 +102,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.8.0"
+metrics-lib = "0.8.3"
 
 # Optional features
-metrics-lib = { version = "0.8.0", features = ["async"] }
+metrics-lib = { version = "0.8.3", features = ["async"] }
 ```
 
 ## Quick Start
@@ -351,7 +351,7 @@ cargo test --target x86_64-unknown-linux-gnu
 
 ```toml
 [dependencies]
-metrics-lib = { version = "0.8.0", features = [
+metrics-lib = { version = "0.8.3", features = [
     "async",     # Async/await support (requires tokio)
     "histogram", # Advanced histogram support
     "all"        # Enable all features
