@@ -70,6 +70,48 @@ jobs:
               });
               table.appendChild(tbody);
               cont.appendChild(table);
+              // Grouped view with base/change where available
+              var section = document.createElement('div');
+              section.style.marginTop = '16px';
+              section.innerHTML = '<h4>Grouped View</h4>';
+              var groups = { rate:[], counter:[], timer:[], gauge:[], threads:[] };
+              var pending = null; // capture {base,change}
+              entries.forEach(function(e){
+                if(e.name==='base' || e.name==='change'){
+                  pending = pending || {}; pending[e.name] = e; return;
+                }
+                var name = friendlyName(e.name||e.benchmark||'unknown');
+                var bucket = 'other';
+                if(name.indexOf('rate.')===0) bucket='rate';
+                else if(name.indexOf('counter.')===0) bucket='counter';
+                else if(name.indexOf('timer.')===0) bucket='timer';
+                else if(name.indexOf('gauge.')===0) bucket='gauge';
+                else if(name.indexOf('threads:')===0) bucket='threads';
+                if(!groups[bucket]) groups[bucket]=[];
+                groups[bucket].push({ item:e, name:name, meta: pending });
+                pending = null;
+              });
+              function addGroup(title, list){
+                if(!list || !list.length) return;
+                var div=document.createElement('div');
+                div.style.marginTop='8px';
+                var html = '<div style="font-weight:600;margin:6px 0">'+title+'</div>';
+                list.forEach(function(row){
+                  var v = row.item;
+                  html += '<div>'+row.name+' &nbsp; <span style="color:#555">'+fmt(v.value)+'</span> <span style="color:#666">'+(v.unit||'ns/op')+'</span></div>';
+                  if(row.meta && (row.meta.base||row.meta.change)){
+                    if(row.meta.base){ html += '<div style="margin-left:16px">— base &nbsp; <span style="color:#555">'+fmt(row.meta.base.value)+'</span> <span style="color:#666">'+(row.meta.base.unit||'ns/op')+'</span></div>'; }
+                    if(row.meta.change){ html += '<div style="margin-left:16px">— change &nbsp; <span style="color:#555">'+fmt(row.meta.change.value)+'</span> <span style="color:#666">'+(row.meta.change.unit||'ns/op')+'</span></div>'; }
+                  }
+                });
+                div.innerHTML = html; section.appendChild(div);
+              }
+              addGroup('Rate', groups.rate);
+              addGroup('Counter', groups.counter);
+              addGroup('Timer', groups.timer);
+              addGroup('Gauge', groups.gauge);
+              addGroup('Threads', groups.threads);
+              cont.appendChild(section);
               return true;
             }
             function extractJSON(text){
@@ -215,12 +257,14 @@ jobs:
                   })
                   .catch(function(){
                     var c = byId('content');
-                    if(c) c.innerHTML = '<p class="note">No recognizable benchmark data found yet. Browse <a href="./benchmark-data/">raw files</a>.</p>';
+                    var href = onDataDir ? '.' : './benchmark-data/';
+                    if(c) c.innerHTML = '<p class="note">No recognizable benchmark data found yet. Browse <a href="'+href+'">raw files</a>.</p>';
                   });
               };
               s.onerror = function(){
                 var c = byId('content');
-                if(c) c.innerHTML = '<p class="note">No recognizable benchmark data found yet. Browse <a href="./benchmark-data/">raw files</a>.</p>';
+                var href = onDataDir ? '.' : './benchmark-data/';
+                if(c) c.innerHTML = '<p class="note">No recognizable benchmark data found yet. Browse <a href="'+href+'">raw files</a>.</p>';
               };
               document.head.appendChild(s);
             }
