@@ -46,6 +46,11 @@
   - [Web Service Under Load](#real-world-web-service-under-load)
   - [Batch Processing Pipeline](#real-world-batch-processing-pipeline)
   - [Token Bucket Rate Limiter](#real-world-token-bucket-rate-limiter)
+  - [Building a Custom Exporter](#real-world-custom-exporter)
+  - [Memory Stats: total/used/free + percentages](#real-world-memory-stats)
+  - [Memory % used for an operation (estimate)](#real-world-memory-percent-operation)
+  - [CPU Stats: total/used/free + percentages](#real-world-cpu-stats)
+  - [CPU % used for an operation (estimate)](#real-world-cpu-percent-operation)
 - **[Integration Examples](#integration-examples)**
   - [1. Web Framework Integration](#web-framework-integration)
   - [2. Database Pool Monitoring](#database-pool-monitoring)
@@ -917,6 +922,153 @@ impl Limiter {
 ```
 
 
+<br>
+<h3 id="real-world-custom-exporter">Building a Custom Exporter</h3>
+
+Example skeleton to snapshot internal metrics and ship to a custom sink (file, TCP, UDP, HTTP, etc.) without perturbing hot paths:
+
+```rust
+use metrics_lib::metrics;
+use std::fmt::Write;
+
+/// Periodically called by a background task
+pub fn snapshot_metrics() -> String {
+    let reg = metrics().registry();
+    let mut out = String::new();
+
+    // Example format: simple key=value lines (adapt to your collector)
+    for name in reg.counter_names() {
+        let v = metrics().counter(Box::leak(name.into_boxed_str())).get();
+        let _ = writeln!(out, "{} {}", name, v);
+    }
+    for name in reg.gauge_names() {
+        let v = metrics().gauge(Box::leak(name.into_boxed_str())).get();
+        let _ = writeln!(out, "{} {}", name, v);
+    }
+    for name in reg.timer_names() {
+        let s = metrics().timer(Box::leak(name.into_boxed_str())).stats();
+        let _ = writeln!(out, "{}.count {}", name, s.count);
+        let _ = writeln!(out, "{}.avg_ns {}", name, s.average.as_nanos());
+    }
+    for name in reg.rate_meter_names() {
+        let r = metrics().rate(Box::leak(name.into_boxed_str()));
+        let _ = writeln!(out, "{}.per_sec {:.3}", name, r.rate());
+    }
+    out
+}
+```
+
+Guidelines:
+
+- Run exporters on a timer or off a channel queue, not inline with critical work.
+- Bound buffers and drop data on overload to protect application throughput.
+- Prefer binary formats for high-throughput ingestion.
+
+
+<br>
+<h3 id="real-world-memory-stats">Memory Stats: total/used/free + percentages</h3>
+
+The `SystemHealth` API provides convenient accessors for commonly used memory stats. Convert units as needed.
+
+```rust
+use metrics_lib::metrics;
+
+fn fmt_size_mb(mb: f64) -> (f64, &'static str) {
+    // convert MB → GB/TB simplistically for display
+    if mb >= 1024.0 * 1024.0 { (mb / (1024.0 * 1024.0), "TB") }
+    else if mb >= 1024.0 { (mb / 1024.0, "GB") } else { (mb, "MB") }
+}
+
+pub fn memory_overview() {
+    let sys = metrics().system();
+
+    let used_mb = sys.mem_used_mb();
+    // If you need total/free, compute via platform helpers or your own sysinfo; here we display used directly.
+    let (v, unit) = fmt_size_mb(used_mb);
+
+    println!("mem.used: {:.2} {}", v, unit);
+    println!("mem.used.pct (process): {:.2}%", sys.process_mem_used_mb() / used_mb.max(1.0) * 100.0);
+}
+```
+
+Notes:
+
+- `mem_used_mb()` and `mem_used_gb()` report current system memory usage; `process_mem_used_mb()` reports this process’s memory.
+- If you require precise total/free memory, integrate your platform’s system APIs alongside `SystemHealth` and compute `free = total - used` and percentages accordingly.
+
+
+<br>
+<h3 id="real-world-memory-percent-operation">Memory % used for an operation (estimate)</h3>
+
+Estimate memory consumed by a single operation by sampling process memory before and after. Express as MB/GB and as a percentage of the pre-op process memory.
+
+```rust
+use metrics_lib::metrics;
+
+pub fn measure_op_memory<T>(f: impl FnOnce() -> T) -> (T, f64 /* delta_mb */, f64 /* pct of process */) {
+    let sys = metrics().system();
+    let before_mb = sys.process_mem_used_mb();
+    let result = f();
+    let after_mb = sys.process_mem_used_mb();
+    let delta_mb = (after_mb - before_mb).max(0.0);
+    let pct = if before_mb > 0.0 { (delta_mb / before_mb) * 100.0 } else { 0.0 };
+    (result, delta_mb, pct)
+}
+```
+
+Notes:
+
+- This is a coarse estimate; allocator behavior and async tasks can skew instantaneous samples. For better accuracy, repeat and average.
+
+
+<br>
+<h3 id="real-world-cpu-stats">CPU Stats: total/used/free + percentages</h3>
+
+`SystemHealth` exposes CPU usage percentages. Display them and convert as needed.
+
+```rust
+use metrics_lib::metrics;
+
+pub fn cpu_overview() {
+    let sys = metrics().system();
+    let used = sys.cpu_used();      // e.g., 23.5 (percent)
+    let free = sys.cpu_free();      // e.g., 76.5 (percent)
+
+    println!("cpu.used: {:.1}%", used);
+    println!("cpu.free: {:.1}%", free);
+}
+```
+
+Notes:
+
+- For per-core or process-specific stats, use `process_cpu_used()` and, if needed, supplement with platform APIs for core counts/affinity.
+
+
+<br>
+<h3 id="real-world-cpu-percent-operation">CPU % used for an operation (estimate)</h3>
+
+Estimate CPU for an operation by sampling process CPU usage and wall time before/after. This yields a coarse percentage useful for relative comparisons.
+
+```rust
+use metrics_lib::metrics;
+use std::time::Instant;
+
+pub fn measure_op_cpu<T>(f: impl FnOnce() -> T) -> (T, f64 /* cpu_used_delta_pct */, f64 /* wall_ms */) {
+    let sys = metrics().system();
+    let start = Instant::now();
+    let cpu_before = sys.process_cpu_used();
+    let result = f();
+    let wall = start.elapsed().as_millis() as f64;
+    let cpu_after = sys.process_cpu_used();
+    let cpu_delta = (cpu_after - cpu_before).max(0.0);
+    (result, cpu_delta, wall)
+}
+```
+
+Notes:
+
+- Short operations can under-report due to sampling granularity; repeat and average for stability.
+- For rigorous accounting, sample over longer windows or use OS-level per-thread CPU accounting.
 <hr>
 <br>
 <a href="#top">&uarr; <b>TOP</b></a>
