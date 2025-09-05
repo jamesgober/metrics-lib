@@ -241,6 +241,48 @@ Run these self-contained examples to see the library in action:
     - `GET /metrics-demo` — updates metrics (counter/gauge/timer/rate)
     - `GET /export` — returns a JSON snapshot of selected metrics
 
+- Quick Tour
+  - File: `examples/quick_tour.rs`
+  - Run:
+    ```bash
+    cargo run --example quick_tour --release
+    ```
+
+- Async Batch + Timing
+  - File: `examples/async_batch_timing.rs`
+  - Run:
+    ```bash
+    cargo run --example async_batch_timing --release
+    ```
+
+- Token Bucket Rate Limiter
+  - File: `examples/token_bucket_limiter.rs`
+  - Run:
+    ```bash
+    cargo run --example token_bucket_limiter --release
+    ```
+
+- Custom Exporter (OpenMetrics-like)
+  - File: `examples/custom_exporter_openmetrics.rs`
+  - Run:
+    ```bash
+    cargo run --example custom_exporter_openmetrics --release
+    ```
+
+- Axum Middleware Metrics (minimal)
+  - File: `examples/axum_middleware_metrics.rs`
+  - Run:
+    ```bash
+    cargo run --example axum_middleware_metrics --release
+    ```
+
+- Contention & Admission Demo
+  - File: `examples/contention_admission.rs`
+  - Run:
+    ```bash
+    cargo run --example contention_admission --release
+    ```
+
 - CPU Stats Overview
   - File: `examples/cpu_stats.rs`
   - Run:
@@ -253,6 +295,27 @@ Run these self-contained examples to see the library in action:
   - Run:
     ```bash
     cargo run --example memory_stats --release
+    ```
+
+- Health Dashboard
+  - File: `examples/health_dashboard.rs`
+  - Run:
+    ```bash
+    cargo run --example health_dashboard --release
+    ```
+
+- Cache Hit/Miss
+  - File: `examples/cache_hit_miss.rs`
+  - Run:
+    ```bash
+    cargo run --example cache_hit_miss --release
+    ```
+
+- Broker Throughput
+  - File: `examples/broker_throughput.rs`
+  - Run:
+    ```bash
+    cargo run --example broker_throughput --release
     ```
 
 ### More Real-World Examples (API Reference)
