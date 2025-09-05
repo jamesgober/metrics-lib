@@ -24,6 +24,27 @@ jobs:
       - name: Prepare site content
         run: |
           mkdir -p _ghpages/benchmark-data
+          cat > _ghpages/benchmark-data/index.html << 'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>Benchmark Data Directory</title>
+            <style>
+              body{font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:2rem;}
+              a{color:#0366d6;text-decoration:none}
+              a:hover{text-decoration:underline}
+              .note{color:#555}
+            </style>
+          </head>
+          <body>
+            <h1>Benchmark Data</h1>
+            <p class="note">This directory will be populated automatically by CI runs on the <code>main</code> branch via <code>github-action-benchmark</code>.</p>
+            <p>Return to the <a href="../">dashboard</a>.</p>
+          </body>
+          </html>
+          EOF
           cat > _ghpages/README.md << 'EOF'
           # Benchmark Data
 
