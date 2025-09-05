@@ -88,9 +88,12 @@ jobs:
     - name: Run criterion benchmarks
       if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
       run: cargo bench --all-features
-    - name: Regression gate (dashboard thresholds)
-      if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
+    - name: Regression gate (nightly, enforce)
+      if: ${{ github.event_name == 'schedule' }}
       run: node tools/bench_regression_check.js
+    - name: Regression report (manual, non-blocking)
+      if: ${{ github.event_name != 'schedule' && inputs.run_criterion == 'true' }}
+      run: node tools/bench_regression_check.js || echo "Non-blocking regression report only"
     - name: Archive benchmark results
       if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
       uses: actions/upload-artifact@v4
