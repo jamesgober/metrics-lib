@@ -32,6 +32,10 @@ Welcome to the metrics-lib documentation. This section is the entry point to the
 - API Reference: [`docs/API.md`](./API.md)
 - Developer Guidelines: [`docs/GUIDELINES.md`](./GUIDELINES.md)
 - Performance Review: [`docs/PERFORMANCE_REVIEW.md`](./PERFORMANCE_REVIEW.md)
+- Migrating from metrics-rs: [`docs/migrating-from-metrics-rs.md`](./migrating-from-metrics-rs.md)
+- Performance Tuning: [`docs/performance-tuning.md`](./performance-tuning.md)
+- Zero-Overhead Proof: [`docs/zero-overhead-proof.md`](./zero-overhead-proof.md)
+- API Stability Guarantees: [`docs/api-stability.md`](./api-stability.md)
 - Changelog: [`CHANGELOG.md`](../CHANGELOG.md)
 - License: [`LICENSE`](../LICENSE)
 
@@ -73,6 +77,9 @@ kubectl apply -f docs/k8s/servicemonitor-secured.yaml
 - Public APIs: [`Counter`](./API.md#counter), [`Gauge`](./API.md#gauge), [`Timer`](./API.md#timer), [`RateMeter`](./API.md#ratemeter), [`SystemHealth`](./API.md#systemhealth)
 - Async Support: [`AsyncTimerExt`, `AsyncMetricBatch`](./API.md#async-support)
 - Adaptive Controls: sampling, circuit breakers, backpressure in [`API.md`](./API.md#adaptive-controls)
+- Migration: [`Migrating from metrics-rs`](./migrating-from-metrics-rs.md)
+- Guides: [`Performance Tuning`](./performance-tuning.md), [`Zero-Overhead Proof`](./zero-overhead-proof.md)
+- Policies: [`API Stability Guarantees`](./api-stability.md)
 - Contributing: [`CONTRIBUTING.md`](../CONTRIBUTING.md) (if present) and [`GUIDELINES.md`](./GUIDELINES.md)
 
 ## Getting Help
