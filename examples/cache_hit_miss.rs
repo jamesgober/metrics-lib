@@ -31,7 +31,11 @@ fn main() {
     let hits = m.counter("cache_hits_total").get();
     let misses = m.counter("cache_misses_total").get();
     let total = hits + misses;
-    let hit_ratio = if total > 0 { hits as f64 / total as f64 * 100.0 } else { 0.0 };
+    let hit_ratio = if total > 0 {
+        hits as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
 
     println!(
         "cache.hits={} cache.misses={} hit_ratio={:.2}%",
