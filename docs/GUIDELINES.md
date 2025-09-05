@@ -62,7 +62,7 @@
 - Modular architecture for extensibility.
 
 ### 6. **CROSS-PLATFORM**
-- Equal support for Linux, macOS, Windows.
+- Equal support for Linux, macOS, Windows, etc.
 - Platform-specific optimizations behind abstractions.
 - Consistent behavior across all platforms.
 - CI testing on all target platforms.
@@ -80,11 +80,12 @@
 - Constant-time operations where security matters.
 
 ### 9. **BEST PRACTICES**
+- **MODULAR**: Libraries must be modular with clear boundaries and minimal coupling; prefer small, composable units with feature-gated extensions.
 - **SOLID**: Single responsibility for each component.
 - **DRY**: Centralized timing logic, no duplication.
 - **KISS**: Simple API, complex implementation.
-- **YAGNI**: Start minimal, expand based on real needs
-- **MODULAR**: Libraries must be modular with clear boundaries and minimal coupling; prefer small, composable units with feature-gated extensions.
+- **YAGNI**: Start minimal, expand based on real needs.
+
 
 <hr>
 <br>
