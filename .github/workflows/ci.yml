@@ -190,6 +190,20 @@ jobs:
         cargo package
         cargo publish --dry-run
 
+  examples:
+    name: Examples (build, lint, run quick_start)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build examples
+      run: cargo build --examples
+    - name: Clippy (examples)
+      run: cargo clippy --examples -- -D warnings
+    - name: Run quick_start example
+      run: cargo run --example quick_start --release
+
   smoke-bench:
     name: Benchmarks (smoke)
     if: ${{ github.event_name == 'pull_request' }}

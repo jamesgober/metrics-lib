@@ -12,15 +12,19 @@
 
 ### Added
 - Benchmark Regression CI job in `.github/workflows/ci.yml`:
-  - Uses `benchmark-action/github-action-benchmark@v1` against Criterion output in `target/criterion`.
+  - Uses `benchmark-action/github-action-benchmark@v1` with `tool: customSmallerIsBetter` and a generated JSON summary from Criterion `estimates.json`.
   - Runs on `push` and `pull_request`; auto-pushes benchmark data to `gh-pages` when on `main`.
-  - Fails PRs on significant regressions (`fail-on-alert: true`), with an initial alert threshold tuned for noisy runners.
-
+  - Fails PRs on significant regressions (`fail-on-alert: true`) with an initial alert threshold tuned for noisy runners.
+- GitHub Pages bootstrap for benchmark history:
+  - Workflow: `.github/workflows/setup-gh-pages.yml` powered by `peaceiris/actions-gh-pages@v4`.
+  - Publishes a minimal dashboard `index.html`, `.nojekyll`, and a placeholder `benchmark-data/index.html`.
+  - Repository README now links to the public history: `https://jamesgober.github.io/metrics-lib/benchmark-data/`.
+- Examples quality gate:
+  - `cargo build --examples` and `cargo clippy --examples -D warnings` verified clean.
 - Chaos Testing Suite (concurrency and system pressure):
   - File: `tests/chaos_tests.rs`
   - Gated via `#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]` and `#[ignore]` by default.
   - Exercises high-concurrency updates across `Counter`, `Gauge`, and `RateMeter` with mixed CAS-heavy operations.
-
 - Longevity Tests (1B+ operations configurable):
   - File: `tests/longevity_tests.rs`
   - Gated via `#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]` and `#[ignore]` by default.
@@ -30,6 +34,10 @@
 - To run chaos and longevity suites locally:
   - Chaos: `cargo test --features bench-tests -- --ignored --test chaos_tests`
   - Longevity: `OPS=1000000000 cargo test --features bench-tests -- --ignored --test longevity_tests`
+
+
+
+
 
 <br>
 
@@ -75,6 +83,15 @@ Beta: Error Hardened, Stable.
       - `docs/k8s/helm/app-chart/templates/prometheusrule.yaml`
 
 ### Changed
+- Benchmark Regression implementation details:
+  - Aggregation step now scans both `target/criterion/**/new/estimates.json` and `target/criterion/**/estimates.json` (Criterion layout variance) and emits a single JSON array (`criterion-summary.json`).
+  - Explicit bench invocation in CI: `cargo bench --bench metrics_bench --all-features` to guarantee benchmark execution.
+  - CI skips regression check gracefully when no estimates are produced (logs tree and continues), avoiding red builds in edge cases.
+  - CI shell portability fixes: `jq` install only on Linux; bash forced for steps using bashisms.
+
+- Formatting and style conformance in long-running tests:
+  - `tests/chaos_tests.rs`: header spacing normalized; long `eprintln!` formatted across lines.
+  - `tests/longevity_tests.rs`: header spacing normalized; chained `env::var(...).ok().and_then(...).unwrap_or(...)` split across lines; long `eprintln!` and inline `if` bodies expanded for rustfmt/MSRV.
 - CI Coverage switched from tarpaulin to `cargo-llvm-cov` with enforced threshold `--fail-under-lines 85` and LCOV artifact upload (`coverage-lcov` -> `target/coverage/lcov.info`).
 - `CONTRIBUTING.md` updated with a new Coverage section describing local/CI usage of `cargo-llvm-cov`, thresholds, and how to generate LCOV/HTML reports.
 - `README.md` Benchmarks section now explicitly references Criterion and adds:
@@ -91,6 +108,13 @@ Beta: Error Hardened, Stable.
 - Cross-platform CI in `.github/workflows/bench.yml` now runs `cargo test` without `--all-features` to avoid executing bench-gated tests on macOS/Windows while still performing an `--all-features` build for compilation coverage. This prevents benchmark-style assertions from causing failures on slower or more variable runners.
 
 ### Fixed
+- GitHub Pages bootstrap no longer errors with "not a git repository"; replaced brittle orphan-branch shell with `peaceiris/actions-gh-pages` publisher.
+- Rustfmt (stable/MSRV) failures in `chaos_tests.rs` and `longevity_tests.rs` resolved.
+- Benchmark Regression CI failures fixed:
+  - Invalid `tool: 'criterion'` → switched to supported configuration.
+  - Directory passed to `output-file-path` → now provides a single JSON file.
+  - Empty/absent Criterion outputs → logged and skipped instead of failing entire job.
+- Windows matrix failure due to PowerShell `if` syntax when installing `jq` → installation step limited to Linux only.
 - `Timer::new` brace misplacement corrected to ensure `try_record_ns` and related methods compile cleanly.
 - Avoided `Result` type alias clash by using `core::result::Result` explicitly in `Counter::compare_and_swap` and `Gauge::compare_and_swap`.
 - Construct `MetricsError::InvalidValue` with an explanatory `reason` field in `Gauge` `try_` methods; added missing rustdoc for the `reason` field.
@@ -304,6 +328,7 @@ Initial release with core metrics library functionality.
 <!-- FOOT LINKS
 ################################################# -->
 [Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...HEAD
+[0.9.0]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/jamesgober/metrics-lib/compare/v0.8.0...v0.8.3
 [0.8.0]: https://github.com/jamesgober/metrics-lib/compare/v0.5.1...v0.8.0
 [0.5.1]: https://github.com/jamesgober/metrics-lib/compare/v0.5.0...v0.5.1
