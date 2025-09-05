@@ -1,0 +1,15 @@
+# Example app chart values for wiring ServiceMonitor and PrometheusRule
+metrics:
+  serviceMonitor:
+    enabled: true
+    namespace: default
+    labels: {}
+    interval: 15s
+    scheme: http
+    portName: http
+    path: /metrics
+    selector:
+      app: metrics-lib-example
+  rules:
+    enabled: true
+    labels: {}

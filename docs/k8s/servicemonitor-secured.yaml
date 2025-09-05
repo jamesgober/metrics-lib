@@ -1,0 +1,26 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: metrics-lib-example-secured
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: metrics-lib-example
+  namespaceSelector:
+    matchNames: ["default"]
+  endpoints:
+    - port: https
+      path: /metrics
+      interval: 15s
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: metrics-ca
+            key: ca.crt
+        insecureSkipVerify: false
+      bearerTokenSecret:
+        name: metrics-bearer
+        key: token

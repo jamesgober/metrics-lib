@@ -1,0 +1,33 @@
+# Drop-in values for kube-prometheus-stack to wire metrics-lib examples
+# Usage:
+#   helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+#     -f docs/k8s/helm/kube-prometheus-stack-values.yaml
+
+# Adds a ServiceMonitor that targets app=metrics-lib-example on port http
+additionalServiceMonitors:
+  - name: metrics-lib-example
+    namespace: default
+    selector:
+      matchLabels:
+        app: metrics-lib-example
+    endpoints:
+      - port: http
+        path: /metrics
+        interval: 15s
+
+# Adds recording rules for rates and p95 latency
+additionalPrometheusRulesMap:
+  metrics-lib-rules:
+    groups:
+      - name: metrics-lib.rules
+        interval: 30s
+        rules:
+          - record: job:http_requests:rate5m
+            expr: sum by (job) (rate(http_requests_total[5m]))
+          - record: job:operation_duration:p95_5m
+            expr: |
+              histogram_quantile(0.95,
+                sum by (job, le) (rate(operation_duration_bucket[5m]))
+              )
+          - record: job:broker_consume:rate5m
+            expr: sum by (job) (rate(broker_messages_total[5m]))
