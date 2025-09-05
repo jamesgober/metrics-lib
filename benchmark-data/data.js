@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1757095293363,
+  "lastUpdate": 1757095584037,
   "repoUrl": "https://github.com/jamesgober/metrics-lib",
   "entries": {
     "Criterion": [
@@ -10301,6 +10301,610 @@ window.BENCHMARK_DATA = {
           {
             "name": "stats",
             "value": 46.070164935729075,
+            "unit": "ns/op"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "james.gober@icloud.com",
+            "name": "jamesgober",
+            "username": "jamesgober"
+          },
+          "committer": {
+            "email": "james.gober@icloud.com",
+            "name": "jamesgober",
+            "username": "jamesgober"
+          },
+          "distinct": true,
+          "id": "3576256dc05331cdf102da3e62daeba277fd5d2e",
+          "message": "Updated memory status example",
+          "timestamp": "2025-09-05T14:00:35-04:00",
+          "tree_id": "3fa640f722139b0ece089b8d5d6a0e0f7210d900",
+          "url": "https://github.com/jamesgober/metrics-lib/commit/3576256dc05331cdf102da3e62daeba277fd5d2e"
+        },
+        "date": 1757095583628,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "add",
+            "value": 1.9791478561509706,
+            "unit": "ns/op"
+          },
+          {
+            "name": "concurrent_add_bursts_4_threads",
+            "value": 133139.52416076264,
+            "unit": "ns/op"
+          },
+          {
+            "name": "concurrent_increment",
+            "value": 123425.37231360922,
+            "unit": "ns/op"
+          },
+          {
+            "name": "get",
+            "value": 0.367081088433709,
+            "unit": "ns/op"
+          },
+          {
+            "name": "increment",
+            "value": 2.195212741204227,
+            "unit": "ns/op"
+          },
+          {
+            "name": "add",
+            "value": 5.283927905895024,
+            "unit": "ns/op"
+          },
+          {
+            "name": "concurrent_add_set_4_threads",
+            "value": 143199.0632046746,
+            "unit": "ns/op"
+          },
+          {
+            "name": "get",
+            "value": 0.4576359001102797,
+            "unit": "ns/op"
+          },
+          {
+            "name": "set",
+            "value": 0.6217373235070639,
+            "unit": "ns/op"
+          },
+          {
+            "name": "set_max",
+            "value": 0.6239113051524098,
+            "unit": "ns/op"
+          },
+          {
+            "name": "set_min",
+            "value": 0.623300143869714,
+            "unit": "ns/op"
+          },
+          {
+            "name": "counter_access",
+            "value": 32.13086411746833,
+            "unit": "ns/op"
+          },
+          {
+            "name": "gauge_access",
+            "value": 31.691005610467904,
+            "unit": "ns/op"
+          },
+          {
+            "name": "mixed_operations",
+            "value": 231.7708852551631,
+            "unit": "ns/op"
+          },
+          {
+            "name": "timer_access",
+            "value": 100.90253454064869,
+            "unit": "ns/op"
+          },
+          {
+            "name": "rate",
+            "value": 41.85805913473484,
+            "unit": "ns/op"
+          },
+          {
+            "name": "tick",
+            "value": 48.30188023469432,
+            "unit": "ns/op"
+          },
+          {
+            "name": "tick_n",
+            "value": 50.973197905029465,
+            "unit": "ns/op"
+          },
+          {
+            "name": "tick_n_concurrent_4_threads",
+            "value": 332024.55162645027,
+            "unit": "ns/op"
+          },
+          {
+            "name": "1",
+            "value": 48619.41144725099,
+            "unit": "ns/op"
+          },
+          {
+            "name": "16",
+            "value": 483292.77317194047,
+            "unit": "ns/op"
+          },
+          {
+            "name": "2",
+            "value": 81771.15479510975,
+            "unit": "ns/op"
+          },
+          {
+            "name": "4",
+            "value": 131742.38655166744,
+            "unit": "ns/op"
+          },
+          {
+            "name": "8",
+            "value": 258478.67844202626,
+            "unit": "ns/op"
+          },
+          {
+            "name": "raii_timing",
+            "value": 63.39110519137706,
+            "unit": "ns/op"
+          },
+          {
+            "name": "record",
+            "value": 5.372024141892348,
+            "unit": "ns/op"
+          },
+          {
+            "name": "record_ns",
+            "value": 4.912406119157624,
+            "unit": "ns/op"
+          },
+          {
+            "name": "start_stop",
+            "value": 63.39816806093645,
+            "unit": "ns/op"
+          },
+          {
+            "name": "stats",
+            "value": 46.15255271845746,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 1.9791478561509706,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.04177238084650914,
+            "unit": "ns/op"
+          },
+          {
+            "name": "add",
+            "value": 1.9791478561509706,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 133139.52416076264,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.04741250238276562,
+            "unit": "ns/op"
+          },
+          {
+            "name": "concurrent_add_bursts_4_threads",
+            "value": 133139.52416076264,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 123425.37231360922,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.012883397892041737,
+            "unit": "ns/op"
+          },
+          {
+            "name": "concurrent_increment",
+            "value": 123425.37231360922,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 0.367081088433709,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.002798071831392912,
+            "unit": "ns/op"
+          },
+          {
+            "name": "get",
+            "value": 0.367081088433709,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 2.195212741204227,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.029987112465530874,
+            "unit": "ns/op"
+          },
+          {
+            "name": "increment",
+            "value": 2.195212741204227,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 5.283927905895024,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.00002436843035658054,
+            "unit": "ns/op"
+          },
+          {
+            "name": "add",
+            "value": 5.283927905895024,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 143199.0632046746,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.03076526809087876,
+            "unit": "ns/op"
+          },
+          {
+            "name": "concurrent_add_set_4_threads",
+            "value": 143199.0632046746,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 0.4576359001102797,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0003119291209254804,
+            "unit": "ns/op"
+          },
+          {
+            "name": "get",
+            "value": 0.4576359001102797,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 0.6217373235070639,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.0004335210687831381,
+            "unit": "ns/op"
+          },
+          {
+            "name": "set",
+            "value": 0.6217373235070639,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 0.6239113051524098,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0005290524568306587,
+            "unit": "ns/op"
+          },
+          {
+            "name": "set_max",
+            "value": 0.6239113051524098,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 0.623300143869714,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0006485323894993567,
+            "unit": "ns/op"
+          },
+          {
+            "name": "set_min",
+            "value": 0.623300143869714,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 32.13086411746833,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.021402877645472884,
+            "unit": "ns/op"
+          },
+          {
+            "name": "counter_access",
+            "value": 32.13086411746833,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 31.691005610467904,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.009655106011670078,
+            "unit": "ns/op"
+          },
+          {
+            "name": "gauge_access",
+            "value": 31.691005610467904,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 231.7708852551631,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.004762732620119392,
+            "unit": "ns/op"
+          },
+          {
+            "name": "mixed_operations",
+            "value": 231.7708852551631,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 100.90253454064869,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0010898773570529041,
+            "unit": "ns/op"
+          },
+          {
+            "name": "timer_access",
+            "value": 100.90253454064869,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 41.85805913473484,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.0007554987827180781,
+            "unit": "ns/op"
+          },
+          {
+            "name": "rate",
+            "value": 41.85805913473484,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 48.30188023469432,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.0003151686261960718,
+            "unit": "ns/op"
+          },
+          {
+            "name": "tick",
+            "value": 48.30188023469432,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 50.973197905029465,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0006531937521050413,
+            "unit": "ns/op"
+          },
+          {
+            "name": "tick_n",
+            "value": 50.973197905029465,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 332024.55162645027,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.00834960672790186,
+            "unit": "ns/op"
+          },
+          {
+            "name": "tick_n_concurrent_4_threads",
+            "value": 332024.55162645027,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 48619.41144725099,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.004493936471218873,
+            "unit": "ns/op"
+          },
+          {
+            "name": "1",
+            "value": 48619.41144725099,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 483292.77317194047,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0186110864346547,
+            "unit": "ns/op"
+          },
+          {
+            "name": "16",
+            "value": 483292.77317194047,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 81771.15479510975,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.0055171534122486765,
+            "unit": "ns/op"
+          },
+          {
+            "name": "2",
+            "value": 81771.15479510975,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 131742.38655166744,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.03264923114127716,
+            "unit": "ns/op"
+          },
+          {
+            "name": "4",
+            "value": 131742.38655166744,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 258478.67844202626,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.015937870238004415,
+            "unit": "ns/op"
+          },
+          {
+            "name": "8",
+            "value": 258478.67844202626,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 63.39110519137706,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.00022983025039580163,
+            "unit": "ns/op"
+          },
+          {
+            "name": "raii_timing",
+            "value": 63.39110519137706,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 5.372024141892348,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0001186297018944682,
+            "unit": "ns/op"
+          },
+          {
+            "name": "record",
+            "value": 5.372024141892348,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 4.912406119157624,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.000035470717814067854,
+            "unit": "ns/op"
+          },
+          {
+            "name": "record_ns",
+            "value": 4.912406119157624,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 63.39816806093645,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": -0.00020267646354177327,
+            "unit": "ns/op"
+          },
+          {
+            "name": "start_stop",
+            "value": 63.39816806093645,
+            "unit": "ns/op"
+          },
+          {
+            "name": "base",
+            "value": 46.15255271845746,
+            "unit": "ns/op"
+          },
+          {
+            "name": "change",
+            "value": 0.0014157556615808087,
+            "unit": "ns/op"
+          },
+          {
+            "name": "stats",
+            "value": 46.15255271845746,
             "unit": "ns/op"
           }
         ]
