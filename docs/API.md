@@ -34,6 +34,19 @@
 - Benchmark Comparison: `examples/benchmark_comparison.rs` — microbench comparison runner.
 - Quick Start: `examples/quick_start.rs` — shortest end-to-end usage.
 
+<br>
+
+Note: To run many non-blocking examples quickly in sequence, use the helper script:
+
+```bash
+bash tools/run_examples.sh
+```
+You can pass a custom comma-separated list via `EXAMPLES`, e.g.:
+
+```bash
+EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
+```
+
 ## Table of Contents
 - **[Installation](#installation)**
 - **[Examples](#examples)**

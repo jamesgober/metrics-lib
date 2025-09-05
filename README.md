@@ -328,6 +328,20 @@ Run these self-contained examples to see the library in action:
 
 ### Resilience Features
 
+#### Running many examples quickly
+
+For convenience, a helper script runs a curated set of non-blocking examples sequentially in release mode (skips server examples like Axum middleware):
+
+```bash
+bash tools/run_examples.sh
+```
+
+You can also pass a custom comma-separated list via `EXAMPLES`:
+
+```bash
+EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
+```
+
 ```rust
 use metrics_lib::{AdaptiveSampler, SamplingStrategy, MetricCircuitBreaker};
 

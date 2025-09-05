@@ -1,3 +1,10 @@
+// Axum Middleware Metrics Example
+//
+// This example starts a small HTTP server and BLOCKS the terminal while running.
+// Test it from a second terminal:
+//   curl http://127.0.0.1:3000/
+//   curl http://127.0.0.1:3000/metrics-lite
+// If port 3000 is busy, change the address below (e.g., 127.0.0.1:4000).
 use axum::{routing::get, Router};
 use metrics_lib::{init, metrics};
 use std::time::Duration;
