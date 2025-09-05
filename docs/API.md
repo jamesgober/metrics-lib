@@ -82,7 +82,7 @@
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-metrics-lib = "0.8.3"
+metrics-lib = "0.8.6"
 ```
 
 <br>

@@ -10,7 +10,24 @@
 
 ## [Unreleased]
 
+
+
+
+<br>
+
+## [0.8.6] - 2025-09-05
+Beta: Stress Tested and Stable.
+
 ### Added
+- Benchmark Dashboard enhancements on GitHub Pages:
+  - Root dashboard now includes a structured layout with summary cards and four chart panels (Chart.js):
+    - Counter ops, Timer ops, Rate ops, Threads scaling.
+  - Data directory page (`benchmark-data/`) renders a simple table plus a new "Grouped View" with hierarchical rows (including `base`/`change`).
+  - Friendly names for benches (e.g., `tick` → `rate.tick`, `tick_n` → `rate.tick_n`, thread counts `1/2/4/…` → `threads:<n>`).
+  - Source for viewer committed to repo at `docs/benchmarks/main.js`.
+- CI safety net for Pages viewer:
+  - In `.github/workflows/ci.yml`, added an "Ensure benchmark viewer on gh-pages (main.js)" step that pulls `docs/benchmarks/main.js` from `main` and commits it to `gh-pages` when missing.
+  - Avoids here-doc quoting; uses `git show origin/main:docs/benchmarks/main.js > main.js` for reliability.
 - Benchmark Regression CI job in `.github/workflows/ci.yml`:
   - Uses `benchmark-action/github-action-benchmark@v1` with `tool: customSmallerIsBetter` and a generated JSON summary from Criterion `estimates.json`.
   - Runs on `push` and `pull_request`; auto-pushes benchmark data to `gh-pages` when on `main`.
@@ -34,12 +51,23 @@
   - Gated via `#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]` and `#[ignore]` by default.
   - Operation count configurable via `OPS` env var; defaults are reduced automatically under CI.
 
+### Changed
+- Benchmark dashboard viewer (`main.js`) made robust against `github-action-benchmark` formats:
+  - Extracts from `window.BENCHMARK_DATA.entries.Criterion[last].benches` or first available suite; falls back to JSON parsing.
+  - Builds time series across runs, padding missing series with `null` and enabling `spanGaps` for smooth lines.
+  - Lazy-loads Chart.js if not present; fixed canvas height for visibility; improved interaction.
+- Naming cleanups in viewer for clarity (counter/gauge/timer/rate groups and thread labels).
+
+### Fixed
+- GitHub Pages data page "raw files" link when already inside `benchmark-data/` now points to `.` (avoids `.../benchmark-data/benchmark-data/` 404).
+- Coverage flake in `src/rate_meter.rs::test_concurrent_rate_limiting` under LLVM coverage instrumentation:
+  - Relaxed the upper-bound assertion only when `cfg(coverage)` is active.
+  - Added explicit assertion messages; formatted to satisfy rustfmt on stable/MSRV.
+
 ### Notes
 - To run chaos and longevity suites locally:
   - Chaos: `cargo test --features bench-tests -- --ignored --test chaos_tests`
   - Longevity: `OPS=1000000000 cargo test --features bench-tests -- --ignored --test longevity_tests`
-
-
 
 
 
@@ -348,8 +376,9 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...HEAD
-[0.9.0]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...v0.9.0
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.8.6...HEAD
+[0.9.0]: https://github.com/jamesgober/metrics-lib/compare/v0.8.6...v0.9.0
+[0.8.6]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...v0.8.6
 [0.8.3]: https://github.com/jamesgober/metrics-lib/compare/v0.8.0...v0.8.3
 [0.8.0]: https://github.com/jamesgober/metrics-lib/compare/v0.5.1...v0.8.0
 [0.5.1]: https://github.com/jamesgober/metrics-lib/compare/v0.5.0...v0.5.1
