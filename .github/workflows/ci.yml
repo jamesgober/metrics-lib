@@ -360,3 +360,78 @@ jobs:
         # Do not fail CI on alerts until baseline stabilizes
         fail-on-alert: false
         alert-threshold: '200%'
+
+    - name: Ensure benchmark viewer on gh-pages (main.js)
+      if: steps.aggregate.outputs.found == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch origin gh-pages:gh-pages || true
+        # Switch to gh-pages in-place
+        git switch gh-pages
+        changed=0
+        if [ ! -f main.js ]; then
+          cat > main.js <<'EOF'
+          (function(){
+            function byId(id){return document.getElementById(id)}
+            function fmt(v){ return (typeof v==='number') ? v.toFixed(2) : String(v) }
+            function render(entries){
+              if(!entries || !entries.length) return false;
+              var c = byId('content'); if(!c) return false; c.innerHTML='';
+              var t = document.createElement('table'); t.style.borderCollapse='collapse';
+              t.innerHTML = '<thead><tr>'+
+                '<th style="text-align:left;padding:6px;border-bottom:1px solid #e1e4e8">Name</th>'+
+                '<th style="text-align:right;padding:6px;border-bottom:1px solid #e1e4e8">Value</th>'+
+                '<th style="text-align:left;padding:6px;border-bottom:1px solid #e1e4e8">Unit</th>'+
+                '</tr></thead>';
+              var b = document.createElement('tbody');
+              entries.slice(-100).forEach(function(e){
+                var tr=document.createElement('tr');
+                tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #f0f0f0">'+(e.name||e.benchmark||'unknown')+'</td>'+
+                               '<td style="padding:6px;text-align:right;border-bottom:1px solid #f0f0f0">'+fmt(e.value||e.mean||e.score||e.result||e.time)+'</td>'+
+                               '<td style="padding:6px;border-bottom:1px solid #f0f0f0">'+(e.unit||'ns/op')+'</td>';
+                b.appendChild(tr);
+              });
+              t.appendChild(b); c.appendChild(t); return true;
+            }
+            function deriveEntries(obj){
+              if(!obj) return null; if(Array.isArray(obj)) return obj;
+              if(obj.entries){
+                if(Array.isArray(obj.entries)) return obj.entries;
+                if(typeof obj.entries==='object'){
+                  var suite = Array.isArray(obj.entries.Criterion)?obj.entries.Criterion:null;
+                  if(!suite){ var ks=Object.keys(obj.entries); for(var i=0;i<ks.length;i++){ if(Array.isArray(obj.entries[ks[i]])){ suite=obj.entries[ks[i]]; break; }}}
+                  if(Array.isArray(suite)){ var last=suite[suite.length-1]; if(last && Array.isArray(last.benches)) return last.benches; return suite; }
+                }
+              }
+              if(Array.isArray(obj.bench)) return obj.bench;
+              if(obj.data){ if(Array.isArray(obj.data)) return obj.data; if(Array.isArray(obj.data.entries)) return obj.data.entries; }
+              if(Array.isArray(obj.benchmarks)) return obj.benchmarks; return null;
+            }
+            function tryGlobals(){
+              var keys=Object.keys(window); for(var i=0;i<keys.length;i++){ var v=window[keys[i]]; try{
+                var entries = deriveEntries(v) || (v&&v.data&&deriveEntries(v.data)); if(entries && render(entries)) return true;
+              }catch(_){} } return false;
+            }
+            function load(){
+              var onDataDir = location.pathname.endsWith('/benchmark-data/') || location.pathname.indexOf('/benchmark-data/index.html')>=0;
+              var url = onDataDir ? './data.js' : './benchmark-data/data.js';
+              var s=document.createElement('script'); s.src = url + (url.indexOf('?')===-1?'?':'&')+'t='+Date.now();
+              s.onload=function(){ if(tryGlobals()) return; fetch(url,{cache:'no-store'}).then(function(r){ if(!r.ok) throw new Error(r.status); return r.text() }).then(function(txt){
+                var i=txt.indexOf('{'), j=txt.lastIndexOf('}'); var parsed=null; try{ parsed=JSON.parse(txt) }catch(_){ if(i>=0&&j>i){ try{ parsed=JSON.parse(txt.slice(i,j+1)) }catch(_){ } } }
+                var entries = deriveEntries(parsed); if(!render(entries)) throw new Error('no entries');
+              }).catch(function(){ var c=byId('content'); if(c) c.innerHTML='<p class="note">No recognizable benchmark data found yet. Browse <a href="./benchmark-data/">raw files</a>.</p>'; }); };
+              s.onerror=function(){ var c=byId('content'); if(c) c.innerHTML='<p class="note">No recognizable benchmark data found yet. Browse <a href="./benchmark-data/">raw files</a>.</p>'; };
+              document.head.appendChild(s);
+            }
+            window.addEventListener('DOMContentLoaded', load);
+          })();
+          EOF
+          git add main.js || true
+          if ! git diff --cached --quiet; then
+            git -c user.name="github-action-benchmark" -c user.email="github@users.noreply.github.com" commit -m "chore(bench): ensure viewer main.js present"
+            git push origin gh-pages:gh-pages --no-verify
+            changed=1
+          fi
+        # Switch back to the original ref if needed
+        git switch -

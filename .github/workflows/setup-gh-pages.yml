@@ -32,22 +32,15 @@ jobs:
               if(typeof v==='number'){return v.toFixed(2)}
               return String(v)
             }
-            function renderFromBenchmarkData(obj){
-              // Expect shapes similar to github-action-benchmark's data.js
-              // Heuristics: look for an array of entries under obj['bench'] or obj['entries']
-              var entries = null;
-              if(Array.isArray(obj)) entries = obj;
-              if(!entries && Array.isArray(obj.bench)) entries = obj.bench;
-              if(!entries && Array.isArray(obj.entries)) entries = obj.entries;
-              if(!entries && obj && obj.benchmarks && Array.isArray(obj.benchmarks)) entries = obj.benchmarks;
-              if(!entries){ return false }
+            function render(entries){
+              if(!entries || !entries.length){ return false }
               var cont = byId('content');
               cont.innerHTML = '';
               var table = document.createElement('table');
               table.style.borderCollapse='collapse';
               table.innerHTML = '<thead><tr><th style="text-align:left;padding:6px;border-bottom:1px solid #e1e4e8">Name</th><th style="text-align:right;padding:6px;border-bottom:1px solid #e1e4e8">Value</th><th style="text-align:left;padding:6px;border-bottom:1px solid #e1e4e8">Unit</th></tr></thead>';
               var tbody = document.createElement('tbody');
-              entries.slice(-50).forEach(function(e){
+              entries.slice(-100).forEach(function(e){
                 var tr = document.createElement('tr');
                 tr.innerHTML = '<td style="padding:6px;border-bottom:1px solid #f0f0f0">'+(e.name||e.benchmark||'unknown')+'</td>'+
                                '<td style="padding:6px;text-align:right;border-bottom:1px solid #f0f0f0">'+fmt(e.value||e.mean||e.score||e.result||e.time)+'</td>'+
@@ -58,6 +51,54 @@ jobs:
               cont.appendChild(table);
               return true;
             }
+            function extractJSON(text){
+              // Try pure JSON first
+              try { return JSON.parse(text) } catch(_){ }
+              // Try to find object {...}
+              var i = text.indexOf('{'); var j = text.lastIndexOf('}');
+              if(i>=0 && j>i){
+                var objStr = text.slice(i, j+1);
+                try { return JSON.parse(objStr) } catch(_){ }
+              }
+              // Try to find array [...]
+              i = text.indexOf('['); j = text.lastIndexOf(']');
+              if(i>=0 && j>i){
+                var arrStr = text.slice(i, j+1);
+                try { return { entries: JSON.parse(arrStr) } } catch(_){ }
+              }
+              return null;
+            }
+            function deriveEntries(obj){
+              if(!obj) return null;
+              if(Array.isArray(obj)) return obj;
+              // github-action-benchmark layout: window.BENCHMARK_DATA = { entries: { SuiteName: [ { benches: [...] }, ... ] } }
+              if(obj.entries){
+                // If entries is an array directly
+                if(Array.isArray(obj.entries)) return obj.entries;
+                // If entries is an object of suites, pick Criterion or the first suite
+                if(typeof obj.entries === 'object'){
+                  var suite = null;
+                  if(Array.isArray(obj.entries.Criterion)) suite = obj.entries.Criterion;
+                  if(!suite){
+                    var ks = Object.keys(obj.entries);
+                    for(var i=0;i<ks.length;i++){ if(Array.isArray(obj.entries[ks[i]])){ suite = obj.entries[ks[i]]; break; } }
+                  }
+                  if(Array.isArray(suite)){
+                    // Take the latest run (last element) and return its benches if present
+                    var last = suite[suite.length-1];
+                    if(last && Array.isArray(last.benches)) return last.benches;
+                    return suite;
+                  }
+                }
+              }
+              if(Array.isArray(obj.bench)) return obj.bench;
+              if(obj.data){
+                if(Array.isArray(obj.data)) return obj.data;
+                if(Array.isArray(obj.data.entries)) return obj.data.entries;
+              }
+              if(Array.isArray(obj.benchmarks)) return obj.benchmarks;
+              return null;
+            }
             function tryKnownGlobals(){
               var keys = Object.keys(window);
               for(var i=0;i<keys.length;i++){
@@ -65,25 +106,41 @@ jobs:
                 try{
                   var v = window[k];
                   if(v && typeof v === 'object'){
-                    if(renderFromBenchmarkData(v)) return true;
-                    if(v && v.data && renderFromBenchmarkData(v.data)) return true;
+                    var entries = deriveEntries(v) || (v.data && deriveEntries(v.data));
+                    if(entries && render(entries)) return true;
                   }
                 }catch(_){ }
               }
               return false;
             }
-            function loadScript(src, cb){
-              var s = document.createElement('script'); s.src = src; s.onload = cb; s.onerror = cb; document.head.appendChild(s);
+            function load(){
+              var onDataDir = location.pathname.endsWith('/benchmark-data/') || location.pathname.indexOf('/benchmark-data/index.html')>=0;
+              var url = onDataDir ? './data.js' : './benchmark-data/data.js';
+              // First try loading as a script to expose any globals the action may set
+              var s = document.createElement('script');
+              s.src = url + (url.indexOf('?')===-1 ? '?' : '&') + 't=' + Date.now();
+              s.onload = function(){
+                if(tryKnownGlobals()) return;
+                // Fallback: fetch and attempt to parse as JSON-ish
+                fetch(url, { cache: 'no-store' })
+                  .then(function(r){ if(!r.ok) throw new Error(''+r.status); return r.text() })
+                  .then(function(txt){
+                    var parsed = extractJSON(txt);
+                    var entries = deriveEntries(parsed);
+                    if(!render(entries)) throw new Error('No entries parsed');
+                  })
+                  .catch(function(){
+                    var c = byId('content');
+                    if(c) c.innerHTML = '<p class="note">No recognizable benchmark data found yet. Browse <a href="./benchmark-data/">raw files</a>.</p>';
+                  });
+              };
+              s.onerror = function(){
+                var c = byId('content');
+                if(c) c.innerHTML = '<p class="note">No recognizable benchmark data found yet. Browse <a href="./benchmark-data/">raw files</a>.</p>';
+              };
+              document.head.appendChild(s);
             }
-            window.addEventListener('DOMContentLoaded', function(){
-              // Attempt to load the action's data.js
-              loadScript('./benchmark-data/data.js', function(){
-                if(!tryKnownGlobals()){
-                  var c = byId('content');
-                  c.innerHTML = '<p class="note">No recognizable benchmark data found yet. Browse <a href="./benchmark-data/">raw files</a>.</p>';
-                }
-              });
-            });
+            window.addEventListener('DOMContentLoaded', load);
           })();
           EOF
           cat > _ghpages/benchmark-data/index.html << 'EOF'
