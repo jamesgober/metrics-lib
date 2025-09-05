@@ -138,6 +138,30 @@ This project uses `cargo-llvm-cov` for coverage locally and in CI. Line coverage
 - LCOV artifact is uploaded as `coverage-lcov` containing `target/coverage/lcov.info`.
 - Benchmark-gated tests are not required for coverage and remain ignored by default.
 
+## Performance Regression Policy
+
+The project enforces a lightweight performance guardrail in CI to catch large regressions early while remaining tolerant of shared-runner noise.
+
+What runs in CI:
+
+- PRs: a smoke Criterion pass runs with shortened durations (see "CI Behavior for Benchmarks"). Artifacts are uploaded for manual inspection.
+- Pushes to `main`: a short Criterion run is analyzed by `benchmark-action/github-action-benchmark`, which compares results against stored history and creates alerts on detected regressions. Historical data is stored on the `gh-pages` branch under `benchmark-data/`.
+
+Alert/Failure behavior:
+
+- Significant slowdowns trigger an alert comment on PRs and fail the job (`fail-on-alert: true`). The initial alert threshold is relaxed to account for runner variance and can be tightened over time as baselines stabilize.
+
+How to investigate locally:
+
+- Save and compare Criterion baselines (see below). Use `critcmp` to compare two directories or two baselines.
+- Re-run benches with higher durations to reduce variance: `cargo bench` or increase `-w`/`-m`/`-n`.
+- Ensure a quiet system and stable CPU frequency (see "Reducing Variance").
+
+Notes:
+
+- These checks are advisory for performance hygiene and do not replace disciplined review of algorithmic complexity and constant factors.
+- Benchmark-style tests remain behind the `bench-tests` feature and `#[ignore]` to avoid flakiness in standard CI.
+
 ## Comparing Criterion Results
 
 There are two recommended approaches:

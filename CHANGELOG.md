@@ -10,10 +10,26 @@
 
 ## [Unreleased]
 
+### Added
+- Benchmark Regression CI job in `.github/workflows/ci.yml`:
+  - Uses `benchmark-action/github-action-benchmark@v1` against Criterion output in `target/criterion`.
+  - Runs on `push` and `pull_request`; auto-pushes benchmark data to `gh-pages` when on `main`.
+  - Fails PRs on significant regressions (`fail-on-alert: true`), with an initial alert threshold tuned for noisy runners.
 
+- Chaos Testing Suite (concurrency and system pressure):
+  - File: `tests/chaos_tests.rs`
+  - Gated via `#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]` and `#[ignore]` by default.
+  - Exercises high-concurrency updates across `Counter`, `Gauge`, and `RateMeter` with mixed CAS-heavy operations.
 
+- Longevity Tests (1B+ operations configurable):
+  - File: `tests/longevity_tests.rs`
+  - Gated via `#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]` and `#[ignore]` by default.
+  - Operation count configurable via `OPS` env var; defaults are reduced automatically under CI.
 
-
+### Notes
+- To run chaos and longevity suites locally:
+  - Chaos: `cargo test --features bench-tests -- --ignored --test chaos_tests`
+  - Longevity: `OPS=1000000000 cargo test --features bench-tests -- --ignored --test longevity_tests`
 
 <br>
 

@@ -215,3 +215,44 @@ jobs:
       with:
         name: criterion-reports
         path: target/criterion
+
+  benchmark-regression:
+    name: Benchmark Regression (Criterion)
+    # Run on pushes to main and PRs; PRs will only compare without pushing data
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      deployments: write
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: bench-regression-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Run Criterion benchmarks (short)
+      run: |
+        cargo bench --all-features -- -w 0.5 -m 1.5 -n 50
+    - name: Benchmark Regression Check
+      uses: benchmark-action/github-action-benchmark@v1
+      with:
+        name: Criterion
+        tool: 'cargo'
+        # Target Criterion output directory
+        output-file-path: 'target/criterion'
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        auto-push: ${{ github.ref == 'refs/heads/main' }}
+        # Store results on gh-pages branch under benchmark-data/
+        gh-pages-branch: 'gh-pages'
+        benchmark-data-dir-path: 'benchmark-data'
+        # PR comment and check
+        comment-on-alert: true
+        fail-on-alert: true
+        alert-threshold: '200%' # allow noisy runners; adjust tighter later
