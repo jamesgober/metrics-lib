@@ -210,7 +210,10 @@ cargo test
 # Test with all features
 cargo test --all-features
 
-# Run benchmarks
+# Run only bench-gated tests (feature-flagged and ignored by default)
+cargo test --features bench-tests -- --ignored
+
+# Run benchmarks (Criterion)
 cargo bench
 
 # Check for memory leaks (with valgrind)
