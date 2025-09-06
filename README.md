@@ -3,8 +3,11 @@
     <br>
     <b>metrics-lib</b>
     <br>
-    <sub><sup>Ultra-fast lock-free metrics for high-performance applications</sup></sub>
+    <sub>
+        <sup>PERFORMANCE &nbsp;+&nbsp; DIAGNOSTICS</sup>
+    </sub>
 </h1>
+
 <div align="center">
     <a href="https://crates.io/crates/metrics-lib"><img alt="Crates.io" src="https://img.shields.io/crates/v/metrics-lib"></a>
     <a href="https://crates.io/crates/metrics-lib" alt="Download metrics-lib"><img alt="Crates.io Downloads" src="https://img.shields.io/crates/d/metrics-lib?color=%230099ff"></a>
@@ -16,26 +19,40 @@
     </a>
     <a href="https://github.com/rust-lang/rfcs/blob/master/text/2495-min-rust-version.md" title="MSRV"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.70%2B-blue"></a>
 </div>
-<br>
-<p align="center">
-    A high‑performance, in‑process metrics library for Rust. It provides ultra‑low‑overhead counters, gauges (atomic f64), timers (nanosecond precision), and sliding‑window rate meters designed for production hot paths. The core is lock‑free on the hot path, allocation‑free during steady state, and cache‑aligned for minimal contention. Optional async helpers, adaptive controls, and system health snapshots are available without imposing overhead when unused. MSRV is 1.70+. CI enforces formatting, lints, coverage (85% threshold), rustdoc warnings, and publish dry‑runs for reliability.
-</p>
 
-<div align="center">
-    <sup>
-        <a href="https://github.com/jamesgober/metrics-lib/blob/main/README.md" title="Project Home"><b>HOME</b></a>
-        <span>&nbsp;│&nbsp;</span>
-        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/README.md" title="Documentation"><b>DOCS</b></a>
-        <span>&nbsp;│&nbsp;</span>
-        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/API.md" title="API Reference"><b>API</b></a>
-        <span>&nbsp;│&nbsp;</span>
-        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/GUIDELINES.md" title="Developer Guidelines"><b>GUIDELINES</b></a>
-    </sup>
- </div>
+<br>
+
+<div align="left">
+    <p>
+        <strong>Metrics-lib</strong> - A lightweight, <b>ultra-high-performance</b> metrics library for Rust. 
+        Purpose-built with <em>minimal dependencies</em> to maintain <b>ultra-low overhead</b> while delivering <b>high-operation throughput</b>, even under <em>heavy loads</em>.
+        Built with native <b>asynchronous support</b> and <b>cross-platform compatibility</b>, Metrics-lib leverages <b>lock-free</b> atomic operations to ensure thread-safe data collection without performance bottlenecks across <b>Windows</b>, <b>macOS</b>, and <b>Linux</b> environments.
+    </p>
+    <p>
+        This library provides a comprehensive metrics system that includes <b>counters</b>, <b>gauges</b>, <b>timers</b>, <b>sliding-window rate meters</b>, <b>adaptive sampling</b>, and <b>system health monitoring</b>—all designed for production hot paths. 
+        The core architecture is <b>lock-free</b> on the hot path, <b>allocation-free</b> during steady state, and <b>cache-aligned</b> for minimal contention.
+    </p>
+    <p>
+        Built with <b>resilience</b> in mind, Metrics-lib includes features such as <b>circuit breakers</b>, <b>adaptive sampling</b>, <b>backpressure control</b>, and <b>system health monitoring</b> to ensure <b>maximum-endurance</b> and <b>stability</b>.
+    </p>
+    <br>
+    <hr>
+    <p>
+         Optional async helpers, adaptive controls, and system health snapshots are available without imposing overhead when unused.
+    </p>
+    <p>
+        <strong>MSRV is 1.70+</strong>.        
+    </p>
+    <blockquote>
+        CI enforces formatting, lints, coverage (<i>85% threshold</i>), <b>rustdoc</b> warnings, and publish dry‑runs for reliability.
+    </blockquote>
+</div>
+
 
 <hr>
+<br>
 
-## Performance First
+<h2>Performance First</h2>
 
 **World-class performance** with industry-leading benchmarks:
 
@@ -44,7 +61,9 @@
 - **Timer**: 10.87ns/op (91.99M ops/sec)
 - **Memory**: 64 bytes per metric (cache-aligned)
 
+<br>
 <hr>
+<br>
 
 ## Features
 
@@ -55,6 +74,8 @@
 - **📈 Rate Meters** - Sliding window rates with burst detection and API limiting
 - **💾 System Health** - Built-in CPU, memory, and process monitoring
 
+<br>
+
 ### Advanced Features
 - **Lock-Free** - Zero locks in hot paths, pure atomic operations
 - **Async Native** - First-class async/await support with zero-cost abstractions
@@ -62,6 +83,7 @@
 - **Cross-Platform** - Linux, macOS, Windows with optimized system integrations
 - **Cache-Aligned** - 64-byte alignment prevents false sharing
 
+<br>
 <hr>
 
 ## API Overview
@@ -77,8 +99,9 @@ For a complete reference with examples, see `docs/API.md`.
 - [Adaptive controls](./docs/API.md#adaptive-controls) — sampling, circuit breaker, backpressure
 - [Prelude](./docs/API.md#prelude) — convenient re-exports
 
-### Error handling: try_ variants
+<br>
 
+### Error handling: try_ variants
 All core metrics expose non-panicking `try_` methods that validate inputs and return `Result<_, MetricsError>` instead of panicking:
 
 - `Counter`: `try_inc`, `try_add`, `try_set`, `try_fetch_add`, `try_inc_and_get`
@@ -574,6 +597,20 @@ cargo clippy --all-features -- -D warnings
 <hr>
 <br>
 
+<div align="center">
+    <sup>
+        <span>HOME</span>
+        <span>&nbsp;│&nbsp;</span>
+        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/README.md" title="Documentation"><b>DOCS</b></a>
+        <span>&nbsp;│&nbsp;</span>
+        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/API.md" title="API Reference"><b>API</b></a>
+        <span>&nbsp;│&nbsp;</span>
+        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/GUIDELINES.md" title="Developer Guidelines"><b>GUIDELINES</b></a>
+    </sup>
+</div>
+<br>
+
+
 ## Links
 
 - 📚 [Documentation](https://docs.rs/metrics-lib)
@@ -589,6 +626,7 @@ cargo clippy --all-features -- -D warnings
 - API Stability Guarantees: [`docs/api-stability.md`](./docs/api-stability.md)
 
 <br>
+
 <hr>
 <br>
 
