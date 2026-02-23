@@ -25,7 +25,7 @@ Beta/Release-Candidate: Optimized, Stable, and Ready for Production.
 - API Reference: added real-world examples in `docs/API.md` — Custom Exporter, Memory stats (total/used/free, %), Memory % for an operation, CPU stats (total/used/free, %), CPU % for an operation.
 - Examples: added `examples/cpu_stats.rs` and `examples/memory_stats.rs` demonstrating formatted size and percentage outputs.
 - SystemHealth: cross-platform backend using `sysinfo` on non-Linux (macOS/Windows) while retaining `/proc` on Linux.
-- API Reference: added `SystemHealth` Platform Notes (Linux `/proc`; non-Linux `sysinfo`; placeholders for threads/FDS; path to native backends), and linked new examples.
+- API Reference: added `SystemHealth` Platform Notes (Linux `/proc`; non-Linux `sysinfo`; thread/FD defaults; path to native backends), and linked new examples.
 - Examples: added `quick_tour.rs`, `async_batch_timing.rs`, `token_bucket_limiter.rs`,
   `custom_exporter_openmetrics.rs`, `axum_middleware_metrics.rs`, and `contention_admission.rs`.
 - CPU example enhancements: `examples/cpu_stats.rs` now demonstrates instantaneous, warm-up, and post-work process CPU readings using `SystemHealth`; tuned sampling windows for moderate utilization.
@@ -41,7 +41,7 @@ Beta/Release-Candidate: Optimized, Stable, and Ready for Production.
 - Docs navigation: linked new guides from `docs/README.md` and added a Guides section to top-level `README.md`.
 - Guidelines: polished wording, fixed typos/encoding artifacts, and clarified testing standards in `docs/GUIDELINES.md` while preserving structure and principles.
 - SystemHealth (non-Linux): switched to a persistent `sysinfo::System` instance with cached `pid` for accurate delta-based sampling; normalized process CPU to per-core (0..100%) and clamped.
-- CPU example tuning: increased warm-up window and adjusted work phase to yield stable, moderate CPU percentages on typical hosts; removed flaky raw sysinfo two-sample printout.
+- CPU example tuning: increased warm-up window and adjusted work duration to yield stable, moderate CPU percentages on typical hosts; removed flaky raw sysinfo two-sample printout.
 - Docs/API.md: added `SystemHealth` Platform Notes, Memory Units Note (with pointer to the helper), and expanded integration/example references.
 - README: expanded Examples section with run commands for all new examples.
 
@@ -76,10 +76,10 @@ Beta: Stress Tested and Stable.
   - Fails PRs on significant regressions (`fail-on-alert: true`) with an initial alert threshold tuned for noisy runners.
 - GitHub Pages bootstrap for benchmark history:
   - Workflow: `.github/workflows/setup-gh-pages.yml` powered by `peaceiris/actions-gh-pages@v4`.
-  - Publishes a minimal dashboard `index.html`, `.nojekyll`, and a placeholder `benchmark-data/index.html`.
+  - Publishes a minimal dashboard `index.html`, `.nojekyll`, and an initial `benchmark-data/index.html`.
   - Repository README now links to the public history: `https://jamesgober.github.io/metrics-lib/benchmark-data/`.
 - Examples quality gate:
-  - `cargo build --examples` and `cargo clippy --examples -D warnings` verified clean.
+  - `cargo build --examples` and `cargo clippy --examples -D warnings` pass clean.
   - CI job added to build, lint, and run `quick_start` example on every PR/push.
   - New example: `examples/quick_start.rs` demonstrating counter, gauge, timer (RAII), and rate usage.
   - New example: `examples/streaming_rate_window.rs` demonstrating rate sampling over time with a Tokio producer/consumer.
@@ -332,14 +332,14 @@ Complete Architectural Overhaul
 - **Process Usage Estimation**: Automatic detection of current app's CPU/memory consumption
 
 ### Changed
-- **API Redesign**: Simplified from complex over-engineered interface to intuitive methods
+- **API Redesign**: Streamlined from complex over-engineered interface to intuitive methods
 - **Performance Focus**: Sub-3ns counter increments, sub-5ns gauge updates
 - **Memory Layout**: Cache-line aligned structures, optimized atomic operations
 - **Error Handling**: Graceful degradation, never hang or block
 
 ### Removed
 - Over-engineered SIMD complexity (moved to optional extensions)
-- Complex async machinery (simplified to core functionality)
+- Complex async machinery (reduced to core functionality)
 - Thread-local pools (over-optimization removed)
 - Specialized lens types (moved to separate analytics crate)
 - Historical tracking complexity (available as optional feature)

@@ -493,7 +493,7 @@ println!(
 - Non‑Linux (macOS/Windows): Uses the `sysinfo` crate for cross‑platform values.
   - System CPU, memory, and load are reported via `sysinfo`.
   - Process CPU and memory are reported via `sysinfo`.
-  - Thread count and file descriptor/handle count are placeholders for now (1 and 0 respectively) where not exposed portably.
+  - Thread count and file descriptor/handle count return defaults (1 and 0 respectively) where not exposed portably.
 - Future enhancement: native macOS (sysctl/mach) and Windows (PDH/WMI/WinAPI) backends can be added for per‑platform fidelity (e.g., accurate thread/FD counts) without adding dependencies.
 
 Examples:
