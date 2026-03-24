@@ -243,13 +243,8 @@ impl Default for Registry {
 // Send + Sync when its contents are Send + Sync. No unsafe impls required.
 
 #[cfg(test)]
-// Registry integration tests require all four metric-type features.
-#[cfg(all(
-    feature = "count",
-    feature = "gauge",
-    feature = "timer",
-    feature = "meter"
-))]
+// Registry integration tests require the default metric features.
+#[cfg(all(feature = "count", feature = "gauge", feature = "timer"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -291,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "meter")]
     fn test_rate_meter_registration() {
         let registry = Registry::new();
 
@@ -303,6 +299,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "meter")]
     fn test_mixed_metrics() {
         let registry = Registry::new();
 
@@ -377,6 +374,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "meter")]
     fn test_duplicate_names_across_types_are_independent() {
         let registry = Registry::new();
 
