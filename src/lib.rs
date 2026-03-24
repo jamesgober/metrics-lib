@@ -58,40 +58,38 @@
 use std::sync::OnceLock;
 
 // Core metric-type modules — each gated on its own Cargo feature.
-#[cfg(feature = "count")]
-mod counter;
-#[cfg(feature = "gauge")]
-mod gauge;
-#[cfg(feature = "timer")]
-mod timer;
-#[cfg(feature = "meter")]
-mod rate_meter;
 #[cfg(feature = "sample")]
 mod adaptive;
 #[cfg(feature = "async")]
 mod async_support;
+#[cfg(feature = "count")]
+mod counter;
+#[cfg(feature = "gauge")]
+mod gauge;
+#[cfg(feature = "meter")]
+mod rate_meter;
+#[cfg(feature = "timer")]
+mod timer;
 
 // Always-compiled infrastructure modules.
 mod registry;
 mod system_health;
 
 // Public re-exports — gated to match their feature.
-#[cfg(feature = "count")]
-pub use counter::*;
-#[cfg(feature = "gauge")]
-pub use gauge::{Gauge, GaugeStats};
-#[cfg(feature = "timer")]
-pub use timer::*;
-#[cfg(feature = "meter")]
-pub use rate_meter::{RateMeter, RateStats};
 #[cfg(feature = "sample")]
 pub use adaptive::{
     AdaptiveSampler, BackpressureController, MetricCircuitBreaker, SamplingStrategy,
 };
 #[cfg(feature = "async")]
-pub use async_support::{
-    AsyncMetricBatch, AsyncMetricsBatcher, AsyncTimerExt, AsyncTimerGuard,
-};
+pub use async_support::{AsyncMetricBatch, AsyncMetricsBatcher, AsyncTimerExt, AsyncTimerGuard};
+#[cfg(feature = "count")]
+pub use counter::*;
+#[cfg(feature = "gauge")]
+pub use gauge::{Gauge, GaugeStats};
+#[cfg(feature = "meter")]
+pub use rate_meter::{RateMeter, RateStats};
+#[cfg(feature = "timer")]
+pub use timer::*;
 
 pub use registry::*;
 pub use system_health::*;
@@ -255,16 +253,16 @@ impl std::error::Error for MetricsError {}
 /// Items that require a Cargo feature are only re-exported when that feature is
 /// enabled — they will be absent from the prelude on minimal builds.
 pub mod prelude {
-    pub use crate::{init, metrics, MetricsCore, MetricsError, Result, METRICS};
-    pub use crate::{Registry, SystemHealth};
     #[cfg(feature = "count")]
     pub use crate::Counter;
     #[cfg(feature = "gauge")]
     pub use crate::Gauge;
-    #[cfg(feature = "timer")]
-    pub use crate::Timer;
     #[cfg(feature = "meter")]
     pub use crate::RateMeter;
+    #[cfg(feature = "timer")]
+    pub use crate::Timer;
+    pub use crate::{init, metrics, MetricsCore, MetricsError, Result, METRICS};
+    pub use crate::{Registry, SystemHealth};
 }
 
 #[cfg(test)]

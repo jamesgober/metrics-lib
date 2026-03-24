@@ -12,10 +12,10 @@ use std::sync::{Arc, RwLock};
 use crate::Counter;
 #[cfg(feature = "gauge")]
 use crate::Gauge;
-#[cfg(feature = "timer")]
-use crate::Timer;
 #[cfg(feature = "meter")]
 use crate::RateMeter;
+#[cfg(feature = "timer")]
+use crate::Timer;
 
 /// A thread-safe registry for storing metrics by name.
 ///
@@ -183,7 +183,11 @@ impl Registry {
         let mut total = 0;
         #[cfg(feature = "count")]
         {
-            total += self.counters.read().unwrap_or_else(|e| e.into_inner()).len();
+            total += self
+                .counters
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
         }
         #[cfg(feature = "gauge")]
         {
@@ -195,7 +199,11 @@ impl Registry {
         }
         #[cfg(feature = "meter")]
         {
-            total += self.rate_meters.read().unwrap_or_else(|e| e.into_inner()).len();
+            total += self
+                .rate_meters
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
         }
         total
     }
@@ -203,13 +211,25 @@ impl Registry {
     /// Clear all metrics from the registry.
     pub fn clear(&self) {
         #[cfg(feature = "count")]
-        self.counters.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.counters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         #[cfg(feature = "gauge")]
-        self.gauges.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.gauges
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         #[cfg(feature = "timer")]
-        self.timers.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.timers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         #[cfg(feature = "meter")]
-        self.rate_meters.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.rate_meters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -224,7 +244,12 @@ impl Default for Registry {
 
 #[cfg(test)]
 // Registry integration tests require all four metric-type features.
-#[cfg(all(feature = "count", feature = "gauge", feature = "timer", feature = "meter"))]
+#[cfg(all(
+    feature = "count",
+    feature = "gauge",
+    feature = "timer",
+    feature = "meter"
+))]
 mod tests {
     use super::*;
     use std::sync::Arc;
