@@ -835,11 +835,19 @@ Use Cargo features to tailor performance and binary size to environments:
 Cargo.toml example:
 ```toml
 [features]
-# Keep defaults minimal for production
-default = []
-async = []
-bench-tests = []
-all = ["async"]
+count       = []                                  # Counter metric type
+gauge       = []                                  # Gauge metric type
+timer       = []                                  # Timer metric type
+meter       = []                                  # Rate meter metric type
+sample      = []                                  # Statistical sampling
+histogram   = ["sample"]                          # Histogram (requires sample)
+async       = ["dep:tokio"]                       # Async support (requires Tokio)
+serde       = ["dep:serde"]                       # Serde serialization
+all         = ["count","gauge","timer","meter","sample","histogram"]
+full        = ["count","gauge","timer","meter","sample","histogram","async","serde"]
+minimal     = ["count"]                           # Smallest useful build
+default     = ["count","gauge","timer"]
+bench-tests = []                                  # Benchmark-style CI tests
 ```
 
 CI best practices:

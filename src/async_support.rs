@@ -97,7 +97,13 @@ where
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `TimedFuture` is `!Unpin`. We project through the outer
+        // `Pin<&mut TimedFuture>` to access its fields. The `future` field is
+        // structurally pinned — once `TimedFuture` is pinned, `future` is
+        // guaranteed to stay at the same memory address.
         let this = unsafe { self.get_unchecked_mut() };
+        // SAFETY: `this.future` is structurally pinned (see above). Projecting
+        // to `Pin<&mut F>` is sound because we never move `future` out of `this`.
         let future = unsafe { Pin::new_unchecked(&mut this.future) };
 
         match future.poll(cx) {
@@ -197,9 +203,12 @@ impl AsyncMetricBatch {
     }
 }
 
-/// Async-aware metrics batcher with automatic flushing
+/// Async-aware metrics batcher with automatic background flushing.
+///
+/// Accumulates metric updates and flushes them in batches, either when
+/// `max_batch_size` is reached or on the configured `flush_interval`.
+/// Requires the `async` feature.
 #[cfg(feature = "async")]
-#[allow(dead_code)]
 pub struct AsyncMetricsBatcher {
     batch: tokio::sync::Mutex<AsyncMetricBatch>,
     flush_interval: std::time::Duration,
@@ -208,8 +217,7 @@ pub struct AsyncMetricsBatcher {
 
 #[cfg(feature = "async")]
 impl AsyncMetricsBatcher {
-    /// Create new batcher
-    #[allow(dead_code)]
+    /// Create a new batcher with the given flush interval and maximum batch size.
     pub fn new(flush_interval: std::time::Duration, max_batch_size: usize) -> Self {
         Self {
             batch: tokio::sync::Mutex::new(AsyncMetricBatch::new()),
@@ -218,8 +226,8 @@ impl AsyncMetricsBatcher {
         }
     }
 
-    /// Record metric update
-    #[allow(dead_code)]
+    /// Enqueue a metric update; flushes the batch in the background if
+    /// `max_batch_size` is reached.
     pub async fn record(&self, update: impl FnOnce(&mut AsyncMetricBatch)) {
         let mut batch = self.batch.lock().await;
         update(&mut batch);
@@ -234,8 +242,9 @@ impl AsyncMetricsBatcher {
         }
     }
 
-    /// Start background flusher
-    #[allow(dead_code)]
+    /// Spawn a Tokio task that flushes the batch on the configured interval.
+    ///
+    /// The caller must hold an `Arc<Self>` for the task to keep the batcher alive.
     pub fn start_flusher(self: std::sync::Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.flush_interval);
@@ -329,9 +338,15 @@ mod tests {
             std::task::RawWaker::new(std::ptr::null(), &VTABLE)
         }
 
+        // SAFETY: `dummy_raw_waker` builds a no-op `RawWaker` whose vtable
+        // functions are all no-ops and the data pointer is always null. The
+        // waker is only used within this test to drive a single synchronous poll.
         let waker = unsafe { std::task::Waker::from_raw(dummy_raw_waker()) };
         let mut cx = std::task::Context::from_waker(&waker);
 
+        // SAFETY: `timed` is a local variable that is not moved for the
+        // remainder of this test function. Pinning it here satisfies the
+        // `Future::poll` contract.
         let mut pinned = unsafe { std::pin::Pin::new_unchecked(&mut timed) };
         match std::future::Future::poll(pinned.as_mut(), &mut cx) {
             std::task::Poll::Ready(v) => assert_eq!(v, 7),

@@ -459,9 +459,8 @@ impl std::fmt::Debug for Timer {
     }
 }
 
-// Thread safety
-unsafe impl Send for Timer {}
-unsafe impl Sync for Timer {}
+// Timer is composed of `AtomicU64` fields (Send + Sync) and `Instant`
+// (Send + Sync). The compiler derives Send + Sync automatically.
 
 /// Running timer implementation (RAII)
 impl<'a> RunningTimer<'a> {

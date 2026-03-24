@@ -163,12 +163,16 @@ impl Gauge {
         f64::from_bits(self.value.load(Ordering::Relaxed))
     }
 
-    /// Add to current value - atomic read-modify-write loop
+    /// Add to current value - atomic compare-and-swap loop
     ///
-    /// Uses compare-and-swap loop for lock-free addition
+    /// # Non-finite protection
+    /// If `delta` is non-finite (NaN, ±∞), this is a **no-op**.
+    /// If the resulting sum would also be non-finite the gauge retains its
+    /// current value (silent no-op). Use [`Gauge::try_add`] to receive an
+    /// explicit error instead.
     #[inline]
     pub fn add(&self, delta: f64) {
-        if delta == 0.0 {
+        if delta == 0.0 || !delta.is_finite() {
             return;
         }
 
@@ -176,6 +180,9 @@ impl Gauge {
             let current_bits = self.value.load(Ordering::Relaxed);
             let current_value = f64::from_bits(current_bits);
             let new_value = current_value + delta;
+            if !new_value.is_finite() {
+                return; // Silently no-op — use try_add for error reporting
+            }
             let new_bits = new_value.to_bits();
 
             match self.value.compare_exchange_weak(
@@ -185,12 +192,14 @@ impl Gauge {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => break,
-                Err(_) => continue, // Retry with new current value
+                Err(_) => continue, // Retry with latest value
             }
         }
     }
 
     /// Subtract from current value
+    ///
+    /// Non-finite and overflow protection is identical to [`Gauge::add`].
     #[inline]
     pub fn sub(&self, delta: f64) {
         self.add(-delta);
@@ -348,9 +357,12 @@ impl Gauge {
     }
 
     /// Multiply current value by factor
+    ///
+    /// If `factor` is non-finite, or if the product would be non-finite,
+    /// this is a **no-op** (the gauge retains its current value).
     #[inline]
     pub fn multiply(&self, factor: f64) {
-        if factor == 1.0 {
+        if factor == 1.0 || !factor.is_finite() {
             return;
         }
 
@@ -358,6 +370,9 @@ impl Gauge {
             let current_bits = self.value.load(Ordering::Relaxed);
             let current_value = f64::from_bits(current_bits);
             let new_value = current_value * factor;
+            if !new_value.is_finite() {
+                return; // Guard against overflow to ±Inf or NaN propagation
+            }
             let new_bits = new_value.to_bits();
 
             match self.value.compare_exchange_weak(
@@ -373,9 +388,13 @@ impl Gauge {
     }
 
     /// Divide current value by divisor
+    ///
+    /// If `divisor` is zero, non-finite, or the result would be non-finite,
+    /// this is a **no-op** (the gauge retains its current value). Non-finite
+    /// product protection is handled transitively by [`Gauge::multiply`].
     #[inline]
     pub fn divide(&self, divisor: f64) {
-        if divisor == 0.0 || divisor == 1.0 {
+        if divisor == 0.0 || divisor == 1.0 || !divisor.is_finite() {
             return;
         }
         self.multiply(1.0 / divisor);
@@ -542,8 +561,8 @@ impl std::fmt::Debug for Gauge {
 }
 
 // Thread safety - Gauge is Send + Sync
-unsafe impl Send for Gauge {}
-unsafe impl Sync for Gauge {}
+// Gauge is composed of `AtomicU64` (Send + Sync) and `Instant` (Send + Sync).
+// The compiler derives Send + Sync automatically; no explicit unsafe impl needed.
 
 /// Specialized gauge types for common use cases
 pub mod specialized {
@@ -855,7 +874,7 @@ mod tests {
 
         let stats = gauge.stats();
         assert_eq!(stats.value, 42.0);
-        assert!(stats.age > Duration::from_nanos(0));
+        assert!(stats.age <= gauge.age());
         assert!(stats.updates.is_none()); // Not tracked by default
     }
 
@@ -888,7 +907,7 @@ mod tests {
         assert!(final_value.is_finite());
 
         let stats = gauge.stats();
-        assert!(stats.age > Duration::from_nanos(0));
+        assert!(stats.age <= gauge.age());
     }
 
     #[test]

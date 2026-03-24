@@ -193,12 +193,17 @@ impl AdaptiveSampler {
     }
 }
 
-/// Sampling statistics
+/// Sampling statistics snapshot from an [`AdaptiveSampler`].
 #[derive(Debug, Clone)]
 pub struct SamplingStats {
+    /// Number of samples accepted during the current measurement window.
     pub samples_taken: u64,
+    /// Number of samples rejected (dropped) during the current measurement window.
     pub samples_dropped: u64,
+    /// Current sampling divisor: 1-in-N events are accepted (`1` = accept all).
     pub current_rate: u32,
+    /// `true` when the adaptive rate exceeds twice the configured minimum,
+    /// indicating the system is under elevated load.
     pub is_overloaded: bool,
 }
 
@@ -400,8 +405,17 @@ impl<'a> Drop for BackpressureGuard<'a> {
     }
 }
 
-// Re-export for convenience
+/// Internal pseudo-random number generator used by the adaptive sampler.
+///
+/// Uses the **Splitmix64** algorithm for good statistical quality without
+/// relying on `DefaultHasher` (whose output is not guaranteed to be stable
+/// across Rust versions or between compilations). Seeded per-thread from a
+/// stack-address/timestamp mix so each thread gets an independent sequence.
+///
+/// This is **not** a cryptographic RNG — it is used solely for probabilistic
+/// sampling decisions.
 pub mod fastrand {
+    /// Returns a pseudo-random `u32` uniformly distributed in `range` (inclusive).
     #[inline]
     pub fn u32(range: std::ops::RangeInclusive<u32>) -> u32 {
         let start = *range.start();
@@ -410,22 +424,33 @@ pub mod fastrand {
             return start;
         }
 
-        // Fast thread-local RNG using xorshift
         thread_local! {
-            static RNG: std::cell::Cell<u32> = std::cell::Cell::new({
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                std::hash::Hash::hash(&std::thread::current().id(), &mut hasher);
-                std::hash::Hasher::finish(&hasher) as u32 | 1
+            /// Per-thread Splitmix64 state. Seeded once from a stack-address /
+            /// nanosecond-time mix without using `DefaultHasher`, whose output
+            /// is not stable across Rust versions.
+            static RNG: std::cell::Cell<u64> = std::cell::Cell::new({
+                // Use the address of a stack variable as a low-cost unique seed
+                // component; XOR with a nanosecond timestamp for additional entropy.
+                let addr = &() as *const () as u64;
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64)
+                    .unwrap_or(0xdeadbeef_cafebabe);
+                // Ensure the seed is non-zero (required by xorshift-family generators).
+                (addr ^ nanos.wrapping_mul(0x9e3779b97f4a7c15)) | 1
             });
         }
 
         RNG.with(|rng| {
-            let mut x = rng.get();
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            rng.set(x);
-            start + (x % (end - start + 1))
+            // Splitmix64 step — excellent statistical properties, no external deps.
+            let mut z = rng.get().wrapping_add(0x9e3779b97f4a7c15);
+            rng.set(z);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^= z >> 31;
+            // Use the high 32 bits for the range mapping to avoid modulo bias
+            // on low bits (which have slightly weaker distribution in Splitmix64).
+            start + ((z >> 32) as u32 % (end - start + 1))
         })
     }
 }

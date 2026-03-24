@@ -1,11 +1,13 @@
 //! # Ultra-Fast Rate Meter
 //!
-//! High-performance rate calculations with sliding window tracking.
+//! High-performance rate calculations with tumbling-window tracking.
 //!
 //! ## Features
 //!
 //! - **Sub-microsecond tick operations** - Blazingly fast rate tracking
-//! - **Sliding window calculations** - Accurate rate measurements
+//! - **Tumbling window counters** - Per-second, per-minute, and per-hour
+//!   event counters that reset atomically at each window boundary. This is a
+//!   *tumbling* (non-overlapping) window, not a sliding window.
 //! - **Multiple time windows** - Second, minute, hour rates
 //! - **Lock-free** - Never blocks, never waits
 //! - **Zero allocations** - Pure atomic operations
@@ -15,10 +17,11 @@ use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Ultra-fast rate meter with sliding window calculations
+/// Ultra-fast rate meter with tumbling-window counters.
 ///
-/// Tracks events per second/minute/hour with minimal overhead.
-/// Cache-line aligned to prevent false sharing.
+/// Tracks events per second, per minute, and per hour with minimal overhead.
+/// Counters reset at each second/minute/hour boundary (tumbling windows, not
+/// sliding). Cache-line aligned to prevent false sharing.
 #[repr(align(64))]
 pub struct RateMeter {
     /// Total events seen (monotonic counter)
@@ -509,8 +512,8 @@ impl std::fmt::Debug for RateMeter {
 }
 
 // Thread safety
-unsafe impl Send for RateMeter {}
-unsafe impl Sync for RateMeter {}
+// RateMeter is composed of atomic types (Send + Sync) and `Instant`/`u64`
+// (Send + Sync). The compiler derives Send + Sync automatically.
 
 /// Specialized rate meters for common use cases
 pub mod specialized {

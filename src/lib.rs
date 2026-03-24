@@ -44,37 +44,62 @@
 //! let mem_mb = metrics().system().mem_used_mb();
 //!
 //! // Rate limiting
+//! #[cfg(feature = "meter")]
+//! {
 //! metrics().rate("api_calls").tick();
 //! let rate_per_sec = metrics().rate("api_calls").rate();
+//! let _ = rate_per_sec;
+//! }
 //! ```
 
 #![warn(missing_docs)]
-#![allow(unsafe_code)] // For atomic optimizations
+#![allow(unsafe_code)] // For pin-projection in async support
 
 use std::sync::OnceLock;
 
-mod adaptive;
-mod async_support;
+// Core metric-type modules — each gated on its own Cargo feature.
+#[cfg(feature = "count")]
 mod counter;
+#[cfg(feature = "gauge")]
 mod gauge;
+#[cfg(feature = "timer")]
+mod timer;
+#[cfg(feature = "meter")]
 mod rate_meter;
+#[cfg(feature = "sample")]
+mod adaptive;
+#[cfg(feature = "async")]
+mod async_support;
+
+// Always-compiled infrastructure modules.
 mod registry;
 mod system_health;
-mod timer;
 
+// Public re-exports — gated to match their feature.
+#[cfg(feature = "count")]
+pub use counter::*;
+#[cfg(feature = "gauge")]
+pub use gauge::{Gauge, GaugeStats};
+#[cfg(feature = "timer")]
+pub use timer::*;
+#[cfg(feature = "meter")]
+pub use rate_meter::{RateMeter, RateStats};
+#[cfg(feature = "sample")]
 pub use adaptive::{
     AdaptiveSampler, BackpressureController, MetricCircuitBreaker, SamplingStrategy,
 };
-pub use async_support::{AsyncMetricBatch, AsyncTimerExt, AsyncTimerGuard};
-pub use counter::*;
-pub use gauge::{Gauge, GaugeStats};
-pub use rate_meter::{RateMeter, RateStats};
+#[cfg(feature = "async")]
+pub use async_support::{
+    AsyncMetricBatch, AsyncMetricsBatcher, AsyncTimerExt, AsyncTimerGuard,
+};
+
 pub use registry::*;
 pub use system_health::*;
-pub use timer::*;
 
-// Re-export specialized modules with qualified names to avoid conflicts
+// Specialised sub-module re-exports.
+#[cfg(feature = "gauge")]
 pub use gauge::specialized as gauge_specialized;
+#[cfg(feature = "meter")]
 pub use rate_meter::specialized as rate_meter_specialized;
 
 /// Global metrics instance - initialize once, use everywhere
@@ -116,31 +141,37 @@ impl MetricsCore {
         }
     }
 
-    /// Get or create a counter
+    /// Get or create a counter by name. Requires the `count` feature.
+    #[cfg(feature = "count")]
     #[inline(always)]
     pub fn counter(&self, name: &'static str) -> std::sync::Arc<Counter> {
         self.registry.get_or_create_counter(name)
     }
 
-    /// Get or create a gauge
+    /// Get or create a gauge by name. Requires the `gauge` feature.
+    #[cfg(feature = "gauge")]
     #[inline(always)]
     pub fn gauge(&self, name: &'static str) -> std::sync::Arc<Gauge> {
         self.registry.get_or_create_gauge(name)
     }
 
-    /// Get or create a timer
+    /// Get or create a timer by name. Requires the `timer` feature.
+    #[cfg(feature = "timer")]
     #[inline(always)]
     pub fn timer(&self, name: &'static str) -> std::sync::Arc<Timer> {
         self.registry.get_or_create_timer(name)
     }
 
-    /// Get or create a rate meter
+    /// Get or create a rate meter by name. Requires the `meter` feature.
+    #[cfg(feature = "meter")]
     #[inline(always)]
     pub fn rate(&self, name: &'static str) -> std::sync::Arc<RateMeter> {
         self.registry.get_or_create_rate_meter(name)
     }
 
-    /// Time a closure and record the result
+    /// Time a synchronous closure and record the elapsed duration.
+    /// Requires the `timer` feature.
+    #[cfg(feature = "timer")]
     #[inline]
     pub fn time<T>(&self, name: &'static str, f: impl FnOnce() -> T) -> T {
         let binding = self.timer(name);
@@ -219,10 +250,21 @@ impl std::fmt::Display for MetricsError {
 
 impl std::error::Error for MetricsError {}
 
-/// Prelude for convenient imports
+/// Prelude for convenient glob imports.
+///
+/// Items that require a Cargo feature are only re-exported when that feature is
+/// enabled — they will be absent from the prelude on minimal builds.
 pub mod prelude {
     pub use crate::{init, metrics, MetricsCore, MetricsError, Result, METRICS};
-    pub use crate::{Counter, Gauge, RateMeter, Registry, SystemHealth, Timer};
+    pub use crate::{Registry, SystemHealth};
+    #[cfg(feature = "count")]
+    pub use crate::Counter;
+    #[cfg(feature = "gauge")]
+    pub use crate::Gauge;
+    #[cfg(feature = "timer")]
+    pub use crate::Timer;
+    #[cfg(feature = "meter")]
+    pub use crate::RateMeter;
 }
 
 #[cfg(test)]
@@ -232,52 +274,50 @@ mod tests {
     #[test]
     fn test_metrics_initialization() {
         let metrics = MetricsCore::new();
-
-        // Test basic operations work
-        metrics.counter("test").inc();
-        assert_eq!(metrics.counter("test").get(), 1);
-
-        metrics.gauge("test").set(42.5);
-        assert_eq!(metrics.gauge("test").get(), 42.5);
-
-        // Test system health
+        // SystemHealth is always available regardless of active features.
         let _cpu = metrics.system().cpu_used();
         let _mem = metrics.system().mem_used_mb();
+        #[cfg(feature = "count")]
+        {
+            metrics.counter("test").inc();
+            assert_eq!(metrics.counter("test").get(), 1);
+        }
+        #[cfg(feature = "gauge")]
+        {
+            metrics.gauge("test").set(42.5);
+            assert_eq!(metrics.gauge("test").get(), 42.5);
+        }
     }
 
+    #[cfg(feature = "count")]
     #[test]
     fn test_global_metrics() {
         let _metrics = init();
-
-        // Test global access
         metrics().counter("global_test").inc();
         assert_eq!(metrics().counter("global_test").get(), 1);
     }
 
+    #[cfg(feature = "timer")]
     #[test]
     fn test_time_function_records_and_returns() {
         let metrics = MetricsCore::new();
-
         let result = metrics.time("timed_op", || 123usize);
         assert_eq!(result, 123);
-        // Ensure timer recorded exactly one sample
         assert_eq!(metrics.timer("timed_op").count(), 1);
     }
 
+    #[cfg(feature = "count")]
     #[test]
     fn test_accessors_system_and_registry() {
         let metrics = MetricsCore::new();
-
-        // Access system and call a method to ensure it is used
         let _ = metrics.system().cpu_used();
-
-        // Access registry and use it to create a metric directly
         let reg = metrics.registry();
         let c = reg.get_or_create_counter("from_registry");
         c.add(2);
         assert_eq!(metrics.counter("from_registry").get(), 2);
     }
 
+    #[cfg(feature = "count")]
     #[test]
     fn test_default_impl() {
         let metrics: MetricsCore = Default::default();

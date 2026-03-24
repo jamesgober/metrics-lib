@@ -10,6 +10,61 @@
 
 ## [Unreleased]
 
+### Added
+- `Cargo.toml`: added `full` super-feature that enables all stable features plus `async` and `serde`
+  (`full = ["count", "gauge", "timer", "meter", "sample", "histogram", "async", "serde"]`).
+- `Cargo.toml`: wired the `serde` optional dependency via `serde = ["dep:serde"]` feature activation
+  (previously declared as a dependency but never activatable through features).
+- `src/adaptive.rs`: added field-level doc comments (`///`) to all four public fields of `SamplingStats`
+  (`samples_taken`, `samples_dropped`, `current_rate`, `is_overloaded`).
+- `src/adaptive.rs`: added module-level doc comment to `pub mod fastrand` documenting it is a
+  non-cryptographic RNG seeded from the call-site address and wall-clock nanoseconds.
+- `src/registry.rs`: added per-`#[cfg(feature)]` compilation guards on all struct fields, methods,
+  and imports — metric types now compile out cleanly when their feature flag is disabled.
+- `src/lib.rs`: added per-`#[cfg(feature)]` guards on all module declarations, `pub use` re-exports,
+  `MetricsCore` accessor methods, `prelude` re-exports, and test functions.
+
+### Changed
+- `Cargo.toml`: corrected `minimal` feature from `["count","gauge","timer","meter","sample","histogram"]`
+  (everything) to `["count"]` — minimal now means the smallest useful build.
+- `Cargo.toml`: clarified `all` feature comment to "Enables all stable features (no async)" and added
+  the new `full` feature for builds that include async and serde.
+- `src/rate_meter.rs`: corrected documentation from "sliding window" to "tumbling window" throughout
+  the module doc, struct doc, and feature-list bullet — the implementation has always used a fixed
+  epoch-aligned tumbling window, not a sliding window.
+- `src/adaptive.rs`: replaced `DefaultHasher`-based seed in `pub mod fastrand` with a Splitmix64
+  implementation seeded from `(addr ^ nanos.wrapping_mul(0x9e3779b97f4a7c15)) | 1`.
+  `DefaultHasher` output is unspecified across Rust versions; Splitmix64 is deterministic and
+  produces well-distributed output regardless of toolchain version.
+- `src/registry.rs`: corrected module documentation that claimed a "lock-free hash table" — the
+  registry uses `RwLock<HashMap>`, which is correctly described as a reader-writer lock optimised
+  for read-heavy workloads.
+- `src/async_support.rs`: removed `#[allow(dead_code)]` from all public methods of `AsyncMetricsBatcher`
+  (`new`, `record`, `start_flusher`) — these are part of the public API and should not suppress lints.
+
+### Fixed
+- `src/counter.rs` (`try_inc`, `try_add`, `try_fetch_add`, `try_inc_and_get`): replaced the
+  load-check-fetch_add pattern with proper compare-and-swap (CAS) loops. The previous code had
+  a TOCTOU race: another thread could modify the value between the load and the fetch_add, causing
+  incorrect overflow checks and returning wrong values under concurrent access.
+- `src/counter.rs` (`try_inc_and_get`): removed `debug_assert_eq!(prev, current)` which would
+  panic in debug builds under concurrent access (the assertion was logically impossible to
+  guarantee without a CAS loop).
+- `src/gauge.rs` (`add`, `multiply`, `divide`): added guards against non-finite (NaN, ±Infinity)
+  inputs and intermediate results. Previously, passing NaN or Infinity would silently corrupt the
+  stored gauge value, making all subsequent reads return NaN/Infinity. Non-finite inputs and
+  results are now rejected as a silent no-op.
+- `src/counter.rs`, `src/gauge.rs`, `src/timer.rs`, `src/rate_meter.rs`: removed manual
+  `unsafe impl Send` and `unsafe impl Sync` from all four metric types. These implementations
+  were redundant — `AtomicU64`, `AtomicU32`, `AtomicI64` (and `f64` stored via bit-casting to
+  `AtomicU64`) already implement `Send + Sync`, so the compiler derives the correct bounds
+  automatically. Manual `unsafe impl` is unnecessary and could mask future unsafety.
+- `src/async_support.rs` (`TimedFuture::poll`): added `// SAFETY:` comments to both
+  `get_unchecked_mut` and `Pin::new_unchecked` calls explaining the structural-pinning invariant
+  being upheld (the pinned inner future is never moved while the `TimedFuture` is pinned).
+- `src/async_support.rs` (tests): added `// SAFETY:` comments to `Waker::from_raw` and
+  `Pin::new_unchecked` calls in the test module explaining the preconditions being satisfied.
+
 
 
 

@@ -71,7 +71,7 @@
 - **🔢 Counters** - Atomic increment/decrement with overflow protection
 - **📊 Gauges** - IEEE 754 atomic floating-point with mathematical operations
 - **⏱️ Timers** - Nanosecond precision with RAII guards and batch recording
-- **📈 Rate Meters** - Sliding window rates with burst detection and API limiting
+- **📈 Rate Meters** - Tumbling window rates with burst detection and API limiting
 - **💾 System Health** - Built-in CPU, memory, and process monitoring
 
 <br>
@@ -546,13 +546,29 @@ cargo test --target x86_64-unknown-linux-gnu
 
 ### Feature Flags
 
+| Feature      | Default | Description                                    |
+|--------------|---------|------------------------------------------------|
+| `count`      | ✅      | Counter metric type                            |
+| `gauge`      | ✅      | Gauge metric type                              |
+| `timer`      | ✅      | Timer metric type                              |
+| `meter`      | ❌      | Rate meter metric type                         |
+| `sample`     | ❌      | Statistical sampling                           |
+| `histogram`  | ❌      | Histogram support (requires `sample`)          |
+| `async`      | ❌      | Async/await support (requires Tokio)           |
+| `serde`      | ❌      | Serde serialization support                    |
+| `all`        | ❌      | All stable features (excludes async and serde) |
+| `full`       | ❌      | All features including async and serde         |
+| `minimal`    | ❌      | Smallest useful build (counter only)           |
+
 ```toml
-[dependencies]
-metrics-lib = { version = "0.9.0", features = [
-    "async",     # Async/await support (requires tokio)
-    "histogram", # Advanced histogram support
-    "all"        # Enable all features
-]}
+# All stable features:
+metrics-lib = { version = "0.9.1", features = ["all"] }
+
+# Full build including async and serde:
+metrics-lib = { version = "0.9.1", features = ["full"] }
+
+# Minimal build (counter only):
+metrics-lib = { version = "0.9.1", features = ["minimal"] }
 ```
 
 ### Runtime Configuration

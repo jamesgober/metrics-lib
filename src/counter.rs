@@ -84,12 +84,23 @@ impl Counter {
     /// ```
     #[inline(always)]
     pub fn try_inc(&self) -> Result<()> {
-        let current = self.value.load(Ordering::Relaxed);
-        if current == u64::MAX {
-            return Err(MetricsError::Overflow);
+        // CAS loop: the overflow check and the increment are together atomic,
+        // so this is safe under concurrent access (no TOCTOU race).
+        loop {
+            let current = self.value.load(Ordering::Relaxed);
+            if current == u64::MAX {
+                return Err(MetricsError::Overflow);
+            }
+            match self.value.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
         }
-        self.value.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 
     /// Add arbitrary amount - also blazingly fast
@@ -118,12 +129,20 @@ impl Counter {
         if amount == 0 {
             return Ok(());
         }
-        let current = self.value.load(Ordering::Relaxed);
-        if current.checked_add(amount).is_none() {
-            return Err(MetricsError::Overflow);
+        // CAS loop: overflow check and addition are together atomic.
+        loop {
+            let current = self.value.load(Ordering::Relaxed);
+            let new_val = current.checked_add(amount).ok_or(MetricsError::Overflow)?;
+            match self.value.compare_exchange_weak(
+                current,
+                new_val,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
         }
-        self.value.fetch_add(amount, Ordering::Relaxed);
-        Ok(())
     }
 
     /// Get current value - single atomic load
@@ -196,11 +215,20 @@ impl Counter {
         if amount == 0 {
             return Ok(self.get());
         }
-        let current = self.value.load(Ordering::Relaxed);
-        if current.checked_add(amount).is_none() {
-            return Err(MetricsError::Overflow);
+        // CAS loop: overflow check and fetch_add are together atomic.
+        loop {
+            let current = self.value.load(Ordering::Relaxed);
+            let new_val = current.checked_add(amount).ok_or(MetricsError::Overflow)?;
+            match self.value.compare_exchange_weak(
+                current,
+                new_val,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(prev) => return Ok(prev),
+                Err(_) => continue,
+            }
         }
-        Ok(self.value.fetch_add(amount, Ordering::Relaxed))
     }
 
     /// Add amount and return new value
@@ -231,11 +259,21 @@ impl Counter {
     /// ```
     #[inline]
     pub fn try_inc_and_get(&self) -> Result<u64> {
-        let current = self.value.load(Ordering::Relaxed);
-        let new_val = current.checked_add(1).ok_or(MetricsError::Overflow)?;
-        let prev = self.value.fetch_add(1, Ordering::Relaxed);
-        debug_assert_eq!(prev, current);
-        Ok(new_val)
+        // CAS loop: the returned value is the exact new value after the atomic
+        // increment — correct under concurrent access, unlike a load+store pattern.
+        loop {
+            let current = self.value.load(Ordering::Relaxed);
+            let new_val = current.checked_add(1).ok_or(MetricsError::Overflow)?;
+            match self.value.compare_exchange_weak(
+                current,
+                new_val,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(new_val),
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Get comprehensive statistics
@@ -329,9 +367,9 @@ impl std::fmt::Debug for Counter {
     }
 }
 
-// Thread safety - Counter is Send + Sync
-unsafe impl Send for Counter {}
-unsafe impl Sync for Counter {}
+// Counter is composed solely of `AtomicU64` (Send + Sync) and `Instant`
+// (Send + Sync). The compiler derives Send + Sync automatically; no
+// explicit unsafe impl is needed.
 
 /// Batch counter operations for even better performance
 impl Counter {

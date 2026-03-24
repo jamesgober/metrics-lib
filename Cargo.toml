@@ -1,16 +1,15 @@
-#╔══════════════════════════╗
-#║   ██╗      ██╗ ██████╗   ║
-#║   ██║      ██║ ██╔══██╗  ║
-#║   ██║      ██║ ██████╔╝  ║
-#║   ██║      ██║ ██╔══██╗  ║ 
-#║   ███████╗ ██║ ██████╔╝  ║
-#║   ╚══════╝ ╚═╝ ╚═════╝   ║
-#╠══════════════════════════╢
-#║   Rust Metrics Library   ║
-#╚══════════════════════════╝
+# ██████╗ ███████╗██████╗ ███████╗
+# ██╔══██╗██╔════╝██╔══██╗██╔════╝
+# ██████╔╝█████╗  ██████╔╝███████╗
+# ██╔══██╗██╔══╝  ██╔═══╝ ╚════██║
+# ██║  ██║███████╗██║     ███████║
+# ╚═╝  ╚═╝╚══════╝╚═╝     ╚══════╝
+#╔═══════════════════════════════╗
+#║ Rust Efficiency & Performance ║
+#╚═══════════════════════════════╝
 [package]
 name    = "metrics-lib"
-version = "0.9.0"
+version = "0.9.1"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.70"
@@ -47,7 +46,7 @@ documentation = "https://docs.rs/metrics-lib"
 
 # Authors
 authors = [
-    "James Gober <code@jamesgober.dev>"
+    "James Gober <me@jamesgober.com>"
 ]
 
 
@@ -68,7 +67,7 @@ async       = ["dep:tokio"]
 # Enable histogram
 histogram   = ["sample"] 
 
-# Enables all features.
+# Enables all stable features (no async).
 all = [ 
     "count", 
     "gauge", 
@@ -78,6 +77,21 @@ all = [
     "histogram", 
 ] 
 
+# Enables all features including async and serde.
+full = [
+    "count",
+    "gauge",
+    "timer",
+    "meter",
+    "sample",
+    "histogram",
+    "async",
+    "serde",
+]
+
+# Wire serde feature to the optional dep.
+serde = ["dep:serde"]
+
 # Default features (all enabled).
 default = [ 
     "count", 
@@ -85,15 +99,8 @@ default = [
     "timer", 
 ] 
 
-# Minimal build with core timing only (no default features).
-minimal = [ 
-    "count", 
-    "gauge", 
-    "timer", 
-    "meter", 
-    "sample",
-    "histogram", 
-] 
+# Minimal build: only the counter feature, no other defaults.
+minimal = ["count"]
 
 # Enables nightly Rust features for testing.
 nightly = []
@@ -105,6 +112,56 @@ nightly = []
 [[bench]]
 name    = "metrics_bench"
 harness = false
+
+# EXAMPLES
+# #################################
+[[example]]
+name = "quick_start"
+required-features = ["meter"]
+
+[[example]]
+name = "quick_tour"
+required-features = ["meter"]
+
+[[example]]
+name = "token_bucket_limiter"
+required-features = ["meter"]
+
+[[example]]
+name = "contention_admission"
+required-features = ["meter"]
+
+[[example]]
+name = "broker_throughput"
+required-features = ["meter"]
+
+[[example]]
+name = "custom_exporter_openmetrics"
+required-features = ["meter"]
+
+[[example]]
+name = "benchmark_comparison"
+required-features = ["meter"]
+
+[[example]]
+name = "async_batch_timing"
+required-features = ["async"]
+
+[[example]]
+name = "axum_middleware_metrics"
+required-features = ["async"]
+
+[[example]]
+name = "health_dashboard"
+required-features = ["async"]
+
+[[example]]
+name = "streaming_rate_window"
+required-features = ["async", "meter"]
+
+[[example]]
+name = "axum_registry_integration"
+required-features = ["async", "meter"]
 
 
 

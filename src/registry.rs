@@ -1,21 +1,40 @@
-//! Lock-free registry for storing and retrieving metrics by name.
+//! Thread-safe registry for storing and retrieving metrics by name.
 //!
-//! The Registry uses a lock-free hash table with memory-efficient string interning
-//! to provide O(1) metric lookup with minimal memory overhead.
+//! The `Registry` uses one `RwLock<HashMap>` per enabled metric type.
+//! Read-heavy workloads (metric *lookups*) proceed with shared read locks and
+//! minimal contention. Write locks are only acquired when a new metric name is
+//! registered, which is expected to be an infrequent, one-time-per-name event.
 
-use crate::{Counter, Gauge, RateMeter, Timer};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+#[cfg(feature = "count")]
+use crate::Counter;
+#[cfg(feature = "gauge")]
+use crate::Gauge;
+#[cfg(feature = "timer")]
+use crate::Timer;
+#[cfg(feature = "meter")]
+use crate::RateMeter;
+
 /// A thread-safe registry for storing metrics by name.
 ///
-/// Uses RwLock for simplicity while maintaining good performance for the
-/// read-heavy workloads typical in metrics collection.
+/// Stores one `Arc`-wrapped instance per unique metric name for each enabled
+/// metric type. Repeated lookups for the same name return the same `Arc`
+/// (pointer equality holds). Only metric types enabled via Cargo features are
+/// compiled in; attempting to call a method for a disabled type will result in
+/// a compile-time error.
+///
+/// Cache-line aligned to prevent false sharing in concurrent environments.
 #[repr(align(64))]
 pub struct Registry {
+    #[cfg(feature = "count")]
     counters: RwLock<HashMap<String, Arc<Counter>>>,
+    #[cfg(feature = "gauge")]
     gauges: RwLock<HashMap<String, Arc<Gauge>>>,
+    #[cfg(feature = "timer")]
     timers: RwLock<HashMap<String, Arc<Timer>>>,
+    #[cfg(feature = "meter")]
     rate_meters: RwLock<HashMap<String, Arc<RateMeter>>>,
 }
 
@@ -23,14 +42,21 @@ impl Registry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "count")]
             counters: RwLock::new(HashMap::new()),
+            #[cfg(feature = "gauge")]
             gauges: RwLock::new(HashMap::new()),
+            #[cfg(feature = "timer")]
             timers: RwLock::new(HashMap::new()),
+            #[cfg(feature = "meter")]
             rate_meters: RwLock::new(HashMap::new()),
         }
     }
 
     /// Get or create a counter by name.
+    ///
+    /// Requires the `count` feature.
+    #[cfg(feature = "count")]
     pub fn get_or_create_counter(&self, name: &str) -> Arc<Counter> {
         // Fast path: try read lock first
         if let Ok(counters) = self.counters.read() {
@@ -48,6 +74,9 @@ impl Registry {
     }
 
     /// Get or create a gauge by name.
+    ///
+    /// Requires the `gauge` feature.
+    #[cfg(feature = "gauge")]
     pub fn get_or_create_gauge(&self, name: &str) -> Arc<Gauge> {
         // Fast path: try read lock first
         if let Ok(gauges) = self.gauges.read() {
@@ -65,6 +94,9 @@ impl Registry {
     }
 
     /// Get or create a timer by name.
+    ///
+    /// Requires the `timer` feature.
+    #[cfg(feature = "timer")]
     pub fn get_or_create_timer(&self, name: &str) -> Arc<Timer> {
         // Fast path: try read lock first
         if let Ok(timers) = self.timers.read() {
@@ -82,6 +114,9 @@ impl Registry {
     }
 
     /// Get or create a rate meter by name.
+    ///
+    /// Requires the `meter` feature.
+    #[cfg(feature = "meter")]
     pub fn get_or_create_rate_meter(&self, name: &str) -> Arc<RateMeter> {
         // Fast path: try read lock first
         if let Ok(rate_meters) = self.rate_meters.read() {
@@ -98,7 +133,8 @@ impl Registry {
             .clone()
     }
 
-    /// Get all registered counter names.
+    /// Get all registered counter names. Requires the `count` feature.
+    #[cfg(feature = "count")]
     pub fn counter_names(&self) -> Vec<String> {
         self.counters
             .read()
@@ -108,7 +144,8 @@ impl Registry {
             .collect()
     }
 
-    /// Get all registered gauge names.
+    /// Get all registered gauge names. Requires the `gauge` feature.
+    #[cfg(feature = "gauge")]
     pub fn gauge_names(&self) -> Vec<String> {
         self.gauges
             .read()
@@ -118,7 +155,8 @@ impl Registry {
             .collect()
     }
 
-    /// Get all registered timer names.
+    /// Get all registered timer names. Requires the `timer` feature.
+    #[cfg(feature = "timer")]
     pub fn timer_names(&self) -> Vec<String> {
         self.timers
             .read()
@@ -128,7 +166,8 @@ impl Registry {
             .collect()
     }
 
-    /// Get all registered rate meter names.
+    /// Get all registered rate meter names. Requires the `meter` feature.
+    #[cfg(feature = "meter")]
     pub fn rate_meter_names(&self) -> Vec<String> {
         self.rate_meters
             .read()
@@ -138,39 +177,39 @@ impl Registry {
             .collect()
     }
 
-    /// Get total number of registered metrics.
+    /// Get total number of registered metrics across all enabled metric types.
     pub fn metric_count(&self) -> usize {
-        self.counters
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
-            + self.gauges.read().unwrap_or_else(|e| e.into_inner()).len()
-            + self.timers.read().unwrap_or_else(|e| e.into_inner()).len()
-            + self
-                .rate_meters
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .len()
+        #[allow(unused_mut)]
+        let mut total = 0;
+        #[cfg(feature = "count")]
+        {
+            total += self.counters.read().unwrap_or_else(|e| e.into_inner()).len();
+        }
+        #[cfg(feature = "gauge")]
+        {
+            total += self.gauges.read().unwrap_or_else(|e| e.into_inner()).len();
+        }
+        #[cfg(feature = "timer")]
+        {
+            total += self.timers.read().unwrap_or_else(|e| e.into_inner()).len();
+        }
+        #[cfg(feature = "meter")]
+        {
+            total += self.rate_meters.read().unwrap_or_else(|e| e.into_inner()).len();
+        }
+        total
     }
 
     /// Clear all metrics from the registry.
     pub fn clear(&self) {
-        self.counters
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        self.gauges
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        self.timers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        self.rate_meters
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        #[cfg(feature = "count")]
+        self.counters.write().unwrap_or_else(|e| e.into_inner()).clear();
+        #[cfg(feature = "gauge")]
+        self.gauges.write().unwrap_or_else(|e| e.into_inner()).clear();
+        #[cfg(feature = "timer")]
+        self.timers.write().unwrap_or_else(|e| e.into_inner()).clear();
+        #[cfg(feature = "meter")]
+        self.rate_meters.write().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -180,15 +219,16 @@ impl Default for Registry {
     }
 }
 
-// `Registry` is Send + Sync automatically because all fields are `RwLock<...>`
-// whose contents are Send + Sync. No unsafe impls required.
+// `Registry` is Send + Sync automatically because `RwLock<HashMap<…>>` is
+// Send + Sync when its contents are Send + Sync. No unsafe impls required.
 
 #[cfg(test)]
+// Registry integration tests require all four metric-type features.
+#[cfg(all(feature = "count", feature = "gauge", feature = "timer", feature = "meter"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
-
     #[test]
     fn test_counter_registration() {
         let registry = Registry::new();
