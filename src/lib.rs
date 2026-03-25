@@ -20,14 +20,22 @@
 //! init();
 //!
 //! // Counters (sub-nanosecond)
+//! #[cfg(feature = "count")]
+//! {
 //! metrics().counter("requests").inc();
 //! metrics().counter("errors").add(5);
+//! }
 //!
 //! // Gauges (atomic)  
+//! #[cfg(feature = "gauge")]
+//! {
 //! metrics().gauge("cpu_usage").set(87.3);
 //! metrics().gauge("memory_mb").set(1024.5);
+//! }
 //!
 //! // Timers (high precision)
+//! #[cfg(feature = "timer")]
+//! {
 //! let timer_metric = metrics().timer("api_call");
 //! let timer = timer_metric.start();
 //! // ... do work ...
@@ -38,10 +46,13 @@
 //!     // Simulated database query
 //!     "user data"
 //! });
+//! let _ = result;
+//! }
 //!
 //! // System health
 //! let cpu_pct = metrics().system().cpu_used();
 //! let mem_mb = metrics().system().mem_used_mb();
+//! let _ = (cpu_pct, mem_mb);
 //!
 //! // Rate limiting
 //! #[cfg(feature = "meter")]

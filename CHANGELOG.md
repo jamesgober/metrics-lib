@@ -23,6 +23,8 @@
   and imports — metric types now compile out cleanly when their feature flag is disabled.
 - `src/lib.rs`: added per-`#[cfg(feature)]` guards on all module declarations, `pub use` re-exports,
   `MetricsCore` accessor methods, `prelude` re-exports, and test functions.
+- `tests/api_md_doctest.rs`: replaced the previous zero-test API markdown harness with executable
+  smoke tests so API documentation coverage now exercises real code paths during `cargo test`.
 
 ### Changed
 - `Cargo.toml`: corrected `minimal` feature from `["count","gauge","timer","meter","sample","histogram"]`
@@ -41,6 +43,11 @@
   for read-heavy workloads.
 - `src/async_support.rs`: removed `#[allow(dead_code)]` from all public methods of `AsyncMetricsBatcher`
   (`new`, `record`, `start_flusher`) — these are part of the public API and should not suppress lints.
+- `src/lib.rs`: crate-level quick-start doctest is now `no_run` and feature-aware (`count`/`gauge`/
+  `timer`/`meter` blocks are conditionally compiled) so documentation checks stay stable across
+  feature combinations and restrictive host policies.
+- `Cargo.toml`: benchmark target `metrics_bench` now declares `required-features = ["meter"]` so
+  benchmark compilation is consistent with feature-gated `RateMeter` APIs.
 
 ### Fixed
 - `src/counter.rs` (`try_inc`, `try_add`, `try_fetch_add`, `try_inc_and_get`): replaced the
@@ -64,6 +71,9 @@
   being upheld (the pinned inner future is never moved while the `TimedFuture` is pinned).
 - `src/async_support.rs` (tests): added `// SAFETY:` comments to `Waker::from_raw` and
   `Pin::new_unchecked` calls in the test module explaining the preconditions being satisfied.
+- Coverage/stability: restored default-feature registry test execution and added targeted counter/gauge
+  tests for checked/overflow and non-finite guard paths, increasing line coverage headroom and
+  hardening CI against threshold regressions.
 
 
 
