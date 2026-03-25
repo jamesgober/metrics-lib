@@ -1001,6 +1001,24 @@ mod tests {
         gauge.update_ema(20.0, 1.0);
         assert_eq!(gauge.get(), 20.0);
     }
+
+    #[test]
+    fn test_non_finite_math_helpers_are_noops() {
+        let gauge = Gauge::with_value(12.0);
+
+        gauge.add(f64::NAN);
+        assert_eq!(gauge.get(), 12.0);
+
+        gauge.multiply(f64::INFINITY);
+        assert_eq!(gauge.get(), 12.0);
+
+        gauge.divide(0.0);
+        assert_eq!(gauge.get(), 12.0);
+
+        let huge = Gauge::with_value(f64::MAX / 2.0);
+        huge.multiply(4.0);
+        assert_eq!(huge.get(), f64::MAX / 2.0);
+    }
 }
 
 #[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]

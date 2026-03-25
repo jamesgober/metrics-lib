@@ -555,6 +555,38 @@ mod tests {
         assert!(debug_str.contains("Counter"));
         assert!(debug_str.contains("42"));
     }
+
+    #[test]
+    fn test_checked_operations_and_overflow_paths() {
+        let counter = Counter::new();
+
+        counter.try_set(3).unwrap();
+        assert_eq!(counter.get(), 3);
+
+        counter.try_inc().unwrap();
+        assert_eq!(counter.get(), 4);
+
+        counter.try_add(0).unwrap();
+        assert_eq!(counter.get(), 4);
+
+        assert_eq!(counter.try_fetch_add(2).unwrap(), 4);
+        assert_eq!(counter.get(), 6);
+
+        assert_eq!(counter.try_fetch_add(0).unwrap(), 6);
+        assert_eq!(counter.try_inc_and_get().unwrap(), 7);
+
+        let overflow = Counter::with_value(u64::MAX);
+        assert!(matches!(overflow.try_inc(), Err(MetricsError::Overflow)));
+        assert!(matches!(overflow.try_add(1), Err(MetricsError::Overflow)));
+        assert!(matches!(
+            overflow.try_fetch_add(1),
+            Err(MetricsError::Overflow)
+        ));
+        assert!(matches!(
+            overflow.try_inc_and_get(),
+            Err(MetricsError::Overflow)
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]

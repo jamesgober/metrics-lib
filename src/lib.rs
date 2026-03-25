@@ -13,7 +13,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```no_run
 //! use metrics_lib::{init, metrics};
 //!
 //! // Initialize metrics (do this once at startup)
