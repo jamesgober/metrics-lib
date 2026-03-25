@@ -6,11 +6,11 @@ This document explains how to run and interpret benchmarks for `metrics-lib`, ho
 
 - Full run (higher confidence):
   ```bash
-  cargo bench
+  cargo bench --bench metrics_bench --features meter
   ```
 - Quick run (useful on laptops/PRs):
   ```bash
-  cargo bench -- -w 0.3 -m 1.0 -n 20
+  cargo bench --bench metrics_bench --features meter -- -w 0.3 -m 1.0 -n 20
   # -w warmup (s), -m measurement (s), -n samples
   ```
 - Results location:
@@ -44,10 +44,19 @@ The viewer will display a small callout summarizing the latest trend for `rate.t
 - Using Criterion baselines:
   ```bash
   # Save a baseline from main
-  cargo bench -- --save-baseline main
+  cargo bench --bench metrics_bench --features meter -- --save-baseline main
   # Compare current working tree to baseline
-  cargo bench -- --baseline main
+  cargo bench --bench metrics_bench --features meter -- --baseline main
   ```
+
+### Latest reference run
+
+Latest local reference run (Windows x86_64, Rust stable, `cargo bench --bench metrics_bench --features meter`):
+
+- `counter/increment`: 1.48 ns/op
+- `gauge/set`: 0.40 ns/op
+- `timer/record`: 3.17 ns/op
+- `global_metrics/mixed_operations`: 151.58 ns/op
 
 - Using `critcmp` (compare two directories or baselines):
   ```bash

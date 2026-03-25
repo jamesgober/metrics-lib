@@ -48,7 +48,7 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governo
 
 - Increase warmup/measurement/sample sizes on metal runners:
 ```bash
-cargo bench -- -w 3.0 -m 5.0 -n 100
+cargo bench --bench metrics_bench --features meter -- -w 3.0 -m 5.0 -n 100
 ```
 - Run multiple times and compare medians.
 

@@ -68,7 +68,7 @@ metrics().timer("latency").record(std::time::Duration::from_micros(123));
 
 metrics-rs: derived from counters via observer queries (PromQL, etc.).
 
-metrics-lib: in-process sliding window via `RateMeter` with `tick()`, `rate()`, and burst admission helpers:
+metrics-lib: in-process tumbling window via `RateMeter` with `tick()`, `rate()`, and burst admission helpers:
 ```rust
 let r = metrics().rate("api_calls");
 r.tick();

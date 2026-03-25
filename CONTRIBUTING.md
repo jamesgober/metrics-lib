@@ -30,11 +30,11 @@ This repository uses Criterion for statistically robust microbenchmarks.
 
 - Run the full suite (default durations):
   ```bash
-  cargo bench
+  cargo bench --bench metrics_bench --features meter
   ```
 - Run quickly (useful on laptops/PRs):
   ```bash
-  cargo bench -- -w 0.3 -m 1.0 -n 20
+  cargo bench --bench metrics_bench --features meter -- -w 0.3 -m 1.0 -n 20
   # -w warmup time (sec), -m measurement time (sec), -n samples
   ```
 - Where to find results:
@@ -56,9 +56,9 @@ This repository uses Criterion for statistically robust microbenchmarks.
 
 - Use the same shortened settings as the PR smoke job:
   ```bash
-  cargo bench -- -w 0.3 -m 1.0 -n 20
+  cargo bench --bench metrics_bench --features meter -- -w 0.3 -m 1.0 -n 20
   ```
-- For parity with nightly, just run `cargo bench` without extra flags.
+- For parity with nightly, run `cargo bench --bench metrics_bench --features meter` without extra flags.
 
 ## Reducing Variance (Linux, self-hosted runners)
 
@@ -79,7 +79,7 @@ for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performa
 - Start the runner with kernel args like `isolcpus=2,3` (requires reboot), then pin the process using `taskset`:
 ```bash
 # Example: pin to CPU 2
-sudo taskset -c 2 cargo bench
+sudo taskset -c 2 cargo bench --bench metrics_bench --features meter
 ```
 
 4) After the run, restore to `ondemand` or `powersave` (common defaults):
@@ -154,7 +154,7 @@ Alert/Failure behavior:
 How to investigate locally:
 
 - Save and compare Criterion baselines (see below). Use `critcmp` to compare two directories or two baselines.
-- Re-run benches with higher durations to reduce variance: `cargo bench` or increase `-w`/`-m`/`-n`.
+- Re-run benches with higher durations to reduce variance: `cargo bench --bench metrics_bench --features meter` or increase `-w`/`-m`/`-n`.
 - Ensure a quiet system and stable CPU frequency (see "Reducing Variance").
 
 Notes:
@@ -170,10 +170,10 @@ There are two recommended approaches:
 
 ```bash
 # Save a baseline (e.g., from main)
-cargo bench -- --save-baseline main
+cargo bench --bench metrics_bench --features meter -- --save-baseline main
 
 # Later, compare current working tree to the saved baseline
-cargo bench -- --baseline main
+cargo bench --bench metrics_bench --features meter -- --baseline main
 ```
 
 This produces per-benchmark comparisons (better/same/worse) in the console and in `target/criterion/`.

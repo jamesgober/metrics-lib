@@ -74,7 +74,7 @@ Methodology:
 Commands:
 ```bash
 # Stabilize results
-cargo bench -- -w 3.0 -m 5.0 -n 100
+cargo bench --bench metrics_bench --features meter -- -w 3.0 -m 5.0 -n 100
 
 # Extract means
 python3 - << 'PY'

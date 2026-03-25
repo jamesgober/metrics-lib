@@ -10,6 +10,8 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-03-25
+
 ### Added
 - `Cargo.toml`: added `full` super-feature that enables all stable features plus `async` and `serde`
   (`full = ["count", "gauge", "timer", "meter", "sample", "histogram", "async", "serde"]`).
@@ -483,7 +485,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/jamesgober/metrics-lib/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/jamesgober/metrics-lib/compare/v0.8.6...v0.9.0
 [0.8.6]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...v0.8.6
 [0.8.3]: https://github.com/jamesgober/metrics-lib/compare/v0.8.0...v0.8.3

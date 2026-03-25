@@ -120,7 +120,7 @@ EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-metrics-lib = "0.9.0"
+metrics-lib = "0.9.1"
 ```
 
 <br>
@@ -432,7 +432,7 @@ println!("samples: {} avg: {:?}", s.count, s.average);
 Source: `src/rate_meter.rs`
 
 Concepts:
-- Sliding-window rate calculations (events/sec, minute, hour)
+- Tumbling-window rate calculations (events/sec, minute, hour)
 - Optional lightweight rate-limiting helpers
 
 Common methods:

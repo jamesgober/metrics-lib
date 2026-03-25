@@ -1,5 +1,5 @@
 <h1 align="center">
-    <img width="90px" height="auto" src="https://raw.githubusercontent.com/jamesgober/jamesgober/main/media/icons/hexagon-3.svg" alt="Triple Hexagon">
+        <img width="99" alt="Rust logo" src="https://raw.githubusercontent.com/jamesgober/rust-collection/72baabd71f00e14aa9184efcb16fa3deddda3a0a/assets/rust-logo.svg">
     <br>
     <b>metrics-lib</b>
     <br>
@@ -29,7 +29,7 @@
         Built with native <b>asynchronous support</b> and <b>cross-platform compatibility</b>, Metrics-lib leverages <b>lock-free</b> atomic operations to ensure thread-safe data collection without performance bottlenecks across <b>Windows</b>, <b>macOS</b>, and <b>Linux</b> environments.
     </p>
     <p>
-        This library provides a comprehensive metrics system that includes <b>counters</b>, <b>gauges</b>, <b>timers</b>, <b>sliding-window rate meters</b>, <b>adaptive sampling</b>, and <b>system health monitoring</b>—all designed for production hot paths. 
+        This library provides a comprehensive metrics system that includes <b>counters</b>, <b>gauges</b>, <b>timers</b>, <b>tumbling-window rate meters</b>, <b>adaptive sampling</b>, and <b>system health monitoring</b>—all designed for production hot paths. 
         The core architecture is <b>lock-free</b> on the hot path, <b>allocation-free</b> during steady state, and <b>cache-aligned</b> for minimal contention.
     </p>
     <p>
@@ -54,11 +54,11 @@
 
 <h2>Performance First</h2>
 
-**World-class performance** with industry-leading benchmarks:
+Latest local Criterion means (`cargo bench --bench metrics_bench --features meter`, Windows x86_64, Rust stable):
 
-- **Counter**: 4.93ns/op (202.84M ops/sec)
-- **Gauge**: 0.53ns/op (1886.79M ops/sec)  
-- **Timer**: 10.87ns/op (91.99M ops/sec)
+- **Counter increment**: 1.48ns/op (676.36M ops/sec)
+- **Gauge set**: 0.40ns/op (2500.31M ops/sec)
+- **Timer record**: 3.17ns/op (314.99M ops/sec)
 - **Memory**: 64 bytes per metric (cache-aligned)
 
 <br>
@@ -93,7 +93,7 @@ For a complete reference with examples, see `docs/API.md`.
 - [`Counter`](./docs/API.md#counter) — ultra-fast atomic counters with batch and conditional ops
 - [`Gauge`](./docs/API.md#gauge) — atomic f64 gauges with math ops, EMA, and min/max helpers
 - [`Timer`](./docs/API.md#timer) — nanosecond timers, RAII guards, and closure/async timing
-- [`RateMeter`](./docs/API.md#ratemeter) — sliding-window rate tracking and bursts
+- [`RateMeter`](./docs/API.md#ratemeter) — tumbling-window rate tracking and bursts
 - [`SystemHealth`](./docs/API.md#systemhealth) — CPU, memory, load, threads, FDs, health score
 - [Async support](./docs/API.md#async-support) — `AsyncTimerExt`, `AsyncMetricBatch`
 - [Adaptive controls](./docs/API.md#adaptive-controls) — sampling, circuit breaker, backpressure
@@ -137,10 +137,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.9.0"
+metrics-lib = "0.9.1"
 
 # Optional features
-metrics-lib = { version = "0.9.0", features = ["async"] }
+metrics-lib = { version = "0.9.1", features = ["async"] }
+
+# Full feature set (stable + async + serde)
+metrics-lib = { version = "0.9.1", features = ["full"] }
 ```
 
 <hr>
@@ -154,11 +157,11 @@ use metrics_lib::{init, metrics};
 // Initialize once at startup
 init();
 
-// Counters - fastest operations (18ns)
+// Counters
 metrics().counter("requests").inc();
 metrics().counter("errors").add(5);
 
-// Gauges - sub-nanosecond operations (0.6ns)
+// Gauges
 metrics().gauge("cpu_usage").set(87.3);
 metrics().gauge("memory_gb").add(1.5);
 
@@ -185,8 +188,8 @@ metrics().rate("api_calls").tick();
 ## Observability Quick Start
 
 - Integration Examples: see `docs/API.md#integration-examples`
-- Grafana dashboard (ready to import): `docs/observability/grafana-dashboard.json`
-- Prometheus recording rules: `docs/observability/recording-rules.yaml`
+- Grafana dashboard (ready to import): `observability/grafana-dashboard.json`
+- Prometheus recording rules: `observability/recording-rules.yaml`
 - Kubernetes Service: `docs/k8s/service.yaml`
 - Prometheus Operator ServiceMonitor: `docs/k8s/servicemonitor.yaml`
 - Secured ServiceMonitor (TLS/Bearer): `docs/k8s/servicemonitor-secured.yaml`
@@ -199,10 +202,10 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <GRAFANA_API_TOKEN>" \
   http://<grafana-host>/api/dashboards/db \
-  -d @docs/observability/grafana-dashboard.json
+  -d @observability/grafana-dashboard.json
 
 # Validate Prometheus recording rules
-promtool check rules docs/observability/recording-rules.yaml
+promtool check rules observability/recording-rules.yaml
 
 # Apply Kubernetes manifests
 kubectl apply -f docs/k8s/service.yaml
@@ -409,7 +412,7 @@ Run the included benchmarks to see performance on your system:
 cargo run --example benchmark_comparison --release
 
 # Comprehensive benchmarks (Criterion)
-cargo bench
+cargo bench --bench metrics_bench --features meter
 
 # Cross-platform system tests
 cargo test --all-features
@@ -438,12 +441,12 @@ Benchmark history (GitHub Pages):
 
 [Benchmark History (gh-pages)](https://jamesgober.github.io/metrics-lib/benchmark-data/)
 
-**Sample Results** (M1 MacBook Pro):
+**Sample Results** (latest local run; Windows x86_64, Rust stable):
 ```
-Counter Increment: 4.93 ns/op (202.84 M ops/sec)
-Gauge Set:         0.53 ns/op (1886.79 M ops/sec)
-Timer Record:      10.87 ns/op (91.99 M ops/sec)
-Mixed Operations:  106.39 ns/op (9.40 M ops/sec)
+Counter Increment: 1.48 ns/op (676.36 M ops/sec)
+Gauge Set:         0.40 ns/op (2500.31 M ops/sec)
+Timer Record:      3.17 ns/op (314.99 M ops/sec)
+Mixed Operations:  151.58 ns/op (6.60 M ops/sec)
 ```
 
 <sub>Notes: Latest numbers taken from local Criterion means under `target/criterion/**/new/estimates.json`. Actual throughput varies by CPU and environment; use the GitHub Pages benchmark history for trends.</sub>
@@ -451,7 +454,7 @@ Mixed Operations:  106.39 ns/op (9.40 M ops/sec)
 ### Methodology
 
 - Tooling: Criterion with release builds.
-- Flags for stability on local runs: `cargo bench -- -w 3.0 -m 5.0 -n 100` (increase on dedicated runners).
+- Flags for stability on local runs: `cargo bench --bench metrics_bench --features meter -- -w 3.0 -m 5.0 -n 100` (increase on dedicated runners).
 - Environment disclosure (example):
   - CPU: Apple M1 Pro (performance cores)
   - Rust: stable toolchain
@@ -488,7 +491,9 @@ pub struct Counter {
 
 ## Testing
 
-Comprehensive test suite with **87 unit tests** and **2 documentation tests**:
+Comprehensive automated coverage includes:
+- default features: **63 unit tests** + **2 API smoke tests** + **14 rustdoc tests**
+- all features: **110 unit tests** + **3 API smoke tests** + **17 rustdoc tests**
 
 ```bash
 # Run all tests
@@ -501,7 +506,7 @@ cargo test --all-features
 cargo test --features bench-tests -- --ignored
 
 # Run benchmarks (Criterion)
-cargo bench
+cargo bench --bench metrics_bench --features meter
 
 # Check for memory leaks (with valgrind)
 cargo test --target x86_64-unknown-linux-gnu
@@ -534,10 +539,10 @@ cargo test --target x86_64-unknown-linux-gnu
 
 | Library | Counter ns/op | Gauge ns/op | Timer ns/op | Memory/Metric | Features |
 |---------|---------------|-------------|-------------|---------------|----------|
-| **metrics-lib** | **4.93** | **0.53** | **10.87** | **64B** | ✅ Async, Circuit breakers, System monitoring |
-| metrics-rs | 85.2 | 23.1 | 167.8 | 256B | ⚠️ No circuit breakers |
-| prometheus | 156.7 | 89.4 | 298.3 | 1024B+ | ⚠️ HTTP overhead |
-| statsd | 234.1 | 178.9 | 445.2 | 512B+ | ⚠️ Network overhead |
+| **metrics-lib (latest local run)** | **1.48** | **0.40** | **3.17** | **64B** | ✅ Async, Circuit breakers, System monitoring |
+| metrics-rs | N/A in this repo run | N/A in this repo run | N/A in this repo run | N/A in this repo run | External crate |
+| prometheus | N/A in this repo run | N/A in this repo run | N/A in this repo run | N/A in this repo run | External crate |
+| statsd | N/A in this repo run | N/A in this repo run | N/A in this repo run | N/A in this repo run | External crate |
 
 <hr>
 <br>
@@ -603,7 +608,7 @@ cd metrics-lib
 cargo test --all-features
 
 # Run benchmarks
-cargo bench
+cargo bench --bench metrics_bench --features meter
 
 # Check formatting and lints
 cargo fmt --all -- --check
