@@ -112,6 +112,7 @@ nightly = []
 [[bench]]
 name    = "metrics_bench"
 harness = false
+required-features = ["meter"]
 
 # EXAMPLES
 # #################################
