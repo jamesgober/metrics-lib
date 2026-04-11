@@ -26,6 +26,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   bench-tests:
@@ -47,7 +48,7 @@ jobs:
           target
         key: bench-tests-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - name: Run bench-gated tests
-      run: cargo test --features bench-tests -- --ignored
+      run: cargo test --features bench-tests,meter -- --ignored
 
   benchmark:
     if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' || inputs.run_examples == 'true' }}
@@ -84,7 +85,7 @@ jobs:
         echo "Saved governors to $GOV_BAK and set to performance where available."
     - name: Run benchmark comparison
       if: ${{ github.event_name == 'schedule' || inputs.run_examples == 'true' }}
-      run: cargo run --example benchmark_comparison --release
+      run: cargo run --example benchmark_comparison --release --features meter
     - name: Run criterion benchmarks (stabilized config)
       if: ${{ github.event_name == 'schedule' || inputs.run_criterion == 'true' }}
       run: >-
@@ -161,6 +162,6 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y valgrind
     - name: Run memory tests
       run: |
-        cargo build --example benchmark_comparison
+        cargo build --example benchmark_comparison --features meter
         valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all \
           ./target/debug/examples/benchmark_comparison || true
