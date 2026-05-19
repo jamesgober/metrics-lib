@@ -128,7 +128,7 @@ EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-metrics-lib = "0.9.5"
+metrics-lib = "1.0.0"
 ```
 
 <br>
