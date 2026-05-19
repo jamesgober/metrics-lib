@@ -911,6 +911,206 @@ impl Registry {
             .map(|((n, l), h)| (n.clone(), l.clone(), h.clone()))
             .collect()
     }
+
+    /// Build a [`ScopedRegistry`] that prepends `prefix` to every metric
+    /// name on registration and lookup.
+    ///
+    /// All scoped lookups land in the same underlying `Registry`, so a scope
+    /// is a pure naming convention — there's no separate `Arc` storage. Two
+    /// scopes that produce the same effective name (e.g.
+    /// `scoped("http_").counter("requests")` and `counter("http_requests")`)
+    /// return the **same** `Arc<Counter>`.
+    ///
+    /// Available since v0.9.5.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # #[cfg(all(feature = "count", feature = "gauge"))]
+    /// # {
+    /// use metrics_lib::{init, metrics};
+    /// init();
+    /// let http = metrics().registry().scoped("http.");
+    /// http.counter("requests").inc();   // registers "http.requests"
+    /// http.gauge("inflight").set(1.0);  // registers "http.inflight"
+    /// # }
+    /// ```
+    pub fn scoped(&self, prefix: impl Into<String>) -> ScopedRegistry<'_> {
+        ScopedRegistry {
+            registry: self,
+            prefix: prefix.into(),
+        }
+    }
+}
+
+/// View into a [`Registry`] that prepends a fixed `prefix` to every metric
+/// name. Created via [`Registry::scoped`].
+///
+/// Available since v0.9.5.
+pub struct ScopedRegistry<'a> {
+    registry: &'a Registry,
+    prefix: String,
+}
+
+impl<'a> ScopedRegistry<'a> {
+    /// Borrow the prefix this scope prepends.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Borrow the underlying [`Registry`].
+    #[must_use]
+    pub fn registry(&self) -> &'a Registry {
+        self.registry
+    }
+
+    #[inline]
+    fn join(&self, name: &str) -> String {
+        let mut s = String::with_capacity(self.prefix.len() + name.len());
+        s.push_str(&self.prefix);
+        s.push_str(name);
+        s
+    }
+
+    // ----- describe shorthands -----
+
+    /// Describe a counter under the scoped name.
+    pub fn describe_counter(
+        &self,
+        name: &str,
+        help: impl Into<std::borrow::Cow<'static, str>>,
+        unit: Unit,
+    ) {
+        self.registry.describe_counter(&self.join(name), help, unit);
+    }
+
+    /// Describe a gauge under the scoped name.
+    pub fn describe_gauge(
+        &self,
+        name: &str,
+        help: impl Into<std::borrow::Cow<'static, str>>,
+        unit: Unit,
+    ) {
+        self.registry.describe_gauge(&self.join(name), help, unit);
+    }
+
+    /// Describe a timer under the scoped name.
+    pub fn describe_timer(
+        &self,
+        name: &str,
+        help: impl Into<std::borrow::Cow<'static, str>>,
+        unit: Unit,
+    ) {
+        self.registry.describe_timer(&self.join(name), help, unit);
+    }
+
+    /// Describe a rate meter under the scoped name.
+    pub fn describe_rate(
+        &self,
+        name: &str,
+        help: impl Into<std::borrow::Cow<'static, str>>,
+        unit: Unit,
+    ) {
+        self.registry.describe_rate(&self.join(name), help, unit);
+    }
+
+    /// Describe a histogram under the scoped name.
+    pub fn describe_histogram(
+        &self,
+        name: &str,
+        help: impl Into<std::borrow::Cow<'static, str>>,
+        unit: Unit,
+    ) {
+        self.registry
+            .describe_histogram(&self.join(name), help, unit);
+    }
+
+    /// Pre-configure histogram bucket boundaries under the scoped name.
+    /// Requires the `histogram` feature.
+    #[cfg(feature = "histogram")]
+    pub fn configure_histogram(&self, name: &str, buckets: impl IntoIterator<Item = f64>) {
+        self.registry.configure_histogram(&self.join(name), buckets);
+    }
+
+    // ----- metric lookups (unlabeled) -----
+
+    /// Counter under the scoped name. Requires `count`.
+    #[cfg(feature = "count")]
+    pub fn counter(&self, name: &str) -> Arc<Counter> {
+        self.registry.get_or_create_counter(&self.join(name))
+    }
+
+    /// Gauge under the scoped name. Requires `gauge`.
+    #[cfg(feature = "gauge")]
+    pub fn gauge(&self, name: &str) -> Arc<Gauge> {
+        self.registry.get_or_create_gauge(&self.join(name))
+    }
+
+    /// Timer under the scoped name. Requires `timer`.
+    #[cfg(feature = "timer")]
+    pub fn timer(&self, name: &str) -> Arc<Timer> {
+        self.registry.get_or_create_timer(&self.join(name))
+    }
+
+    /// Rate meter under the scoped name. Requires `meter`.
+    #[cfg(feature = "meter")]
+    pub fn rate(&self, name: &str) -> Arc<RateMeter> {
+        self.registry.get_or_create_rate_meter(&self.join(name))
+    }
+
+    /// Histogram under the scoped name. Requires `histogram`.
+    #[cfg(feature = "histogram")]
+    pub fn histogram(&self, name: &str) -> Arc<Histogram> {
+        self.registry.get_or_create_histogram(&self.join(name))
+    }
+
+    // ----- labeled lookups -----
+
+    /// Labeled counter under the scoped name. Requires `count`.
+    #[cfg(feature = "count")]
+    pub fn counter_with(&self, name: &str, labels: &LabelSet) -> Arc<Counter> {
+        self.registry
+            .get_or_create_counter_with(&self.join(name), labels)
+    }
+
+    /// Labeled gauge under the scoped name. Requires `gauge`.
+    #[cfg(feature = "gauge")]
+    pub fn gauge_with(&self, name: &str, labels: &LabelSet) -> Arc<Gauge> {
+        self.registry
+            .get_or_create_gauge_with(&self.join(name), labels)
+    }
+
+    /// Labeled timer under the scoped name. Requires `timer`.
+    #[cfg(feature = "timer")]
+    pub fn timer_with(&self, name: &str, labels: &LabelSet) -> Arc<Timer> {
+        self.registry
+            .get_or_create_timer_with(&self.join(name), labels)
+    }
+
+    /// Labeled rate meter under the scoped name. Requires `meter`.
+    #[cfg(feature = "meter")]
+    pub fn rate_with(&self, name: &str, labels: &LabelSet) -> Arc<RateMeter> {
+        self.registry
+            .get_or_create_rate_meter_with(&self.join(name), labels)
+    }
+
+    /// Labeled histogram under the scoped name. Requires `histogram`.
+    #[cfg(feature = "histogram")]
+    pub fn histogram_with(&self, name: &str, labels: &LabelSet) -> Arc<Histogram> {
+        self.registry
+            .get_or_create_histogram_with(&self.join(name), labels)
+    }
+
+    /// Nested scope: `scoped("a.").scoped("b.")` is equivalent to
+    /// `scoped("a.b.")`. Allocates a single fresh `String`.
+    #[must_use]
+    pub fn scoped(&self, sub_prefix: impl Into<String>) -> ScopedRegistry<'a> {
+        ScopedRegistry {
+            registry: self.registry,
+            prefix: self.join(&sub_prefix.into()),
+        }
+    }
 }
 
 impl Default for Registry {
@@ -1358,5 +1558,76 @@ mod tests {
         // But further labeled registrations now overflow.
         let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "v2")]));
         assert!(r.cardinality_overflows() >= 1);
+    }
+
+    // ---------- v0.9.5 additions: ScopedRegistry ----------
+
+    #[test]
+    fn scoped_registry_prepends_prefix() {
+        let r = Registry::new();
+        let http = r.scoped("http.");
+        http.counter("requests").inc();
+        // Same Arc resolves both via the scope and via the underlying name.
+        let c_scope = http.counter("requests");
+        let c_full = r.get_or_create_counter("http.requests");
+        assert!(Arc::ptr_eq(&c_scope, &c_full));
+        assert_eq!(c_full.get(), 1);
+    }
+
+    #[test]
+    fn scoped_registry_describe_lands_under_prefixed_name() {
+        let r = Registry::new();
+        let s = r.scoped("svc.");
+        s.describe_counter("hits", "Total hits", Unit::Custom("1"));
+        assert!(r.metadata("svc.hits").is_some());
+        assert!(r.metadata("hits").is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn scoped_registry_supports_every_metric_type() {
+        let r = Registry::new();
+        let s = r.scoped("zone_a.");
+        s.counter("c").inc();
+        s.gauge("g").set(1.0);
+        s.timer("t").record(std::time::Duration::from_micros(1));
+        s.rate("r").tick();
+        assert_eq!(r.get_or_create_counter("zone_a.c").get(), 1);
+        assert_eq!(r.get_or_create_gauge("zone_a.g").get(), 1.0);
+        assert_eq!(r.get_or_create_timer("zone_a.t").count(), 1);
+        assert_eq!(r.get_or_create_rate_meter("zone_a.r").total(), 1);
+    }
+
+    #[test]
+    fn scoped_registry_labeled_routes_through_cardinality_cap() {
+        let r = Registry::new();
+        r.set_cardinality_cap(2);
+        let s = r.scoped("api.");
+        let _ = s.counter_with("hits", &LabelSet::from([("k", "1")]));
+        let _ = s.counter_with("hits", &LabelSet::from([("k", "2")]));
+        // Third labeled key overflows.
+        let _ = s.counter_with("hits", &LabelSet::from([("k", "3")]));
+        assert!(r.cardinality_overflows() >= 1);
+    }
+
+    #[test]
+    fn nested_scopes_compose_prefixes() {
+        let r = Registry::new();
+        let a = r.scoped("a.");
+        let ab = a.scoped("b.");
+        ab.counter("x").inc();
+        assert_eq!(r.get_or_create_counter("a.b.x").get(), 1);
+        assert_eq!(ab.prefix(), "a.b.");
+    }
+
+    #[test]
+    #[cfg(feature = "histogram")]
+    fn scoped_registry_histogram_uses_configured_buckets() {
+        let r = Registry::new();
+        let s = r.scoped("rtt.");
+        s.configure_histogram("seconds", [0.01, 0.1, 1.0]);
+        let h = s.histogram("seconds");
+        // 3 explicit + +Inf = 4
+        assert_eq!(h.snapshot().buckets.len(), 4);
     }
 }

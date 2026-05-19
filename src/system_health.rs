@@ -48,6 +48,120 @@ const MIN_INTERVAL_MS: u64 = 50;
 /// `Drop` latency bounded even on very long configured intervals.
 const MAX_SLEEP_CHUNK_MS: u64 = 1000;
 
+/// One threshold/penalty pair used by [`HealthConfig`].
+///
+/// When a metric value exceeds `threshold`, the configured `penalty` is
+/// subtracted from the running health score. Thresholds inside a `&[Step]`
+/// slice must be supplied in **descending order** — the first match wins.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Step {
+    /// Inclusive lower bound that must be exceeded for the penalty to apply.
+    pub threshold: f64,
+    /// Amount subtracted from the running health score (0..=100) on match.
+    pub penalty: f64,
+}
+
+impl Step {
+    /// Construct a step with the given threshold and penalty.
+    #[inline]
+    pub const fn new(threshold: f64, penalty: f64) -> Self {
+        Self { threshold, penalty }
+    }
+}
+
+/// Configurable thresholds for [`SystemHealth::quick_check`] /
+/// [`SystemHealth::health_score`].
+///
+/// Each metric (`system_cpu` / `load_avg` / `process_cpu` / `memory_gb` /
+/// `threads` / `fds`) accepts a list of [`Step`]s. When the metric exceeds a
+/// step's threshold, the step's `penalty` is subtracted from the running
+/// score (starting at 100). The first matching step wins, so list steps in
+/// **descending threshold order**.
+///
+/// The load-average steps are interpreted as multipliers of `num_cpus::get()`
+/// (e.g. `Step::new(2.0, 25.0)` applies when load exceeds `2 × CPU count`).
+///
+/// The defaults in [`HealthConfig::default`] match the v0.9.x behavior
+/// exactly so existing dashboards do not shift unexpectedly.
+///
+/// # Example
+///
+/// ```
+/// use metrics_lib::{HealthConfig, Step, SystemHealth};
+/// use std::time::Duration;
+///
+/// // Stricter CPU thresholds for a CPU-bound workload.
+/// let cfg = HealthConfig {
+///     system_cpu: vec![
+///         Step::new(70.0, 30.0),
+///         Step::new(50.0, 15.0),
+///         Step::new(30.0, 5.0),
+///     ],
+///     ..HealthConfig::default()
+/// };
+/// let health = SystemHealth::with_config(Duration::from_millis(500), cfg);
+/// let _ = health.health_score();
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct HealthConfig {
+    /// Penalty steps applied to the system-wide CPU percentage (0..=100).
+    pub system_cpu: Vec<Step>,
+    /// Penalty steps applied to the 1-minute load average, expressed as a
+    /// **multiplier of `num_cpus::get()`** (e.g. threshold `2.0` ⇒ trips
+    /// when load > 2× cores).
+    pub load_avg: Vec<Step>,
+    /// Penalty steps applied to the process CPU percentage (0..=100).
+    pub process_cpu: Vec<Step>,
+    /// Penalty steps applied to system memory used, in **gigabytes**.
+    pub memory_gb: Vec<Step>,
+    /// Penalty steps applied to the process thread count.
+    pub threads: Vec<Step>,
+    /// Penalty steps applied to the process file-descriptor count.
+    pub fds: Vec<Step>,
+}
+
+impl Default for HealthConfig {
+    /// Defaults match the v0.9.x scoring exactly. Each `Vec<Step>` is
+    /// ordered descending by threshold so the first match wins.
+    fn default() -> Self {
+        Self {
+            system_cpu: vec![
+                Step::new(80.0, 30.0),
+                Step::new(60.0, 15.0),
+                Step::new(40.0, 5.0),
+            ],
+            load_avg: vec![
+                Step::new(2.0, 25.0),
+                Step::new(1.5, 10.0),
+                Step::new(1.0, 5.0),
+            ],
+            process_cpu: vec![Step::new(50.0, 15.0), Step::new(25.0, 8.0)],
+            memory_gb: vec![Step::new(16.0, 10.0), Step::new(8.0, 5.0)],
+            threads: vec![
+                Step::new(1000.0, 20.0),
+                Step::new(500.0, 10.0),
+                Step::new(200.0, 5.0),
+            ],
+            fds: vec![
+                Step::new(10_000.0, 15.0),
+                Step::new(5_000.0, 8.0),
+                Step::new(1_000.0, 3.0),
+            ],
+        }
+    }
+}
+
+fn apply_steps(value: f64, steps: &[Step]) -> f64 {
+    for step in steps {
+        if value > step.threshold {
+            return step.penalty;
+        }
+    }
+    0.0
+}
+
 /// Mutable state of a [`SystemHealth`] instance.
 ///
 /// Shared between the sampler thread (sole writer) and any number of reader
@@ -87,10 +201,12 @@ struct HealthInner {
     sys: parking_lot::Mutex<System>,
     #[cfg(not(target_os = "linux"))]
     pid: Option<sysinfo::Pid>,
+    /// Tunable health-score thresholds (v0.9.5).
+    config: HealthConfig,
 }
 
 impl HealthInner {
-    fn new() -> Self {
+    fn new(config: HealthConfig) -> Self {
         Self {
             system_cpu: AtomicU32::new(0),
             process_cpu: AtomicU32::new(0),
@@ -110,6 +226,7 @@ impl HealthInner {
             sys: parking_lot::Mutex::new(System::new()),
             #[cfg(not(target_os = "linux"))]
             pid: get_current_pid().ok(),
+            config,
         }
     }
 
@@ -149,64 +266,24 @@ impl HealthInner {
     }
 
     fn calculate_health_score(&self) -> f64 {
-        let mut score: f64 = 100.0;
-
-        // CPU penalty (system)
-        let system_cpu = self.system_cpu.load(Ordering::Relaxed) as f64 / 100.0;
-        if system_cpu > 80.0 {
-            score -= 30.0;
-        } else if system_cpu > 60.0 {
-            score -= 15.0;
-        } else if system_cpu > 40.0 {
-            score -= 5.0;
-        }
-
-        // Load average penalty
-        let load = self.load_average.load(Ordering::Relaxed) as f64 / 100.0;
+        let cfg = &self.config;
         let cpu_count = num_cpus::get() as f64;
-        if load > cpu_count * 2.0 {
-            score -= 25.0;
-        } else if load > cpu_count * 1.5 {
-            score -= 10.0;
-        } else if load > cpu_count {
-            score -= 5.0;
-        }
 
-        // Process CPU penalty
+        let system_cpu = self.system_cpu.load(Ordering::Relaxed) as f64 / 100.0;
+        let load_norm =
+            (self.load_average.load(Ordering::Relaxed) as f64 / 100.0) / cpu_count.max(1.0);
         let process_cpu = self.process_cpu.load(Ordering::Relaxed) as f64 / 100.0;
-        if process_cpu > 50.0 {
-            score -= 15.0;
-        } else if process_cpu > 25.0 {
-            score -= 8.0;
-        }
-
-        // Memory pressure (simplified — would need actual available memory)
         let memory_gb = self.system_memory_mb.load(Ordering::Relaxed) as f64 / 1024.0;
-        if memory_gb > 16.0 {
-            score -= 10.0;
-        } else if memory_gb > 8.0 {
-            score -= 5.0;
-        }
+        let threads = self.thread_count.load(Ordering::Relaxed) as f64;
+        let fds = self.fd_count.load(Ordering::Relaxed) as f64;
 
-        // Thread count penalty
-        let threads = self.thread_count.load(Ordering::Relaxed);
-        if threads > 1000 {
-            score -= 20.0;
-        } else if threads > 500 {
-            score -= 10.0;
-        } else if threads > 200 {
-            score -= 5.0;
-        }
-
-        // FD count penalty
-        let fds = self.fd_count.load(Ordering::Relaxed);
-        if fds > 10000 {
-            score -= 15.0;
-        } else if fds > 5000 {
-            score -= 8.0;
-        } else if fds > 1000 {
-            score -= 3.0;
-        }
+        let score = 100.0
+            - apply_steps(system_cpu, &cfg.system_cpu)
+            - apply_steps(load_norm, &cfg.load_avg)
+            - apply_steps(process_cpu, &cfg.process_cpu)
+            - apply_steps(memory_gb, &cfg.memory_gb)
+            - apply_steps(threads, &cfg.threads)
+            - apply_steps(fds, &cfg.fds);
 
         score.max(0.0)
     }
@@ -491,7 +568,8 @@ impl SystemHealth {
         Self::with_interval(Duration::from_millis(DEFAULT_INTERVAL_MS))
     }
 
-    /// Create with a custom refresh interval.
+    /// Create with a custom refresh interval. Uses [`HealthConfig::default`]
+    /// for the health-score thresholds.
     ///
     /// - `interval == Duration::ZERO` ⇒ no sampler thread is spawned;
     ///   callers must use [`Self::update`] to refresh the cached values
@@ -500,7 +578,14 @@ impl SystemHealth {
     ///   sampler from becoming a CPU spin loop.
     #[inline]
     pub fn with_interval(interval: Duration) -> Self {
-        let inner = Arc::new(HealthInner::new());
+        Self::with_config(interval, HealthConfig::default())
+    }
+
+    /// Create with both a custom refresh interval and a custom
+    /// [`HealthConfig`] (v0.9.5+). See [`Self::with_interval`] for interval
+    /// semantics.
+    pub fn with_config(interval: Duration, config: HealthConfig) -> Self {
+        let inner = Arc::new(HealthInner::new(config));
         // Always seed the initial snapshot so the first read returns
         // meaningful values even before the sampler ticks.
         inner.update_metrics();

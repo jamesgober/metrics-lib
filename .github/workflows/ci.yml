@@ -129,6 +129,53 @@ jobs:
     - name: Run cargo-audit
       run: cargo audit
 
+  deny:
+    name: cargo-deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Install cargo-deny
+      uses: taiki-e/install-action@cargo-deny
+    - name: Run cargo-deny
+      # `--workspace` covers the crate; `check all` runs advisories + bans
+      # + licenses + sources. `deny.toml` configures the policy.
+      run: cargo deny --workspace check all
+
+  udeps:
+    name: cargo-udeps (unused dependencies)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust nightly (required by udeps)
+      uses: dtolnay/rust-toolchain@nightly
+    - name: Install cargo-udeps
+      uses: taiki-e/install-action@cargo-udeps
+    - name: Check for unused dependencies (all-features)
+      run: cargo +nightly udeps --workspace --all-features
+
+  miri:
+    name: Miri (async pin projection + unsafe blocks)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust nightly + miri
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: miri
+    - name: cargo miri test (selective)
+      # Miri is slow; restrict to modules with `unsafe` blocks
+      # (async_support pin projection) and their callers. The async
+      # feature pulls in Tokio which has its own native-only paths; we
+      # only run the in-crate tests that exercise pin projection.
+      env:
+        MIRIFLAGS: "-Zmiri-disable-isolation"
+      run: |
+        cargo miri setup
+        cargo miri test --features async --lib async_support -- \
+          --skip ::benchmarks::
+
   msrv:
     name: MSRV (Rust 1.70.0)
     runs-on: ubuntu-latest

@@ -64,9 +64,13 @@ EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
   - [`LabelSet` & Labels (v0.9.3)](#labels)
   - [Metric metadata (v0.9.3)](#metric-metadata)
   - [`SystemHealth`](#systemhealth)
+  - [`HealthConfig` & `Step` (v0.9.5)](#health-config)
+  - [`ScopedRegistry` (v0.9.5)](#scoped-registry)
+  - [`TokenBucket` (v0.9.5)](#token-bucket)
   - [Exporters (v0.9.3)](#exporters)
   - [Async support](#async-support)
   - [Adaptive controls](#adaptive-controls)
+  - [`tracing` integration (v0.9.5)](#tracing-ext)
   - [Prelude](#prelude)
 - **[Deployment Patterns](#deployment-patterns)**
   - [Initialization Patterns](#1-initialization-patterns)
@@ -124,7 +128,7 @@ EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-metrics-lib = "0.9.4"
+metrics-lib = "0.9.5"
 ```
 
 <br>
@@ -747,6 +751,245 @@ Examples:
 
 <br>
 
+<h3 id="health-config"><code>HealthConfig</code> &amp; <code>Step</code> (v0.9.5)</h3>
+
+Source: `src/system_health.rs`.
+
+`SystemHealth::health_score()` is composed of step-wise penalties applied
+to six metrics (system CPU, normalised load average, process CPU, memory
+GB, threads, file descriptors). Prior to v0.9.5 the threshold ladder was
+hardcoded; v0.9.5 exposes the full ladder as a tunable `HealthConfig`
+value so deployments with different operating envelopes can pick their
+own boundaries without forking the crate.
+
+**Types:**
+
+- `Step { threshold: f64, penalty: f64 }` — one `(threshold, penalty)`
+  pair. When the metric exceeds `threshold`, `penalty` is subtracted from
+  the running 0..=100 score. `Step::new(threshold, penalty)` is `const`.
+- `HealthConfig { system_cpu, load_avg, process_cpu, memory_gb, threads,
+  fds: Vec<Step> }` — one penalty ladder per metric. Within each `Vec`,
+  steps **must be ordered descending by threshold** (first match wins).
+- `HealthConfig::default()` — the v0.9.x defaults, preserved exactly so
+  existing dashboards do not shift on upgrade.
+
+**Methods:**
+
+- `SystemHealth::with_config(interval: Duration, config: HealthConfig) -> Self`
+  — new in v0.9.5. Combines a custom refresh interval with a custom
+  score config. `SystemHealth::with_interval(d)` continues to use the
+  default config.
+- The `load_avg` ladder is interpreted as **multipliers of `num_cpus::get()`**
+  (e.g. `Step::new(2.0, 25.0)` ⇒ trips when 1-minute load > 2× core
+  count). Other ladders use the metric's natural unit.
+
+**Examples:**
+
+Tighter CPU thresholds for a CPU-bound service:
+
+```rust
+use metrics_lib::{HealthConfig, Step, SystemHealth};
+use std::time::Duration;
+
+let cfg = HealthConfig {
+    system_cpu: vec![
+        Step::new(70.0, 30.0),
+        Step::new(50.0, 15.0),
+        Step::new(30.0, 5.0),
+    ],
+    ..HealthConfig::default()
+};
+let health = SystemHealth::with_config(Duration::from_millis(500), cfg);
+let score = health.health_score(); // 0..=100, lower under load
+```
+
+Relax FD thresholds for a connection-heavy service:
+
+```rust
+use metrics_lib::{HealthConfig, Step, SystemHealth};
+use std::time::Duration;
+
+let cfg = HealthConfig {
+    fds: vec![
+        Step::new(100_000.0, 15.0),
+        Step::new(50_000.0, 8.0),
+        Step::new(10_000.0, 3.0),
+    ],
+    ..HealthConfig::default()
+};
+let _ = SystemHealth::with_config(Duration::from_secs(1), cfg);
+```
+
+`HealthConfig` derives `serde::Serialize` behind the `serde` feature so
+configurations can be loaded from JSON / TOML / YAML if desired.
+
+<br>
+
+<h3 id="scoped-registry"><code>ScopedRegistry</code> (v0.9.5)</h3>
+
+Source: `src/registry.rs`.
+
+A `ScopedRegistry` is a thin view over a `Registry` that **prepends a
+fixed prefix** to every metric name on lookup / describe / configure.
+Useful for tying a metrics namespace to a subsystem (`"http."`,
+`"db."`, …) without rewriting every call site.
+
+There is **no separate storage**: a scoped lookup lands in the same
+underlying map as the unscoped equivalent, so
+`scoped("http.").counter("requests")` and `counter("http.requests")`
+return the **same** `Arc<Counter>`.
+
+**Constructors:**
+
+- `Registry::scoped(prefix: impl Into<String>) -> ScopedRegistry<'_>`
+- `MetricsCore::scoped(prefix: impl Into<String>) -> ScopedRegistry<'_>`
+  (shorthand for `self.registry().scoped(prefix)`)
+- `ScopedRegistry::scoped(sub_prefix) -> ScopedRegistry<'_>` — nested
+  scopes compose prefixes: `scoped("a.").scoped("b.")` ≡ `scoped("a.b.")`.
+
+**Methods** (every method delegates to the underlying `Registry` with the
+joined name):
+
+- `counter(name)` / `gauge(name)` / `timer(name)` / `rate(name)` /
+  `histogram(name)` — unlabeled lookups.
+- `counter_with(name, &labels)` / `gauge_with` / `timer_with` /
+  `rate_with` / `histogram_with` — labeled lookups (subject to the
+  registry's cardinality cap).
+- `describe_counter` / `describe_gauge` / `describe_timer` /
+  `describe_rate` / `describe_histogram` — under the scoped name.
+- `configure_histogram(name, buckets)` — bucket-layout pre-configuration
+  under the scoped name (requires `histogram`).
+- `prefix() -> &str`, `registry() -> &Registry` — accessors.
+
+**Examples:**
+
+Subsystem namespacing:
+
+```rust
+use metrics_lib::{init, metrics, Unit};
+
+init();
+let http = metrics().scoped("http.");
+http.describe_counter("requests", "Total HTTP requests", Unit::Custom("1"));
+http.counter("requests").inc();
+http.gauge("inflight").set(1.0);
+// Equivalent unscoped name lookups return the same `Arc<Counter>`:
+assert_eq!(metrics().counter("http.requests").get(), 1);
+```
+
+Nested scopes compose:
+
+```rust
+use metrics_lib::{init, metrics};
+
+init();
+let svc = metrics().scoped("svc.");
+let db = svc.scoped("db.");
+db.counter("queries").inc(); // → "svc.db.queries"
+```
+
+<br>
+
+<h3 id="token-bucket"><code>TokenBucket</code> (v0.9.5)</h3>
+
+Source: `src/token_bucket.rs`.
+
+Strict-admission counterpart to `RateMeter::tick_if_under_limit`. Where
+the rate-meter trades correctness for hot-path speed (it has known TOCTOU
+overshoot of up to `num_threads − 1` events per window), `TokenBucket`
+guarantees that the **capacity is never exceeded** — every `acquire`
+goes through a single `compare_exchange_weak` on a packed `(tokens,
+last_refill_ms)` `u64`.
+
+Use for: billing, hard-limit admission control, downstream service
+protection. For pure observability throttling, `RateMeter` is faster.
+
+**Constructor:**
+
+- `TokenBucket::new(capacity: u32, refill_per_second: f64) -> Self`
+  - `capacity` — burst size in whole tokens (max tokens the bucket
+    holds).
+  - `refill_per_second` — sustained refill rate. `0.0` produces a
+    static-capacity bucket (no refill). Non-finite or negative inputs
+    are coerced to `0.0`.
+
+**Methods:**
+
+- `try_acquire(n: u32) -> Result<()>` — atomically remove `n` tokens.
+  Returns `Ok(())` on success or `Err(MetricsError::WouldBlock)` when
+  fewer than `n` tokens are available after refill. `n == 0` is a no-op.
+- `acquire(n: u32) -> bool` — convenience wrapper returning `true`/`false`.
+- `available() -> u32` — approximate current token count (advisory; no
+  retry semantics).
+- `capacity() -> u32`, `refill_per_second() -> f64` — configuration
+  accessors.
+- `reset()` — refills the bucket to full `capacity`.
+
+**Examples:**
+
+Rate-limited request admission:
+
+```rust
+use metrics_lib::TokenBucket;
+use std::time::Duration;
+
+// 50 requests per second sustained, burst up to 100.
+let limiter = TokenBucket::new(100, 50.0);
+
+fn handle_request(limiter: &TokenBucket) {
+    if limiter.acquire(1) {
+        // … serve request …
+    } else {
+        // … return 429 Too Many Requests …
+    }
+}
+
+handle_request(&limiter);
+// Reset for the next benchmark run.
+limiter.reset();
+```
+
+Burst acquire (multi-token transactions):
+
+```rust
+use metrics_lib::{TokenBucket, MetricsError};
+
+let limiter = TokenBucket::new(50, 10.0);
+match limiter.try_acquire(5) {
+    Ok(()) => { /* admit the batch */ }
+    Err(MetricsError::WouldBlock) => { /* retry later */ }
+    Err(_) => unreachable!(),
+}
+```
+
+Multiple concurrent threads racing for tokens: with capacity 100 and
+8 threads each requesting 30, exactly 100 tokens are issued — no
+overshoot:
+
+```rust
+use metrics_lib::TokenBucket;
+use std::sync::Arc;
+use std::thread;
+
+let bucket = Arc::new(TokenBucket::new(100, 0.0));
+let handles: Vec<_> = (0..8)
+    .map(|_| {
+        let b = Arc::clone(&bucket);
+        thread::spawn(move || {
+            let mut taken = 0u32;
+            for _ in 0..30 {
+                if b.acquire(1) { taken += 1; }
+            }
+            taken
+        })
+    })
+    .collect();
+let total: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+assert_eq!(total, 100);
+```
+
+<br>
+
 <h3 id="exporters">Exporters (v0.9.3)</h3>
 
 Five built-in exporters render the registry into popular telemetry formats.
@@ -950,6 +1193,63 @@ if cb.is_allowed() {
 } else {
     // shed load
 }
+```
+
+<br>
+
+<h3 id="tracing-ext"><code>tracing</code> integration (v0.9.5)</h3>
+
+Source: `src/tracing_ext.rs` — requires the `tracing` Cargo feature.
+
+Opt-in adapters that wrap existing `Timer` operations with a
+[`tracing`](https://docs.rs/tracing) span, so a single call site
+populates both the metric histogram and the user's tracing subscriber.
+Hot paths in the metric types themselves are **unchanged**; enabling the
+`tracing` feature does not slow `Counter::inc` / `Gauge::set` /
+`Timer::record` / `Histogram::observe`.
+
+**Functions:**
+
+- `time_in_span<T>(name: &'static str, timer: &Timer, f: impl FnOnce() -> T) -> T`
+  — runs `f` inside both the supplied `Timer` and a
+  `tracing::info_span!("metric.time", name = name)`. Returns whatever
+  `f` returns.
+- `time_global<T>(name: &'static str, f: impl FnOnce() -> T) -> T`
+  — shorthand that resolves the timer from the global registry by
+  `name` and forwards to `time_in_span`.
+
+**Examples:**
+
+Wrap a closure with both a metric timer and a tracing span:
+
+```rust
+# #[cfg(all(feature = "timer", feature = "tracing"))]
+# {
+use metrics_lib::{init, metrics};
+use metrics_lib::tracing_ext::time_in_span;
+
+init();
+let timer = metrics().timer("db.query");
+let result = time_in_span("db.query", &timer, || {
+    // … work runs inside both the Timer and an info_span! …
+    42
+});
+assert_eq!(result, 42);
+assert_eq!(timer.count(), 1);
+# }
+```
+
+Use the global shorthand:
+
+```rust
+# #[cfg(all(feature = "timer", feature = "tracing"))]
+# {
+use metrics_lib::init;
+use metrics_lib::tracing_ext::time_global;
+
+init();
+let _ = time_global("rpc.call", || 11);
+# }
 ```
 
 <br>

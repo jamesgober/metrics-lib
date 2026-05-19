@@ -10,6 +10,109 @@
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-05-18
+
+**Final Polishing release.** The last patch before the v1.0 API freeze.
+Adds four new types — `HealthConfig` + `Step`, `ScopedRegistry`,
+`TokenBucket`, and the `tracing` integration helpers — plus the
+proptest harness, three new CI gates (cargo-deny, cargo-udeps, Miri),
+and documentation pages for every new symbol. Zero breaking changes.
+
+### Added
+
+- `src/system_health.rs` — new public types **`HealthConfig`** and
+  **`Step`** that make `SystemHealth::health_score` fully tunable. Each
+  metric (`system_cpu` / `load_avg` / `process_cpu` / `memory_gb` /
+  `threads` / `fds`) accepts an ordered `Vec<Step>` describing the
+  threshold → penalty ladder. The `load_avg` ladder is expressed as a
+  multiplier of `num_cpus::get()`. `HealthConfig::default()` reproduces
+  the v0.9.x scoring exactly so existing dashboards do not shift.
+  `Step::new(threshold, penalty)` is `const`. Both types derive
+  `serde::Serialize` behind the `serde` feature.
+- `SystemHealth::with_config(interval, config) -> Self` constructor.
+- `src/registry.rs` — new public type **`ScopedRegistry`** plus
+  `Registry::scoped(prefix)` / `MetricsCore::scoped(prefix)` / nested
+  `ScopedRegistry::scoped(sub_prefix)` constructors. A `ScopedRegistry`
+  is a thin view over a `Registry` that prepends a fixed prefix to every
+  lookup, describe, and bucket-configure call. There is no separate
+  storage — a scoped lookup lands in the same underlying map as the
+  equivalent unscoped name, so two scopes that produce the same effective
+  name return the **same** `Arc`.
+- `src/token_bucket.rs` (new module) — **`TokenBucket`** strict-admission
+  primitive. Atomic `compare_exchange_weak` on a packed `(tokens,
+  last_refill_ms)` `u64` guarantees that capacity is never exceeded, in
+  contrast to `RateMeter::tick_if_under_limit` which trades correctness
+  for hot-path speed. API: `new(capacity, refill_per_second)`,
+  `try_acquire(n) -> Result<()>`, `acquire(n) -> bool`,
+  `available() -> u32`, `capacity()`, `refill_per_second()`, `reset()`.
+  Non-finite or negative refill rates are coerced to `0.0`. Cache-line
+  aligned.
+- `src/tracing_ext.rs` (new module, gated on the new `tracing` Cargo
+  feature) — opt-in adapters that wrap existing `Timer` operations with
+  a `tracing::info_span!`. Functions: `time_in_span(name, timer, f)` and
+  `time_global(name, f)`. Hot paths in the metric types themselves are
+  unchanged when the `tracing` feature is enabled.
+- `Cargo.toml`: new `tracing` Cargo feature (optional dep on
+  `tracing = "0.1"`). The `full` aggregate flag now includes `tracing`.
+- `tests/proptests.rs` (new) — property-based test harness covering ten
+  cross-cutting invariants:
+  - Counter `inc`/`add` monotonicity.
+  - `Counter::try_add` returns `Overflow` iff arithmetic actually
+    overflows.
+  - `Gauge::try_set` rejects NaN/±∞ without mutating the gauge.
+  - `LabelSet` equality and hash are insertion-order-independent for
+    unique-key inputs.
+  - `LabelSet` duplicate-key inputs are last-write-wins (documents the
+    intentional order-sensitive semantic that proptest surfaced in
+    v0.9.5).
+  - `Timer::record_batch` agrees with sequential `record_ns` on
+    count/total/min/max.
+  - `Registry` is singleton-per-name (`Arc::ptr_eq`).
+  - `TokenBucket` never overshoots capacity under arbitrary acquire
+    sequences.
+  - `Histogram` `count` equals the trailing `+Inf` bucket count.
+  - `Histogram::quantile` is monotone over `[0, 1]`.
+  Backed by a pinned `proptest = "=1.0.0"` dev-dependency for MSRV
+  compatibility.
+- `.github/workflows/ci.yml`: three new jobs.
+  - **`deny`** — runs `cargo deny --workspace check all` against the
+    new `deny.toml` policy (advisories, bans, licenses, sources).
+  - **`udeps`** — runs `cargo +nightly udeps --workspace --all-features`
+    to flag unused dependencies.
+  - **`miri`** — runs `cargo miri test --features async --lib
+    async_support` to validate the `TimedFuture` pin-projection
+    `unsafe` blocks under stricter aliasing rules.
+- `deny.toml` (new) — cargo-deny policy file. Allows MIT / Apache-2.0
+  family + standard permissive licenses; denies wildcard versions,
+  unknown registries, unknown git sources; warns on yanked crates and
+  duplicate major versions.
+- `docs/API.md` — new sections for `HealthConfig` & `Step`,
+  `ScopedRegistry`, `TokenBucket`, and `tracing` integration. Each
+  documents constructors, methods, return types, and ≥2 code examples.
+  Table-of-Contents updated.
+
+### Changed
+
+- `src/system_health.rs` — `HealthInner` now stores the active
+  `HealthConfig`; `calculate_health_score` was rewritten as a single
+  composition of the ladder lookups (`100 - Σ apply_steps(value,
+  ladder)`). Functional behaviour with `HealthConfig::default()` is
+  identical to the prior hardcoded scoring.
+- `src/lib.rs` — public re-exports updated: `HealthConfig`, `Step`,
+  `ScopedRegistry`, `TokenBucket`, and (behind feature `tracing`) the
+  `tracing_ext` module. `MetricsCore::scoped(prefix)` shorthand added.
+- `Cargo.toml`: `tracing = { version = "0.1", default-features =
+  false, features = ["std"], optional = true }` added. `proptest =
+  "=1.0.0"` added as a dev-dep (MSRV-pinned).
+- Package version → `0.9.5`. Install snippets in `README.md` and
+  `docs/API.md` bumped accordingly.
+
+### Fixed
+
+- None — all v0.9.5 work is additive over the v0.9.4 baseline.
+
+
+
 ## [0.9.4] - 2026-05-18
 
 **Performance Tuning release.** Replaces the lazy `SystemHealth::maybe_update`
@@ -869,7 +972,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/jamesgober/metrics-lib/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/jamesgober/metrics-lib/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/jamesgober/metrics-lib/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jamesgober/metrics-lib/compare/v0.9.1...v0.9.2
