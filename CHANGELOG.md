@@ -10,6 +10,53 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-19
+
+**API freeze.** The 1.0.0 release is the stability commitment for every
+public symbol that landed across the 0.9.x cycle. No new features, no
+breaking changes — this is the version that says "you can pin
+`metrics-lib = "1"` and expect SemVer-strict behaviour from here on."
+
+### Added
+
+- `docs/STABILITY.md` — the explicit semver promise. Lists every frozen
+  public symbol (crate-root globals, core metric types, labels,
+  metadata, registry, system health, token bucket, async support,
+  adaptive controls, `tracing` integration, every exporter, prelude),
+  documents the Cargo feature freeze, calls out the items that are
+  intentionally NOT part of the 1.x stability promise (error display
+  text, internal performance characteristics, transitive deps, …), and
+  captures the behavioural contracts callers can rely on (`Counter`
+  monotonicity, `Gauge` `try_*` non-finite rejection, `TokenBucket`
+  no-overshoot, `SystemHealth` lock-free reads, cardinality cap
+  defaults).
+- `README.md` — new top-of-page callout pointing at
+  `docs/STABILITY.md` and itemising the CI gates that backstop the
+  freeze: fmt, clippy, coverage (85 % gate), rustdoc warnings,
+  `cargo deny`, `cargo udeps`, Miri on the `unsafe` pin-projection
+  blocks, and publish dry-runs.
+
+### Changed
+
+- Package version → `1.0.0`. Install snippets in `README.md` and
+  `docs/API.md` bumped accordingly.
+
+### Notes
+
+- MSRV remains Rust **1.70**.
+- The feature set is frozen at 1.0.0: `count`, `gauge`, `timer`,
+  `meter`, `sample`, `histogram`, `bench-tests`, `async`, `serde`,
+  `statsd`, `otlp`, `tracing`, `exporters-all`, `all`, `full`,
+  `default`, `minimal`.
+- The `criterion =0.4.0` pin and the corresponding
+  `RUSTSEC-2024-0375` (`atty` unmaintained) advisory ignore in
+  `deny.toml` remain in place. Migrating to `criterion 0.5+` (which
+  drops the transitive `clap 3 → atty` chain) is queued as a separate
+  patch release and may land in `1.0.x` once the
+  github-action-benchmark JSON-shape compatibility is reconciled.
+
+
+
 ## [0.9.5] - 2026-05-18
 
 **Final Polishing release.** The last patch before the v1.0 API freeze.
@@ -972,7 +1019,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/metrics-lib/compare/v0.9.5...v1.0.0
 [0.9.5]: https://github.com/jamesgober/metrics-lib/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/jamesgober/metrics-lib/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/jamesgober/metrics-lib/compare/v0.9.2...v0.9.3

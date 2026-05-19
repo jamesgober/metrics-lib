@@ -45,7 +45,7 @@
         <strong>MSRV is 1.70+</strong>.        
     </p>
     <blockquote>
-        CI enforces formatting, lints, coverage (<i>85% threshold</i>), <b>rustdoc</b> warnings, and publish dry‑runs for reliability.
+        <strong>1.0.0 is the API freeze.</strong> See <a href="./docs/STABILITY.md"><code>docs/STABILITY.md</code></a> for the exhaustive frozen-surface list and the SemVer promise. CI enforces formatting, lints, coverage (<i>85% threshold</i>), <b>rustdoc</b> warnings, security advisories (<code>cargo&nbsp;deny</code>), unused-deps (<code>cargo&nbsp;udeps</code>), Miri on the <code>unsafe</code> pin-projection blocks, and publish dry-runs.
     </blockquote>
 </div>
 
@@ -164,13 +164,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.9.5"
+metrics-lib = "1.0.0"
 
 # Optional features
-metrics-lib = { version = "0.9.5", features = ["async"] }
+metrics-lib = { version = "1.0.0", features = ["async"] }
 
 # Full feature set (stable + async + serde)
-metrics-lib = { version = "0.9.5", features = ["full"] }
+metrics-lib = { version = "1.0.0", features = ["full"] }
 ```
 
 <hr>
@@ -647,13 +647,13 @@ in place.
 
 ```toml
 # All stable features:
-metrics-lib = { version = "0.9.5", features = ["all"] }
+metrics-lib = { version = "1.0.0", features = ["all"] }
 
 # Full build including async and serde:
-metrics-lib = { version = "0.9.5", features = ["full"] }
+metrics-lib = { version = "1.0.0", features = ["full"] }
 
 # Minimal build (counter only):
-metrics-lib = { version = "0.9.5", features = ["minimal"] }
+metrics-lib = { version = "1.0.0", features = ["minimal"] }
 ```
 
 ### Runtime Configuration
