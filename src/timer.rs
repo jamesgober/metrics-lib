@@ -901,9 +901,8 @@ mod benchmarks {
             elapsed.as_nanos() as f64 / iterations as f64
         );
 
+        // Throughput-only smoke check; Criterion is the regression detector.
         assert_eq!(timer.count(), iterations);
-        // Should be under 300ns per record (relaxed from 200ns)
-        assert!(elapsed.as_nanos() / (iterations as u128) < 300);
     }
 
     #[cfg_attr(not(feature = "bench-tests"), ignore)]
@@ -926,9 +925,8 @@ mod benchmarks {
             elapsed.as_nanos() as f64 / iterations as f64
         );
 
+        // Throughput-only smoke check; Criterion is the regression detector.
         assert_eq!(timer.count(), iterations);
-        // Should be under 1500ns per timer operation (relaxed from 1000ns)
-        assert!(elapsed.as_nanos() / (iterations as u128) < 1500);
     }
 
     #[cfg_attr(not(feature = "bench-tests"), ignore)]
@@ -953,8 +951,6 @@ mod benchmarks {
             "Timer stats: {:.2} ns/op",
             elapsed.as_nanos() as f64 / iterations as f64
         );
-
-        // Should be very fast since it's just atomic loads (relaxed from 100ns to 300ns)
-        assert!(elapsed.as_nanos() / iterations < 300);
+        // Throughput-only smoke check; Criterion is the regression detector.
     }
 }

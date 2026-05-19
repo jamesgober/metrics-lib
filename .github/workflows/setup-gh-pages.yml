@@ -11,6 +11,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # Opt every JS action into Node.js 24 ahead of GitHub's June 2026 forced
+  # migration; silences "Node.js 20 actions are deprecated" runner warnings.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   bootstrap:
     name: Bootstrap gh-pages
