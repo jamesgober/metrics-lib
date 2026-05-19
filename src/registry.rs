@@ -1169,4 +1169,194 @@ mod tests {
         let snap = h.snapshot();
         assert_eq!(snap.buckets.len(), 4);
     }
+
+    // ---------- Coverage-completing tests for every labeled metric type ----------
+
+    #[test]
+    fn labeled_gauge_distinct_from_unlabeled_and_caps() {
+        let r = Registry::new();
+        let plain = r.get_or_create_gauge("temp");
+        let labels = LabelSet::from([("zone", "a")]);
+        let labeled = r.get_or_create_gauge_with("temp", &labels);
+        assert!(!Arc::ptr_eq(&plain, &labeled));
+        plain.set(1.0);
+        labeled.set(2.0);
+        assert_eq!(plain.get(), 1.0);
+        assert_eq!(labeled.get(), 2.0);
+
+        // Empty label set hits the fast path.
+        let same = r.get_or_create_gauge_with("temp", &LabelSet::EMPTY);
+        assert!(Arc::ptr_eq(&plain, &same));
+
+        // Try path returns CardinalityExceeded on full cap.
+        r.set_cardinality_cap(1);
+        assert!(r
+            .try_get_or_create_gauge_with("temp", &LabelSet::from([("zone", "b")]))
+            .is_err());
+        // The non-try path routes to the per-type sink without panicking.
+        let _ = r.get_or_create_gauge_with("temp", &LabelSet::from([("zone", "c")]));
+        assert!(r.cardinality_overflows() >= 1);
+    }
+
+    #[test]
+    fn labeled_timer_distinct_from_unlabeled_and_caps() {
+        let r = Registry::new();
+        let plain = r.get_or_create_timer("rpc");
+        let labeled = r.get_or_create_timer_with("rpc", &LabelSet::from([("op", "send")]));
+        assert!(!Arc::ptr_eq(&plain, &labeled));
+        plain.record(std::time::Duration::from_micros(50));
+        labeled.record(std::time::Duration::from_micros(100));
+        assert_eq!(plain.count(), 1);
+        assert_eq!(labeled.count(), 1);
+        let same = r.get_or_create_timer_with("rpc", &LabelSet::EMPTY);
+        assert!(Arc::ptr_eq(&plain, &same));
+
+        r.set_cardinality_cap(1);
+        assert!(r
+            .try_get_or_create_timer_with("rpc", &LabelSet::from([("op", "recv")]))
+            .is_err());
+        let _ = r.get_or_create_timer_with("rpc", &LabelSet::from([("op", "ack")]));
+        assert!(r.cardinality_overflows() >= 1);
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn labeled_rate_meter_distinct_from_unlabeled_and_caps() {
+        let r = Registry::new();
+        let plain = r.get_or_create_rate_meter("qps");
+        let labeled = r.get_or_create_rate_meter_with("qps", &LabelSet::from([("tier", "1")]));
+        assert!(!Arc::ptr_eq(&plain, &labeled));
+        plain.tick_n(3);
+        labeled.tick_n(7);
+        assert_eq!(plain.total(), 3);
+        assert_eq!(labeled.total(), 7);
+        let same = r.get_or_create_rate_meter_with("qps", &LabelSet::EMPTY);
+        assert!(Arc::ptr_eq(&plain, &same));
+
+        r.set_cardinality_cap(1);
+        assert!(r
+            .try_get_or_create_rate_meter_with("qps", &LabelSet::from([("tier", "2")]))
+            .is_err());
+        let _ = r.get_or_create_rate_meter_with("qps", &LabelSet::from([("tier", "3")]));
+        assert!(r.cardinality_overflows() >= 1);
+    }
+
+    #[test]
+    #[cfg(feature = "histogram")]
+    fn labeled_histogram_caps_and_observes() {
+        let r = Registry::new();
+        r.configure_histogram("latency", [0.01, 0.1, 1.0]);
+        let h = r.get_or_create_histogram_with("latency", &LabelSet::from([("op", "a")]));
+        h.observe(0.005);
+        assert_eq!(h.count(), 1);
+
+        r.set_cardinality_cap(1);
+        // Already-registered labels should still resolve to the existing Arc.
+        let h2 = r.get_or_create_histogram_with("latency", &LabelSet::from([("op", "a")]));
+        assert!(Arc::ptr_eq(&h, &h2));
+
+        // New labeled key hits the cap.
+        let err = r
+            .try_get_or_create_histogram_with("latency", &LabelSet::from([("op", "b")]))
+            .unwrap_err();
+        assert_eq!(err, MetricsError::CardinalityExceeded);
+        let _sink = r.get_or_create_histogram_with("latency", &LabelSet::from([("op", "c")]));
+        assert!(r.cardinality_overflows() >= 1);
+    }
+
+    #[test]
+    fn describe_shorthands_cover_every_kind() {
+        let r = Registry::new();
+        r.describe_counter("c", "counter help", Unit::Custom("1"));
+        r.describe_gauge("g", "gauge help", Unit::Bytes);
+        r.describe_timer("t", "timer help", Unit::Seconds);
+        #[cfg(feature = "meter")]
+        r.describe_rate("rt", "rate help", Unit::Custom("ops"));
+        #[cfg(feature = "histogram")]
+        r.describe_histogram("h", "histogram help", Unit::Milliseconds);
+
+        assert_eq!(r.metadata("c").unwrap().kind, MetricKind::Counter);
+        assert_eq!(r.metadata("g").unwrap().kind, MetricKind::Gauge);
+        assert_eq!(r.metadata("t").unwrap().kind, MetricKind::Timer);
+        #[cfg(feature = "meter")]
+        assert_eq!(r.metadata("rt").unwrap().kind, MetricKind::Rate);
+        #[cfg(feature = "histogram")]
+        assert_eq!(r.metadata("h").unwrap().kind, MetricKind::Histogram);
+
+        // Re-describe replaces.
+        r.describe_counter("c", "new help", Unit::None);
+        assert_eq!(r.metadata("c").unwrap().help.as_ref(), "new help");
+    }
+
+    #[test]
+    fn snapshot_accessors_include_labeled_entries() {
+        let r = Registry::new();
+        r.get_or_create_counter("c1").inc();
+        r.get_or_create_counter_with("c2", &LabelSet::from([("k", "v")]))
+            .inc();
+        r.get_or_create_gauge("g1").set(1.0);
+        r.get_or_create_gauge_with("g2", &LabelSet::from([("k", "v")]))
+            .set(2.0);
+        r.get_or_create_timer("t1")
+            .record(std::time::Duration::from_micros(1));
+        r.get_or_create_timer_with("t2", &LabelSet::from([("k", "v")]))
+            .record(std::time::Duration::from_micros(2));
+
+        assert_eq!(r.counter_entries().len(), 2);
+        assert_eq!(r.gauge_entries().len(), 2);
+        assert_eq!(r.timer_entries().len(), 2);
+
+        #[cfg(feature = "meter")]
+        {
+            r.get_or_create_rate_meter("r1").tick();
+            r.get_or_create_rate_meter_with("r2", &LabelSet::from([("k", "v")]))
+                .tick();
+            assert_eq!(r.rate_meter_entries().len(), 2);
+        }
+
+        #[cfg(feature = "histogram")]
+        {
+            r.get_or_create_histogram("h1").observe(0.1);
+            r.get_or_create_histogram_with("h2", &LabelSet::from([("k", "v")]))
+                .observe(0.1);
+            assert_eq!(r.histogram_entries().len(), 2);
+            let names = r.histogram_names();
+            assert!(names.contains(&"h1".to_string()));
+            assert!(names.contains(&"h2".to_string()));
+        }
+    }
+
+    #[test]
+    fn cardinality_count_is_reset_by_clear_but_overflows_are_monotonic() {
+        let r = Registry::new();
+        r.set_cardinality_cap(2);
+        let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "1")]));
+        let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "2")]));
+        let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "3")])); // overflow
+        assert_eq!(r.cardinality_count(), 2);
+        assert!(r.cardinality_overflows() >= 1);
+
+        let prior_overflows = r.cardinality_overflows();
+        r.clear();
+        assert_eq!(r.cardinality_count(), 0);
+        // overflows is monotonic across clears.
+        assert_eq!(r.cardinality_overflows(), prior_overflows);
+    }
+
+    #[test]
+    fn cap_settings_round_trip() {
+        let r = Registry::new();
+        let default_cap = r.cardinality_cap();
+        assert_eq!(default_cap, DEFAULT_CARDINALITY_CAP);
+        r.set_cardinality_cap(42);
+        assert_eq!(r.cardinality_cap(), 42);
+        // Setting a cap below current count doesn't reset the count.
+        let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "v")]));
+        r.set_cardinality_cap(0);
+        assert_eq!(r.cardinality_cap(), 0);
+        assert_eq!(r.cardinality_count(), 1);
+        // But further labeled registrations now overflow.
+        let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "v2")]));
+        assert!(r.cardinality_overflows() >= 1);
+    }
 }

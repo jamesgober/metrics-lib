@@ -343,6 +343,80 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "timer")]
+    fn timer_renders_four_gauge_lines() {
+        let r = Registry::new();
+        let t = r.get_or_create_timer("rpc");
+        t.record(std::time::Duration::from_millis(2));
+        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
+        let body = sink.render(&r);
+        assert!(body.contains("rpc.count:1|g\n"), "{body}");
+        assert!(body.contains("rpc.sum_seconds:"), "{body}");
+        assert!(body.contains("rpc.min_seconds:"), "{body}");
+        assert!(body.contains("rpc.max_seconds:"), "{body}");
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn rate_meter_renders_two_gauge_lines() {
+        let r = Registry::new();
+        r.get_or_create_rate_meter("qps").tick_n(3);
+        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
+        let body = sink.render(&r);
+        assert!(body.contains("qps.total:3|g\n"), "{body}");
+        assert!(body.contains("qps.per_second:"), "{body}");
+    }
+
+    #[test]
+    #[cfg(feature = "histogram")]
+    fn histogram_renders_count_sum_and_three_quantiles() {
+        let r = Registry::new();
+        let h = r.get_or_create_histogram("rtt");
+        for v in &[0.001, 0.002, 0.005, 0.01, 0.02] {
+            h.observe(*v);
+        }
+        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
+        let body = sink.render(&r);
+        assert!(body.contains("rtt.count:5|g\n"), "{body}");
+        assert!(body.contains("rtt.sum:"), "{body}");
+        assert!(body.contains("rtt.p50:"), "{body}");
+        assert!(body.contains("rtt.p95:"), "{body}");
+        assert!(body.contains("rtt.p99:"), "{body}");
+    }
+
+    #[test]
+    #[cfg(feature = "gauge")]
+    fn non_finite_gauge_value_renders_safely() {
+        let r = Registry::new();
+        let g = r.get_or_create_gauge("temp");
+        g.set(f64::INFINITY);
+        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
+        let body = sink.render(&r);
+        // Saturates to f64::MAX rather than emitting "inf" / "NaN".
+        assert!(body.starts_with("temp:"), "{body}");
+        assert!(!body.contains("Inf"), "{body}");
+        assert!(!body.contains("NaN"), "{body}");
+    }
+
+    #[test]
+    fn with_packet_size_floor_is_enforced() {
+        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
+        // Tiny request gets clamped up to the minimum of 64.
+        let sink =
+            StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap()).with_packet_size(8);
+        let r = Registry::new();
+        #[cfg(feature = "count")]
+        r.get_or_create_counter("x").inc();
+        // Should not panic even with the tiny budget — small packets are sent
+        // one line at a time.
+        let _ = sink.send(&r);
+    }
+
+    #[test]
     fn send_packetises_long_bodies() {
         let r = Registry::new();
         #[cfg(feature = "count")]

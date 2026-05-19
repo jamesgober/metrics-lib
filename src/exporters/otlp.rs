@@ -518,6 +518,60 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "timer")]
+    fn timer_renders_as_histogram_with_seconds_suffix() {
+        let r = Registry::new();
+        let t = r.get_or_create_timer("rpc");
+        t.record(std::time::Duration::from_millis(3));
+        let body = render(&r, "svc");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let metric = &v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
+        assert_eq!(metric["name"], "rpc_seconds");
+        assert_eq!(metric["unit"], "s");
+        let dp = &metric["histogram"]["dataPoints"][0];
+        assert_eq!(dp["count"], "1");
+        assert!(dp["min"].is_number());
+        assert!(dp["max"].is_number());
+        assert_eq!(dp["explicitBounds"], serde_json::json!([]));
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn rate_meter_renders_as_gauge_per_second() {
+        let r = Registry::new();
+        r.get_or_create_rate_meter("qps").tick_n(2);
+        let body = render(&r, "svc");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let metric = &v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
+        assert_eq!(metric["name"], "qps_per_second");
+        assert_eq!(metric["unit"], "1");
+        let dp = &metric["gauge"]["dataPoints"][0];
+        assert!(dp["asDouble"].is_number());
+    }
+
+    #[test]
+    fn render_pretty_is_indented() {
+        let r = Registry::new();
+        let body = render_pretty(&r, "svc");
+        assert!(body.contains('\n'));
+    }
+
+    #[test]
+    fn unit_str_passes_through_known_units() {
+        // Indirectly exercise unit_str via describe + render.
+        let r = Registry::new();
+        #[cfg(feature = "count")]
+        {
+            r.describe_counter("bytes_total_in", "Bytes received", Unit::Bytes);
+            r.get_or_create_counter("bytes_total_in").add(1024);
+        }
+        let body = render(&r, "svc");
+        let _v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        #[cfg(feature = "count")]
+        assert!(body.contains("\"unit\":\"bytes\""), "{body}");
+    }
+
+    #[test]
     #[cfg(feature = "histogram")]
     fn histogram_renders_non_cumulative_buckets() {
         let r = Registry::new();

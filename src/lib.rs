@@ -474,16 +474,77 @@ mod tests {
         let e2 = MetricsError::Overloaded;
         let e3 = MetricsError::InvalidName;
         let e4 = MetricsError::Config("bad cfg".to_string());
+        let e5 = MetricsError::CardinalityExceeded;
+        let e6 = MetricsError::Overflow;
+        let e7 = MetricsError::Underflow;
+        let e8 = MetricsError::OverLimit;
+        let e9 = MetricsError::WouldBlock;
+        let e10 = MetricsError::NotInitialized;
+        let e11 = MetricsError::InvalidValue { reason: "x" };
 
-        let s1 = format!("{e1}");
-        let s2 = format!("{e2}");
-        let s3 = format!("{e3}");
+        for (err, needle) in [
+            (e1, "Circuit breaker is open"),
+            (e2, "System is overloaded"),
+            (e3, "Invalid metric name"),
+            (e5, "Cardinality"),
+            (e6, "overflow"),
+            (e7, "underflow"),
+            (e8, "exceed"),
+            (e9, "block"),
+            (e10, "not initialized"),
+            (e11, "Invalid value"),
+        ] {
+            assert!(
+                format!("{err}")
+                    .to_lowercase()
+                    .contains(&needle.to_lowercase()),
+                "err {err:?} should contain {needle}"
+            );
+        }
         let s4 = format!("{e4}");
-
-        assert!(s1.contains("Circuit breaker is open"));
-        assert!(s2.contains("System is overloaded"));
-        assert!(s3.contains("Invalid metric name"));
         assert!(s4.contains("Configuration error"));
         assert!(s4.contains("bad cfg"));
+    }
+
+    // ---------- v0.9.3 MetricsCore labeled-method coverage ----------
+
+    #[test]
+    #[cfg(all(feature = "count", feature = "gauge", feature = "timer"))]
+    fn metricscore_labeled_methods_exercise_all_paths() {
+        let m = MetricsCore::new();
+        let labels = LabelSet::from([("k", "v")]);
+
+        // counter_with + try_counter_with happy paths
+        m.counter_with("c", &labels).inc();
+        assert!(m.try_counter_with("c", &labels).is_ok());
+        // gauge_with + try_gauge_with
+        m.gauge_with("g", &labels).set(2.5);
+        assert!(m.try_gauge_with("g", &labels).is_ok());
+        // timer_with + try_timer_with
+        m.timer_with("t", &labels)
+            .record(std::time::Duration::from_micros(1));
+        assert!(m.try_timer_with("t", &labels).is_ok());
+
+        assert_eq!(m.registry().cardinality_count(), 3);
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn metricscore_rate_with_paths() {
+        let m = MetricsCore::new();
+        let labels = LabelSet::from([("tier", "1")]);
+        m.rate_with("qps", &labels).tick();
+        assert!(m.try_rate_with("qps", &labels).is_ok());
+        assert_eq!(m.registry().cardinality_count(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "histogram")]
+    fn metricscore_histogram_paths() {
+        let m = MetricsCore::new();
+        m.histogram("default_buckets").observe(0.5);
+        let labels = LabelSet::from([("op", "x")]);
+        m.histogram_with("custom", &labels).observe(0.1);
+        assert!(m.try_histogram_with("custom", &labels).is_ok());
     }
 }
