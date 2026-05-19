@@ -164,16 +164,16 @@ jobs:
       uses: dtolnay/rust-toolchain@nightly
       with:
         components: miri
-    - name: cargo miri test (selective)
-      # Miri is slow; restrict to modules with `unsafe` blocks
-      # (async_support pin projection) and their callers. The async
-      # feature pulls in Tokio which has its own native-only paths; we
-      # only run the in-crate tests that exercise pin projection.
+    - name: cargo miri test (selective, all features)
+      # Miri is slow; restrict to the `async_support` module (the only
+      # site with `unsafe` pin-projection blocks). `--all-features` is
+      # required so `AsyncMetricBatch::flush` — which touches every
+      # metric type — compiles.
       env:
         MIRIFLAGS: "-Zmiri-disable-isolation"
       run: |
         cargo miri setup
-        cargo miri test --features async --lib async_support -- \
+        cargo miri test --all-features --lib async_support:: -- \
           --skip ::benchmarks::
 
   msrv:

@@ -49,6 +49,13 @@ authors = [
     "James Gober <me@jamesgober.com>"
 ]
 
+# `sysinfo` is gated on `#[cfg(not(target_os = "linux"))]` everywhere it
+# is used. On Linux CI runners cargo-udeps therefore reports it as
+# "unused"; this is a false positive (it's the cross-platform backend on
+# macOS and Windows). Tell cargo-udeps to skip it.
+[package.metadata.cargo-udeps.ignore]
+normal = ["sysinfo"]
+
 
 
 # FEATURE FLAGS
