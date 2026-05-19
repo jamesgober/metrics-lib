@@ -309,6 +309,69 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gauge")]
+    fn gauge_snapshot_renders() {
+        let r = Registry::new();
+        r.get_or_create_gauge("temp").set(21.5);
+        r.get_or_create_gauge_with("temp", &LabelSet::from([("zone", "a")]))
+            .set(18.0);
+        let snap = snapshot(&r);
+        assert_eq!(snap.gauges.len(), 2);
+        // Sort order: empty labels first, then labeled.
+        assert!(snap
+            .gauges
+            .iter()
+            .any(|g| g.labels.is_empty() && g.value == 21.5));
+        assert!(snap
+            .gauges
+            .iter()
+            .any(|g| !g.labels.is_empty() && g.value == 18.0));
+    }
+
+    #[test]
+    #[cfg(feature = "timer")]
+    fn timer_snapshot_includes_stats() {
+        let r = Registry::new();
+        let t = r.get_or_create_timer("rpc");
+        t.record(std::time::Duration::from_millis(7));
+        let snap = snapshot(&r);
+        assert_eq!(snap.timers.len(), 1);
+        assert_eq!(snap.timers[0].stats.count, 1);
+        let body = render(&r);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["timers"][0]["name"], "rpc");
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn rate_meter_snapshot_includes_stats() {
+        let r = Registry::new();
+        r.get_or_create_rate_meter("qps").tick_n(5);
+        let snap = snapshot(&r);
+        assert_eq!(snap.rate_meters.len(), 1);
+        assert_eq!(snap.rate_meters[0].stats.total_events, 5);
+    }
+
+    #[test]
+    fn cardinality_snapshot_reports_cap_and_overflows() {
+        let r = Registry::new();
+        r.set_cardinality_cap(1);
+        #[cfg(feature = "count")]
+        {
+            let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "1")]));
+            let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "2")]));
+            // overflow
+        }
+        let snap = snapshot(&r);
+        assert_eq!(snap.cardinality.cap, 1);
+        #[cfg(feature = "count")]
+        {
+            assert_eq!(snap.cardinality.current, 1);
+            assert!(snap.cardinality.overflows >= 1);
+        }
+    }
+
+    #[test]
     #[cfg(feature = "histogram")]
     fn histogram_snapshot_round_trips() {
         let r = Registry::new();

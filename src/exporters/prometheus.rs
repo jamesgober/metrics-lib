@@ -463,6 +463,71 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "timer")]
+    fn timer_renders_summary_lines() {
+        let r = Registry::new();
+        r.describe_timer("rpc", "RPC latency", Unit::Seconds);
+        let t = r.get_or_create_timer("rpc");
+        t.record(std::time::Duration::from_millis(5));
+        t.record(std::time::Duration::from_millis(10));
+        let s = render(&r);
+        assert!(s.contains("# TYPE rpc histogram\n"), "{s}");
+        assert!(s.contains("rpc_count 2"), "{s}");
+        assert!(s.contains("rpc_sum_seconds"), "{s}");
+        assert!(s.contains("rpc_min_seconds"), "{s}");
+        assert!(s.contains("rpc_max_seconds"), "{s}");
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn rate_meter_renders_total_and_per_second() {
+        let r = Registry::new();
+        r.describe_rate("qps", "Queries per second", Unit::Custom("1"));
+        r.get_or_create_rate_meter("qps").tick_n(7);
+        let s = render(&r);
+        assert!(s.contains("# TYPE qps gauge\n"), "{s}");
+        assert!(s.contains("qps_total 7"), "{s}");
+        assert!(s.contains("qps_per_second"), "{s}");
+    }
+
+    #[test]
+    #[cfg(feature = "histogram")]
+    fn histogram_with_metadata_emits_help_and_unit() {
+        let r = Registry::new();
+        r.describe_histogram("latency_seconds", "Handler latency", Unit::Seconds);
+        r.configure_histogram("latency_seconds", [0.05, 0.1]);
+        r.get_or_create_histogram("latency_seconds").observe(0.03);
+        let s = render(&r);
+        assert!(s.contains("# HELP latency_seconds Handler latency"), "{s}");
+        assert!(s.contains("# TYPE latency_seconds histogram"), "{s}");
+        assert!(s.contains("# UNIT latency_seconds seconds"), "{s}");
+        assert!(s.contains(r#"latency_seconds_bucket{le="0.05"} 1"#), "{s}");
+    }
+
+    #[test]
+    fn render_into_appends_to_buffer() {
+        let r = Registry::new();
+        #[cfg(feature = "count")]
+        r.get_or_create_counter("hits").inc();
+        let mut buf = String::from("=== prefix ===\n");
+        render_into(&mut buf, &r);
+        assert!(buf.starts_with("=== prefix ===\n"));
+    }
+
+    #[test]
+    fn escape_help_handles_backslash_and_newline() {
+        let r = Registry::new();
+        #[cfg(feature = "count")]
+        {
+            r.describe_counter("x", "with \\ and\nnewline", Unit::None);
+            r.get_or_create_counter("x").inc();
+            let s = render(&r);
+            assert!(s.contains(r"with \\ and\nnewline"), "{s}");
+        }
+        let _ = r;
+    }
+
+    #[test]
     #[cfg(any(
         feature = "gauge",
         feature = "timer",

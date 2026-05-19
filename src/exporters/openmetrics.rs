@@ -331,6 +331,39 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "timer")]
+    fn timer_renders_summary_lines_om() {
+        let r = Registry::new();
+        let t = r.get_or_create_timer("rpc");
+        t.record(std::time::Duration::from_millis(7));
+        let s = render(&r);
+        assert!(s.contains("rpc_count 1"), "{s}");
+        assert!(s.contains("rpc_sum_seconds"), "{s}");
+        assert!(s.contains("rpc_min_seconds"), "{s}");
+        assert!(s.contains("rpc_max_seconds"), "{s}");
+        assert!(s.ends_with("# EOF\n"));
+    }
+
+    #[test]
+    #[cfg(feature = "meter")]
+    fn rate_meter_renders_total_and_rate_om() {
+        let r = Registry::new();
+        r.get_or_create_rate_meter("qps").tick_n(4);
+        let s = render(&r);
+        assert!(s.contains("qps_total 4"), "{s}");
+        assert!(s.contains("qps_per_second"), "{s}");
+    }
+
+    #[test]
+    fn render_into_appends_and_finishes_with_eof() {
+        let r = Registry::new();
+        let mut buf = String::from("PREFIX\n");
+        render_into(&mut buf, &r);
+        assert!(buf.starts_with("PREFIX\n"));
+        assert!(buf.ends_with("# EOF\n"));
+    }
+
+    #[test]
     #[cfg(feature = "histogram")]
     fn histogram_round_trip() {
         let r = Registry::new();

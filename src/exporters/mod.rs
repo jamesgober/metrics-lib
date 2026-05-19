@@ -7,11 +7,11 @@
 //!
 //! | Exporter | Feature flag | Output |
 //! |---|---|---|
-//! | [`prometheus`] | (always on) | Prometheus text exposition format (`String`) |
-//! | [`openmetrics`] | (always on) | OpenMetrics text format (`String`) |
-//! | [`json`] | `serde` | `serde_json::Value` snapshot |
-//! | [`statsd`] | `statsd` | UDP push, individual lines per metric |
-//! | [`otlp`] | `otlp` | OTLP/HTTP+JSON payload (`String`) |
+//! | `prometheus` | (always on) | Prometheus text exposition format (`String`) |
+//! | `openmetrics` | (always on) | OpenMetrics text format (`String`) |
+//! | `json` | `serde` | `serde_json::Value` snapshot |
+//! | `statsd` | `statsd` | UDP push, individual lines per metric |
+//! | `otlp` | `otlp` | OTLP/HTTP+JSON payload (`String`) |
 //!
 //! All exporters share a render policy:
 //! - Metric **names** are emitted verbatim (callers are expected to choose

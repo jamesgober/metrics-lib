@@ -86,7 +86,7 @@ jobs:
       shell: bash
       run: |
         set -euxo pipefail
-        cargo llvm-cov --summary-only --workspace \
+        cargo llvm-cov --summary-only --workspace --all-features \
           --fail-under-lines 85 \
           --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
     - name: Generate LCOV report
@@ -94,7 +94,7 @@ jobs:
       run: |
         set -euxo pipefail
         mkdir -p target/coverage
-        cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info \
+        cargo llvm-cov --workspace --all-features --lcov --output-path target/coverage/lcov.info \
           --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
     - name: Upload LCOV artifact
       uses: actions/upload-artifact@v4
