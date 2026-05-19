@@ -164,13 +164,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.9.4"
+metrics-lib = "0.9.5"
 
 # Optional features
-metrics-lib = { version = "0.9.4", features = ["async"] }
+metrics-lib = { version = "0.9.5", features = ["async"] }
 
 # Full feature set (stable + async + serde)
-metrics-lib = { version = "0.9.4", features = ["full"] }
+metrics-lib = { version = "0.9.5", features = ["full"] }
 ```
 
 <hr>
@@ -647,13 +647,13 @@ in place.
 
 ```toml
 # All stable features:
-metrics-lib = { version = "0.9.4", features = ["all"] }
+metrics-lib = { version = "0.9.5", features = ["all"] }
 
 # Full build including async and serde:
-metrics-lib = { version = "0.9.4", features = ["full"] }
+metrics-lib = { version = "0.9.5", features = ["full"] }
 
 # Minimal build (counter only):
-metrics-lib = { version = "0.9.4", features = ["minimal"] }
+metrics-lib = { version = "0.9.5", features = ["minimal"] }
 ```
 
 ### Runtime Configuration

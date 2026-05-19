@@ -90,6 +90,11 @@ mod labels;
 mod metadata;
 mod registry;
 mod system_health;
+mod token_bucket;
+
+/// Optional `tracing` integration helpers (behind the `tracing` Cargo feature).
+#[cfg(feature = "tracing")]
+pub mod tracing_ext;
 
 // Public re-exports — gated to match their feature.
 #[cfg(feature = "sample")]
@@ -112,7 +117,10 @@ pub use timer::*;
 pub use labels::{Label, LabelSet};
 pub use metadata::{MetricKind, MetricMetadata, Unit};
 pub use registry::*;
-pub use system_health::*;
+pub use system_health::{
+    HealthConfig, HealthStatus, ProcessStats, Step, SystemHealth, SystemSnapshot,
+};
+pub use token_bucket::TokenBucket;
 
 // Specialised sub-module re-exports.
 #[cfg(feature = "gauge")]
@@ -326,6 +334,25 @@ impl MetricsCore {
     #[inline(always)]
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// Create a [`ScopedRegistry`] over this `MetricsCore`'s [`Registry`].
+    ///
+    /// Shorthand for `self.registry().scoped(prefix)`. Useful for tying a
+    /// metrics namespace to a subsystem. Available since v0.9.5.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use metrics_lib::{init, metrics};
+    /// init();
+    /// let http = metrics().scoped("http.");
+    /// # #[cfg(feature = "count")]
+    /// http.counter("requests").inc();
+    /// ```
+    #[inline]
+    pub fn scoped(&self, prefix: impl Into<String>) -> ScopedRegistry<'_> {
+        self.registry.scoped(prefix)
     }
 }
 
