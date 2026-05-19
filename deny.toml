@@ -9,6 +9,16 @@ all-features = true
 version = 2
 # Warn on yanked crates; let security advisories fail.
 yanked = "warn"
+# Known transitive unmaintained-crate advisories we accept.
+ignore = [
+    # `atty` (unmaintained) reaches us only through the pinned
+    # `criterion = "=0.4.0"` dev-dependency (criterion ⇒ clap 3 ⇒
+    # atty). The `=0.4.0` pin exists for github-action-benchmark
+    # output-layout compatibility — see the comment in Cargo.toml.
+    # Migration to criterion 0.5 is queued for the v1.0 release once
+    # the benchmark-action JSON shape is reconciled.
+    "RUSTSEC-2024-0375",
+]
 # The `unmaintained` field has been split; let cargo-deny use defaults.
 
 [bans]
