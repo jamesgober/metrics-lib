@@ -2,7 +2,7 @@
 // Longevity Tests: sustained 1B+ operations (configurable)
 // Gated and ignored by default to avoid CI timeouts.
 // Run with: OPS=1000000000 cargo test --features bench-tests -- --ignored --test longevity_tests
-#![cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
+#![cfg(all(test, feature = "bench-tests", not(tarpaulin), not(coverage)))]
 
 use std::env;
 use std::time::Instant;
