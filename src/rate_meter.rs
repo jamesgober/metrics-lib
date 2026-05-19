@@ -12,6 +12,31 @@
 //! - **Lock-free** - Never blocks, never waits
 //! - **Zero allocations** - Pure atomic operations
 //! - **Rate limiting** - Built-in support for throttling
+//!
+//! ## Accuracy & concurrency contract
+//!
+//! `RateMeter` trades a small amount of accuracy under contention for
+//! lock-free hot-path performance. Callers should be aware of the following
+//! best-effort semantics:
+//!
+//! - **Window-boundary event-loss bound.** When two or more threads cross a
+//!   second/minute/hour boundary concurrently, one thread wins the boundary
+//!   CAS and `store()`s its delta into the new window; threads that lost the
+//!   CAS fall back to `fetch_add()` — but if they were carrying ticks intended
+//!   for the prior window, those ticks land in the new window's counter
+//!   instead. The total event count (`total_events`) is always correct; only
+//!   the per-window counts may be off by up to `(num_threads − 1)` at each
+//!   boundary.
+//! - **`tick_if_under_limit` TOCTOU overshoot.** `can_allow` → `tick` is not
+//!   a single atomic operation. Multiple threads can each observe a passing
+//!   `can_allow` and then `tick`, briefly overshooting the limit by up to
+//!   `num_threads − 1` events. For strict admission control, see the
+//!   `TokenBucket` primitive (introduced in 0.9.5).
+//!
+//! Both effects are bounded and self-correcting on the next window roll. For
+//! observability use cases (dashboards, alerting) the error is well below the
+//! sampling noise floor; for billing or hard-limit enforcement, use a
+//! token-bucket primitive instead.
 
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

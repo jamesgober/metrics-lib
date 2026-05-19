@@ -3,6 +3,7 @@
 //! Provides async-aware metric recording with zero-cost abstractions
 
 use crate::Timer;
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -124,10 +125,10 @@ pub struct AsyncMetricBatch {
 }
 
 enum MetricUpdate {
-    CounterInc { name: &'static str, value: u64 },
-    GaugeSet { name: &'static str, value: f64 },
-    TimerRecord { name: &'static str, nanos: u64 },
-    RateTick { name: &'static str },
+    CounterInc { name: Cow<'static, str>, value: u64 },
+    GaugeSet { name: Cow<'static, str>, value: f64 },
+    TimerRecord { name: Cow<'static, str>, nanos: u64 },
+    RateTick { name: Cow<'static, str> },
 }
 
 impl AsyncMetricBatch {
@@ -147,27 +148,50 @@ impl Default for AsyncMetricBatch {
 
 impl AsyncMetricBatch {
     /// Add counter increment
+    ///
+    /// `name` accepts both `&'static str` (string literals) and owned
+    /// `String`s via `impl Into<Cow<'static, str>>` — runtime-derived names
+    /// no longer require `Box::leak`.
     #[inline]
-    pub fn counter_inc(&mut self, name: &'static str, value: u64) {
-        self.updates.push(MetricUpdate::CounterInc { name, value });
+    pub fn counter_inc(&mut self, name: impl Into<Cow<'static, str>>, value: u64) {
+        self.updates.push(MetricUpdate::CounterInc {
+            name: name.into(),
+            value,
+        });
     }
 
     /// Add gauge set
+    ///
+    /// `name` accepts both `&'static str` and owned `String`s — see
+    /// [`Self::counter_inc`] for details.
     #[inline]
-    pub fn gauge_set(&mut self, name: &'static str, value: f64) {
-        self.updates.push(MetricUpdate::GaugeSet { name, value });
+    pub fn gauge_set(&mut self, name: impl Into<Cow<'static, str>>, value: f64) {
+        self.updates.push(MetricUpdate::GaugeSet {
+            name: name.into(),
+            value,
+        });
     }
 
     /// Add timer recording
+    ///
+    /// `name` accepts both `&'static str` and owned `String`s — see
+    /// [`Self::counter_inc`] for details.
     #[inline]
-    pub fn timer_record(&mut self, name: &'static str, nanos: u64) {
-        self.updates.push(MetricUpdate::TimerRecord { name, nanos });
+    pub fn timer_record(&mut self, name: impl Into<Cow<'static, str>>, nanos: u64) {
+        self.updates.push(MetricUpdate::TimerRecord {
+            name: name.into(),
+            nanos,
+        });
     }
 
     /// Add rate tick
+    ///
+    /// `name` accepts both `&'static str` and owned `String`s — see
+    /// [`Self::counter_inc`] for details.
     #[inline]
-    pub fn rate_tick(&mut self, name: &'static str) {
-        self.updates.push(MetricUpdate::RateTick { name });
+    pub fn rate_tick(&mut self, name: impl Into<Cow<'static, str>>) {
+        self.updates
+            .push(MetricUpdate::RateTick { name: name.into() });
     }
 
     /// Flush all updates to metrics
@@ -175,16 +199,16 @@ impl AsyncMetricBatch {
         for update in self.updates {
             match update {
                 MetricUpdate::CounterInc { name, value } => {
-                    metrics.counter(name).add(value);
+                    metrics.counter(&name).add(value);
                 }
                 MetricUpdate::GaugeSet { name, value } => {
-                    metrics.gauge(name).set(value);
+                    metrics.gauge(&name).set(value);
                 }
                 MetricUpdate::TimerRecord { name, nanos } => {
-                    metrics.timer(name).record_ns(nanos);
+                    metrics.timer(&name).record_ns(nanos);
                 }
                 MetricUpdate::RateTick { name } => {
-                    metrics.rate(name).tick();
+                    metrics.rate(&name).tick();
                 }
             }
         }

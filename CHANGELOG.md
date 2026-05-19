@@ -10,6 +10,150 @@
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-05-18
+
+**API fix and cleanup release.** Fixes the `SystemHealth` refresh-throttle
+bug, removes debug-mode overflow panics from non-checked counter and timer
+APIs, relaxes the registry's `&'static str` requirement so runtime-derived
+names work without `Box::leak`, and brings the feature-flag declarations in
+line with what actually ships in 0.9.2 vs what is reserved for 0.9.3.
+
+### Fixed
+
+- `src/system_health.rs` (`maybe_update`): stored the last-refresh timestamp
+  in nanoseconds while the throttle compared it against `update_interval_ms`,
+  with the result that the refresh effectively fired exactly once at
+  construction and then froze. All cached values (`cpu_used`, `mem_used_mb`,
+  `load_avg`, `process_*`, `health_score`) were pinned to their initial
+  reads for the lifetime of the `SystemHealth` instance. The throttle now
+  stores and compares the timestamp in a single unit (milliseconds), so the
+  refresh fires on the configured interval as documented. A new
+  `test_maybe_update_actually_refreshes_after_interval` regression test
+  guards against re-introduction.
+- `src/system_health.rs` (`SystemSnapshot::last_update`): previously reported
+  `Duration::from_nanos(monotonic_ns_at_last_refresh)`, which is *not* "time
+  since last refresh." It now reports the actual elapsed time since the
+  last refresh (`Duration::from_millis(now_ms - last_update_ms)`).
+- `src/system_health.rs` (`get_process_cpu`, Linux): replaced the "very
+  rough approximation" — which multiplied total clock ticks since process
+  start by 0.01 — with a proper delta sampler:
+  `((utime+stime) - prev) / (CLK_TCK * elapsed_s * cores) * 100`, normalized
+  per-core and clamped to `0..=100`. The first sample returns `0.0` and
+  seeds the baseline. Earlier values were essentially meaningless.
+- `src/counter.rs` (`add_and_get`, `inc_and_get`): used `+` which panics
+  in debug builds when crossing `u64::MAX`. They now use `wrapping_add` so
+  overflow wraps modulo `2^64`, matching the underlying
+  `AtomicU64::fetch_add` semantics. Use `try_inc_and_get` / `try_fetch_add`
+  for an explicit `MetricsError::Overflow` instead.
+- `src/counter.rs` (`saturating_add`, `inc_max`): replaced `SeqCst`
+  `compare_and_swap` in tight CAS loops with `Relaxed`
+  `compare_exchange_weak`. Observable behaviour is unchanged; the CAS loop
+  is now several times cheaper on modern x86 / aarch64.
+- `src/timer.rs` (`record_batch`): summed batch nanoseconds with `+=`,
+  which panicked in debug builds on overflow. Replaced with `saturating_add`
+  so adversarial inputs saturate at `u64::MAX` ns without crashing the
+  recorder. `try_record_batch` continues to return
+  `MetricsError::Overflow` instead.
+- `src/timer.rs` (`average`, `stats`): replaced the manual `if count > 0`
+  guard around `total_ns / count` with `checked_div(count)`, satisfying
+  Clippy `manual_checked_ops` while preserving the zero-count fallback
+  (`Duration::ZERO`).
+- `src/system_health.rs`: removed the redundant manual `unsafe impl Send
+  for SystemHealth {}` and `unsafe impl Sync for SystemHealth {}`. The
+  fields (`AtomicU32` / `AtomicU64` / `Instant` /
+  `parking_lot::Mutex<sysinfo::System>` / `sysinfo::Pid`) are all
+  `Send + Sync`, so the compiler derives both automatically. Matches the
+  cleanup applied to `Counter`/`Gauge`/`Timer`/`RateMeter` in 0.9.1.
+
+### Changed
+
+- `src/lib.rs` (`MetricsCore::counter` / `gauge` / `timer` / `rate` /
+  `time`): name arguments relaxed from `&'static str` to `&str`. String
+  literals and owned/borrowed runtime names both work; the first lookup
+  for a given name allocates the `String` key inside the registry,
+  subsequent lookups of the same name reuse the cached `Arc` with no
+  allocations on the hot path. This removes the only API-level reason to
+  call `Box::leak` on runtime-derived metric names.
+- `src/async_support.rs` (`AsyncMetricBatch::counter_inc`, `gauge_set`,
+  `timer_record`, `rate_tick`): name arguments relaxed from
+  `&'static str` to `impl Into<Cow<'static, str>>`. The `MetricUpdate`
+  enum stores `Cow<'static, str>` internally so static names cost nothing
+  extra and owned `String`s no longer require `Box::leak`.
+- `src/system_health.rs`: replaced `std::sync::Mutex<System>` with
+  `parking_lot::Mutex<System>` on the non-Linux sampling path. Removes
+  one `.unwrap()`/poison-handling site and reduces the lock cost on
+  contended snapshot reads. `parking_lot` was already a transitive
+  dependency.
+- `src/rate_meter.rs`: module documentation now explicitly states the
+  best-effort concurrency contract:
+  (a) at window boundaries, up to `num_threads − 1` ticks may land in the
+  new window's counter instead of the prior one (the monotonic
+  `total_events` is always correct), and
+  (b) `tick_if_under_limit` has TOCTOU semantics — multiple threads can
+  pass the `can_allow` check and `tick` before any of them observe the
+  others, overshooting the limit by up to `num_threads − 1` events. A
+  strict-admission `TokenBucket` primitive is planned for 0.9.5.
+- `Cargo.toml`: feature flags reorganized and re-commented for honesty —
+  - `histogram` and `serde` are now annotated as "reserved in 0.9.2" with
+    their full implementations landing in 0.9.3 alongside the telemetry
+    exporters. Enabling them today compiles cleanly but does not yet
+    expose new API.
+  - The unused `nightly` feature was removed.
+  - `all` now explicitly excludes `async` and `serde` (build subset for
+    environments that don't want Tokio/Serde); `full` is the
+    everything-on superset.
+- `Cargo.toml`: package description rewritten to remove inconsistent
+  nanosecond claims and add accurate qualifiers
+  ("High-performance Rust metrics library: sub-2ns counters, sub-1ns
+  gauges, …").
+- `Cargo.toml`: `cache_hit_miss`, `cpu_stats`, `memory_stats` examples now
+  have explicit `[[example]]` declarations; `cache_hit_miss` declares
+  `required-features = ["count", "timer"]` so `--no-default-features`
+  builds no longer fail at the examples target.
+- `examples/custom_exporter_openmetrics.rs`: rewritten to use the new
+  `&str`-accepting `MetricsCore` API. The per-iteration
+  `Box::leak(name.into_boxed_str())` calls have been removed — copying
+  this exporter into a long-lived `/metrics` handler no longer leaks one
+  string per metric per request.
+- `README.md`: empty "Comparison" table (every cell `N/A in this repo
+  run`) replaced with a single "Performance Notes" section that gives
+  the cached-handle numbers, explicitly distinguishes them from
+  `metrics().counter("name")` per-call cost, and notes that a populated
+  head-to-head against `metrics-rs` / `prometheus` / `statsd` will ship
+  with v1.0.0.
+- `README.md`, `docs/API.md`, `docs/PERFORMANCE_REVIEW.md`: all install
+  snippets and version references bumped from `0.9.1` to `0.9.2`.
+- `src/registry.rs`: feature-gated the `HashMap` / `Arc` / `RwLock`
+  imports so `--no-default-features` (no metric features enabled) builds
+  without `unused_imports` warnings.
+- `tests/api_md_doctest.rs`: feature-gated the `init` / `metrics` /
+  `Duration` imports the same way.
+
+### Added
+
+- `src/counter.rs`: new regression tests
+  `test_add_and_get_wraps_on_overflow_without_panic`,
+  `test_saturating_add_terminates_at_max`,
+  `test_inc_max_relaxed_cas_still_correct`.
+- `src/timer.rs`: new regression test
+  `test_record_batch_saturates_on_overflow_without_panic`.
+- `src/system_health.rs`: new regression test
+  `test_maybe_update_actually_refreshes_after_interval` that verifies
+  `last_update_ms` advances after sleeping past the throttle interval
+  (would have caught the time-unit bug above).
+- `docs/API.md`: `MetricsCore`, `Counter`, `Timer`, `SystemHealth`, and
+  `AsyncMetricBatch` sections gained explicit "v0.9.2" change-call-outs
+  next to each method whose behaviour or signature shifted.
+
+### Removed
+
+- `Cargo.toml`: the `nightly = []` feature (declared but never referenced
+  anywhere in the codebase).
+- `src/system_health.rs`: redundant manual `unsafe impl Send/Sync for
+  SystemHealth {}`.
+
+
+
 ## [0.9.1] - 2026-03-25
 
 ### Added
@@ -485,7 +629,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/jamesgober/metrics-lib/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/jamesgober/metrics-lib/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/jamesgober/metrics-lib/compare/v0.8.6...v0.9.0
 [0.8.6]: https://github.com/jamesgober/metrics-lib/compare/v0.8.3...v0.8.6

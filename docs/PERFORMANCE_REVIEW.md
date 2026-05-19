@@ -1,6 +1,6 @@
-# Performance and Architecture Review (v0.9.1)
+# Performance and Architecture Review (v0.9.2)
 
-This document summarizes the current performance profile and implementation status of `metrics-lib` as of `0.9.1`.
+This document summarizes the current performance profile and implementation status of `metrics-lib` as of `0.9.2`.
 
 ## Snapshot
 
@@ -95,4 +95,4 @@ cargo bench --bench metrics_bench --features meter
 
 ## Conclusion
 
-`metrics-lib` `0.9.1` is in a strong production-ready state for the validated configurations: fast hot-path updates, explicit feature gating, and passing test/lint/coverage/benchmark checks. Remaining risk is mostly environmental variance (hardware/power policy/OS noise), not a known architectural blocker in the current codebase.
+`metrics-lib` `0.9.2` is in a strong production-ready state for the validated configurations: fast hot-path updates, explicit feature gating, and passing test/lint/coverage/benchmark checks. Remaining risk is mostly environmental variance (hardware/power policy/OS noise), not a known architectural blocker in the current codebase.

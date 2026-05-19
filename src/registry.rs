@@ -5,7 +5,19 @@
 //! minimal contention. Write locks are only acquired when a new metric name is
 //! registered, which is expected to be an infrequent, one-time-per-name event.
 
+#[cfg(any(
+    feature = "count",
+    feature = "gauge",
+    feature = "timer",
+    feature = "meter"
+))]
 use std::collections::HashMap;
+#[cfg(any(
+    feature = "count",
+    feature = "gauge",
+    feature = "timer",
+    feature = "meter"
+))]
 use std::sync::{Arc, RwLock};
 
 #[cfg(feature = "count")]

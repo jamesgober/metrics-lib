@@ -167,13 +167,16 @@ impl Timer {
             return;
         }
 
-        let mut total_ns = 0u64;
+        let mut total_ns: u64 = 0;
         let mut local_min = u64::MAX;
         let mut local_max = 0u64;
 
         for duration in durations {
             let ns = duration.as_nanos() as u64;
-            total_ns += ns;
+            // Saturate on overflow rather than panic in debug builds. Real
+            // durations stay well clear of u64::MAX ns (~584 years); this is
+            // hardening against adversarial inputs.
+            total_ns = total_ns.saturating_add(ns);
             local_min = local_min.min(ns);
             local_max = local_max.max(ns);
         }
@@ -271,12 +274,11 @@ impl Timer {
     #[inline]
     pub fn average(&self) -> Duration {
         let count = self.count();
-        if count == 0 {
-            return Duration::ZERO;
-        }
-
         let total_ns = self.total_nanos.load(Ordering::Relaxed);
-        Duration::from_nanos(total_ns / count)
+        total_ns
+            .checked_div(count)
+            .map(Duration::from_nanos)
+            .unwrap_or(Duration::ZERO)
     }
 
     /// Get minimum duration
@@ -323,11 +325,10 @@ impl Timer {
         let max_ns = self.max_nanos.load(Ordering::Relaxed);
 
         let total = Duration::from_nanos(total_ns);
-        let average = if count > 0 {
-            Duration::from_nanos(total_ns / count)
-        } else {
-            Duration::ZERO
-        };
+        let average = total_ns
+            .checked_div(count)
+            .map(Duration::from_nanos)
+            .unwrap_or(Duration::ZERO);
 
         let min = if min_ns == u64::MAX {
             Duration::ZERO
@@ -823,6 +824,20 @@ mod tests {
         assert!(debug_str.contains("Timer"));
         assert!(debug_str.contains("count"));
         assert!(debug_str.contains("average"));
+    }
+
+    #[test]
+    fn test_record_batch_saturates_on_overflow_without_panic() {
+        // 0.9.2 regression: record_batch summed batch nanoseconds with `+=`,
+        // which panicked in debug builds on overflow. It now uses
+        // `saturating_add` so adversarial input cannot crash the recorder.
+        let timer = Timer::new();
+        let huge = Duration::from_nanos(u64::MAX / 2);
+        // Three of these would overflow u64; expect saturating behavior, no panic.
+        timer.record_batch(&[huge, huge, huge]);
+        assert_eq!(timer.count(), 3);
+        // total_nanos saturated at u64::MAX
+        assert_eq!(timer.total().as_nanos() as u64, u64::MAX);
     }
 
     #[test]

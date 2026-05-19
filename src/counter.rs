@@ -232,17 +232,29 @@ impl Counter {
     }
 
     /// Add amount and return new value
+    ///
+    /// On overflow the returned value wraps modulo `u64::MAX + 1`, matching
+    /// the underlying [`AtomicU64::fetch_add`] semantics (no panic in debug or
+    /// release builds). Use [`Counter::try_fetch_add`] for an explicit
+    /// `MetricsError::Overflow` instead.
     #[must_use]
     #[inline]
     pub fn add_and_get(&self, amount: u64) -> u64 {
-        self.value.fetch_add(amount, Ordering::Relaxed) + amount
+        self.value
+            .fetch_add(amount, Ordering::Relaxed)
+            .wrapping_add(amount)
     }
 
     /// Increment and return new value
+    ///
+    /// On overflow the returned value wraps to `0`, matching the underlying
+    /// [`AtomicU64::fetch_add`] semantics (no panic in debug or release
+    /// builds). Use [`Counter::try_inc_and_get`] for an explicit
+    /// `MetricsError::Overflow` instead.
     #[must_use]
     #[inline]
     pub fn inc_and_get(&self) -> u64 {
-        self.value.fetch_add(1, Ordering::Relaxed) + 1
+        self.value.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
     }
 
     /// Checked increment that returns new value or error on overflow
@@ -324,10 +336,14 @@ impl Counter {
     }
 
     /// Saturating add - won't overflow past u64::MAX
+    ///
+    /// Uses a `Relaxed` CAS loop on the hot path; no `SeqCst` cost. The loop
+    /// terminates either when the value is already at `u64::MAX` or when a CAS
+    /// succeeds.
     #[inline]
     pub fn saturating_add(&self, amount: u64) {
         loop {
-            let current = self.get();
+            let current = self.value.load(Ordering::Relaxed);
             let new_value = current.saturating_add(amount);
 
             // If no change needed (already at max), break
@@ -335,10 +351,14 @@ impl Counter {
                 break;
             }
 
-            // Try to update
-            match self.compare_and_swap(current, new_value) {
+            match self.value.compare_exchange_weak(
+                current,
+                new_value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
-                Err(_) => continue, // Retry with new current value
+                Err(_) => continue,
             }
         }
     }
@@ -392,17 +412,28 @@ impl Counter {
     }
 
     /// Increment with maximum value
+    ///
+    /// Uses a `Relaxed` CAS loop on the hot path; no `SeqCst` cost. Returns
+    /// `true` if the increment was applied (counter was below `max_value`),
+    /// `false` if the counter was already at or above the limit.
     #[inline]
     pub fn inc_max(&self, max_value: u64) -> bool {
         loop {
-            let current = self.get();
+            let current = self.value.load(Ordering::Relaxed);
             if current >= max_value {
                 return false;
             }
+            // Safe: current < max_value <= u64::MAX implies current < u64::MAX.
+            let new_value = current + 1;
 
-            match self.compare_and_swap(current, current + 1) {
+            match self.value.compare_exchange_weak(
+                current,
+                new_value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => return true,
-                Err(_) => continue, // Retry
+                Err(_) => continue,
             }
         }
     }
@@ -554,6 +585,52 @@ mod tests {
         let debug_str = format!("{counter:?}");
         assert!(debug_str.contains("Counter"));
         assert!(debug_str.contains("42"));
+    }
+
+    #[test]
+    fn test_add_and_get_wraps_on_overflow_without_panic() {
+        // 0.9.2 regression: add_and_get and inc_and_get used `+` which would
+        // panic in debug builds when crossing u64::MAX. They now wrap, matching
+        // the underlying fetch_add semantics.
+        let counter = Counter::with_value(u64::MAX);
+        let next = counter.inc_and_get();
+        assert_eq!(next, 0, "inc_and_get should wrap to 0 past u64::MAX");
+        // Subsequent inc lands on 1
+        assert_eq!(counter.inc_and_get(), 1);
+
+        let counter = Counter::with_value(u64::MAX - 2);
+        let next = counter.add_and_get(5);
+        assert_eq!(
+            next, 2,
+            "add_and_get should wrap: (u64::MAX-2) + 5 == 2 mod 2^64"
+        );
+    }
+
+    #[test]
+    fn test_saturating_add_terminates_at_max() {
+        // 0.9.2 regression: saturating_add previously used SeqCst CAS in a
+        // tight loop. Now uses Relaxed compare_exchange_weak. Behavior must
+        // remain identical.
+        let counter = Counter::with_value(u64::MAX - 3);
+        counter.saturating_add(100);
+        assert_eq!(counter.get(), u64::MAX);
+
+        // Already-at-max no-op short-circuit
+        counter.saturating_add(1);
+        assert_eq!(counter.get(), u64::MAX);
+    }
+
+    #[test]
+    fn test_inc_max_relaxed_cas_still_correct() {
+        // 0.9.2 regression: inc_max switched from SeqCst CAS to Relaxed.
+        // Single-threaded behavior must remain identical.
+        let counter = Counter::with_value(5);
+        assert!(counter.inc_max(7));
+        assert_eq!(counter.get(), 6);
+        assert!(counter.inc_max(7));
+        assert_eq!(counter.get(), 7);
+        assert!(!counter.inc_max(7));
+        assert_eq!(counter.get(), 7);
     }
 
     #[test]

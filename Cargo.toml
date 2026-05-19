@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "metrics-lib"
-version = "0.9.1"
+version = "0.9.2"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.70"
@@ -22,7 +22,7 @@ license = "Apache-2.0"
 readme = "README.md"
 
 # Description
-description = "The fastest metrics library for Rust. Lock-free 0.6ns gauges, 18ns counters, timers, rate meters, async timing, adaptive sampling, and system health. Cross-platform with minimal dependencies."
+description = "High-performance Rust metrics library: sub-2ns counters, sub-1ns gauges, nanosecond timers, tumbling-window rate meters, async timing, adaptive sampling, and system health. Cross-platform with minimal dependencies."
 
 # Keywords (5 total)
 keywords = [
@@ -54,56 +54,46 @@ authors = [
 # FEATURE FLAGS
 # #################################
 [features]
-count       = [] # Enables count.
-gauge       = [] # Enables gauge.
-timer       = [] # Enables timer.
-meter       = [] # Enables rate meter.
-sample      = [] # Enable statistical sampling..
-bench-tests = [] # Enable running benchmark-style tests in CI or locally
+# Core metric types — each gates its own module and re-exports.
+count       = []
+gauge       = []
+timer       = []
+meter       = []
 
-# Enables async support (requires Tokio).
-async       = ["dep:tokio"] 
+# Adaptive sampling / circuit breaker / backpressure controllers.
+sample      = []
 
-# Enable histogram
-histogram   = ["sample"] 
+# Enable running benchmark-style assertions inside `cargo test` (slow,
+# timing-coupled; gated and ignored by default).
+bench-tests = []
 
-# Enables all stable features (no async).
-all = [ 
-    "count", 
-    "gauge", 
-    "timer", 
-    "meter", 
-    "sample",
-    "histogram", 
-] 
+# Enables async support (Tokio runtime helpers + AsyncMetricsBatcher).
+async       = ["dep:tokio"]
 
-# Enables all features including async and serde.
-full = [
-    "count",
-    "gauge",
-    "timer",
-    "meter",
-    "sample",
-    "histogram",
-    "async",
-    "serde",
-]
+# Histogram type with configurable buckets and quantile estimation.
+#
+# Reserved in 0.9.2 (depends on `sample`); the type lands in 0.9.3 along
+# with the telemetry exporters. Enabling this flag today compiles cleanly
+# but does not yet expose a Histogram API.
+histogram   = ["sample"]
 
-# Wire serde feature to the optional dep.
-serde = ["dep:serde"]
+# Wire Serde derive support for stats and snapshot types.
+#
+# Reserved in 0.9.2; full `Serialize`/`Deserialize` impls for `CounterStats`,
+# `GaugeStats`, `TimerStats`, `RateStats`, `SystemSnapshot`, `ProcessStats`,
+# and `HealthStatus` land in 0.9.3 alongside the JSON snapshot exporter.
+serde       = ["dep:serde"]
 
-# Default features (all enabled).
-default = [ 
-    "count", 
-    "gauge", 
-    "timer", 
-] 
+# Aggregate flags. `all` excludes runtime-dependent features so it can be
+# enabled on environments that don't link against Tokio or Serde.
+all  = ["count", "gauge", "timer", "meter", "sample", "histogram"]
+full = ["count", "gauge", "timer", "meter", "sample", "histogram", "async", "serde"]
 
-# Minimal build: only the counter feature, no other defaults.
+# Default build: counters + gauges + timers (the most common subset).
+default = ["count", "gauge", "timer"]
+
+# Smallest useful build (counter only).
 minimal = ["count"]
-
-# Enables nightly Rust features for testing.
-nightly = []
 
 
 
@@ -163,6 +153,18 @@ required-features = ["async", "meter"]
 [[example]]
 name = "axum_registry_integration"
 required-features = ["async", "meter"]
+
+# Examples that use specific metric features.
+[[example]]
+name = "cache_hit_miss"
+required-features = ["count", "timer"]
+
+# System health examples — only need SystemHealth (always compiled), no metric feature gates required.
+[[example]]
+name = "cpu_stats"
+
+[[example]]
+name = "memory_stats"
 
 
 

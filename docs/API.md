@@ -120,7 +120,7 @@ EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-metrics-lib = "0.9.1"
+metrics-lib = "0.9.2"
 ```
 
 <br>
@@ -268,25 +268,40 @@ fn startup() {
 Source: `src/lib.rs` (`MetricsCore`)
 
 - `MetricsCore::new() -> Self`
-- `counter(name: &'static str) -> Arc<Counter>`
-- `gauge(name: &'static str) -> Arc<Gauge>`
-- `timer(name: &'static str) -> Arc<Timer>`
-- `rate(name: &'static str) -> Arc<RateMeter>`
-- `time<T>(name: &'static str, f: impl FnOnce() -> T) -> T`
+- `counter(name: &str) -> Arc<Counter>`
+- `gauge(name: &str) -> Arc<Gauge>`
+- `timer(name: &str) -> Arc<Timer>`
+- `rate(name: &str) -> Arc<RateMeter>`
+- `time<T>(name: &str, f: impl FnOnce() -> T) -> T`
 - `system() -> &SystemHealth`
 - `registry() -> &Registry`
 
+**v0.9.2 note:** `name` is now `&str` (was `&'static str`). String literals
+still work unchanged; runtime-derived names (per-route, per-tenant, etc.) work
+without `Box::leak`. Repeated lookups of the same name return the same `Arc`
+and perform no allocation on the hot path; the first registration allocates
+a `String` key inside the registry.
+
 Patterns:
 ```rust
+use metrics_lib::{init, metrics};
+init();
+
+// Static name (compile-time string literal).
 let c = metrics().counter("requests");
 c.inc();
 c.add(5);
- 
+
 let g = metrics().gauge("temp_c");
 g.set(21.5);
- 
+
+// Runtime-derived name (was previously `Box::leak`'d).
+let tenant_id = "acme";
+let key = format!("requests.tenant.{tenant_id}");
+metrics().counter(&key).inc();
+
 // Measure work
-metrics().time("render", || render_frame());
+metrics().time("render", || { /* render frame */ });
 ```
 
 <br>
@@ -335,8 +350,17 @@ Core methods (ultra-fast, lock-free):
 - `get() -> u64`, `is_zero() -> bool`, `age() -> Duration`, `rate_per_second() -> f64`
 - `reset()`, `set(value: u64)`, `compare_and_swap(expected, new) -> Result<u64,u64>`
 - `fetch_add(amount) -> u64`, `add_and_get(amount) -> u64`, `inc_and_get() -> u64`
+  - **v0.9.2:** `add_and_get` and `inc_and_get` now use `wrapping_add` and
+    will not panic on overflow in debug builds. The returned value wraps
+    modulo `2^64`, matching `AtomicU64::fetch_add` semantics. Use the
+    checked variants (`try_inc_and_get`, `try_fetch_add`) when an explicit
+    `MetricsError::Overflow` is required.
 - `saturating_add(amount)`
+  - **v0.9.2:** internally uses `Relaxed compare_exchange_weak` (no more
+    `SeqCst`); observable behaviour unchanged.
 - `batch_inc(count: usize)`, `inc_if(condition: bool)`, `inc_max(max_value: u64) -> bool`
+  - **v0.9.2:** `inc_max` switched to `Relaxed` CAS for the same
+    performance improvement.
 - `stats() -> CounterStats`
 
 Example:
@@ -403,6 +427,10 @@ Common methods:
 - `record(duration: Duration)`
 - `record_ns(ns: u64)` — fastest manual record path
 - `record_batch(durations: &[Duration])`
+  - **v0.9.2:** batch totals are summed with `saturating_add` instead of
+    `+=`. Adversarial inputs that would have panicked in debug builds now
+    saturate at `u64::MAX` nanoseconds without panicking. The `try_record_batch`
+    checked variant continues to return `MetricsError::Overflow` instead.
 - `count() -> u64`, `total() -> Duration`, `min() -> Duration`, `max() -> Duration`, `average() -> Duration`
 - `stats() -> TimerStats { count, total, average, min, max, age, rate_per_second }`
 - Helpers: macro/utility functions for timing blocks and functions (see source).
@@ -475,6 +503,23 @@ Key methods (see `src/system_health.rs` for full details):
 - `health_score() -> f64`, `quick_check() -> HealthStatus`
 - `update()` (force refresh), `snapshot() -> SystemSnapshot`, `process() -> ProcessStats`
 
+**v0.9.2 — refresh fixes:**
+- `maybe_update()` now stores and compares the last-refresh timestamp in a
+  single time unit (milliseconds). Earlier revisions stored nanoseconds and
+  compared milliseconds, freezing the throttle so all values were pinned to
+  their initial reads. After upgrade, `cpu_used()` / `mem_used_mb()` /
+  `load_avg()` / process metrics refresh on the configured interval as
+  documented.
+- `SystemSnapshot::last_update` now reports **time since last refresh**
+  (e.g., `Duration::from_millis(0..=interval_ms)`), not "monotonic time at
+  last refresh" as it incorrectly did before.
+- Linux process CPU is now delta-sampled: `((utime+stime) - prev) /
+  (CLK_TCK * elapsed_s * cores) * 100`, normalized per-core and clamped to
+  `0..=100`. First sample returns `0.0` and seeds the baseline.
+- The non-Linux sysinfo refresh now uses `parking_lot::Mutex` instead of
+  `std::sync::Mutex`. The redundant manual `unsafe impl Send/Sync` for
+  `SystemHealth` was removed (the compiler derives both automatically).
+
 Example:
 ```rust
 use metrics_lib::{init, metrics};
@@ -517,7 +562,12 @@ Source: `src/async_support.rs`
 - `AsyncTimerGuard` — RAII timing for async blocks
 - `AsyncTimerExt` — extension trait providing `start_async()` and `time_async()`
 - `TimedFuture` — `Future` wrapper returned by `time_async()`
-- `AsyncMetricBatch` — batch metric updates with `counter_inc`, `gauge_set`, `timer_record`, `rate_tick`, `flush(&MetricsCore)`
+- `AsyncMetricBatch` — batch metric updates with `counter_inc`, `gauge_set`,
+  `timer_record`, `rate_tick`, `flush(&MetricsCore)`.
+  - **v0.9.2 note:** name arguments are now `impl Into<Cow<'static, str>>`
+    (was `&'static str`). Both string literals and owned `String`s are
+    accepted; the enum stores `Cow<'static, str>` internally so static names
+    cost nothing extra.
 
 Example (Tokio):
 ```rust

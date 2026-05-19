@@ -151,30 +151,44 @@ impl MetricsCore {
     }
 
     /// Get or create a counter by name. Requires the `count` feature.
+    ///
+    /// `name` is accepted as `&str` — string literals (`"counter"`) and
+    /// owned/borrowed runtime names both work. The first lookup for a given
+    /// name allocates a `String` key inside the registry; subsequent lookups
+    /// of the same name reuse the cached `Arc` and perform no allocations.
     #[cfg(feature = "count")]
     #[inline(always)]
-    pub fn counter(&self, name: &'static str) -> std::sync::Arc<Counter> {
+    pub fn counter(&self, name: &str) -> std::sync::Arc<Counter> {
         self.registry.get_or_create_counter(name)
     }
 
     /// Get or create a gauge by name. Requires the `gauge` feature.
+    ///
+    /// `name` is accepted as `&str` — see [`Self::counter`] for allocation
+    /// semantics.
     #[cfg(feature = "gauge")]
     #[inline(always)]
-    pub fn gauge(&self, name: &'static str) -> std::sync::Arc<Gauge> {
+    pub fn gauge(&self, name: &str) -> std::sync::Arc<Gauge> {
         self.registry.get_or_create_gauge(name)
     }
 
     /// Get or create a timer by name. Requires the `timer` feature.
+    ///
+    /// `name` is accepted as `&str` — see [`Self::counter`] for allocation
+    /// semantics.
     #[cfg(feature = "timer")]
     #[inline(always)]
-    pub fn timer(&self, name: &'static str) -> std::sync::Arc<Timer> {
+    pub fn timer(&self, name: &str) -> std::sync::Arc<Timer> {
         self.registry.get_or_create_timer(name)
     }
 
     /// Get or create a rate meter by name. Requires the `meter` feature.
+    ///
+    /// `name` is accepted as `&str` — see [`Self::counter`] for allocation
+    /// semantics.
     #[cfg(feature = "meter")]
     #[inline(always)]
-    pub fn rate(&self, name: &'static str) -> std::sync::Arc<RateMeter> {
+    pub fn rate(&self, name: &str) -> std::sync::Arc<RateMeter> {
         self.registry.get_or_create_rate_meter(name)
     }
 
@@ -182,7 +196,7 @@ impl MetricsCore {
     /// Requires the `timer` feature.
     #[cfg(feature = "timer")]
     #[inline]
-    pub fn time<T>(&self, name: &'static str, f: impl FnOnce() -> T) -> T {
+    pub fn time<T>(&self, name: &str, f: impl FnOnce() -> T) -> T {
         let binding = self.timer(name);
         let timer = binding.start();
         let result = f();

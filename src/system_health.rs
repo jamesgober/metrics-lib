@@ -30,7 +30,7 @@ pub struct SystemHealth {
     process_cpu: AtomicU32,
     /// System memory usage in MB
     system_memory_mb: AtomicU64,
-    /// Process memory usage in MB  
+    /// Process memory usage in MB
     process_memory_mb: AtomicU64,
     /// System load average (1 min * 100)
     load_average: AtomicU32,
@@ -40,14 +40,25 @@ pub struct SystemHealth {
     fd_count: AtomicU32,
     /// Overall health score (0-10000, where 10000 = 100%)
     health_score: AtomicU32,
-    /// Last update timestamp
-    last_update: AtomicU64,
+    /// Milliseconds since `created_at` at the last metrics refresh.
+    ///
+    /// Stored as a single time unit (milliseconds) so the throttle check in
+    /// [`Self::maybe_update`] compares like-for-like. Earlier revisions stored
+    /// this as nanoseconds while the throttle compared it against
+    /// `update_interval_ms`, freezing refreshes indefinitely.
+    last_update_ms: AtomicU64,
     /// Update interval in milliseconds
     update_interval_ms: u64,
     /// Creation timestamp
     created_at: Instant,
+    /// Linux-only delta-sample state for process CPU. Stores `(prev_clock_ticks, prev_elapsed_ms)`.
+    /// `prev_elapsed_ms = u64::MAX` sentinel = "no prior sample yet".
+    #[cfg(target_os = "linux")]
+    proc_cpu_prev: std::sync::atomic::AtomicU64,
+    #[cfg(target_os = "linux")]
+    proc_cpu_prev_ms: std::sync::atomic::AtomicU64,
     #[cfg(not(target_os = "linux"))]
-    sys: std::sync::Mutex<System>,
+    sys: parking_lot::Mutex<System>,
     #[cfg(not(target_os = "linux"))]
     pid: Option<sysinfo::Pid>,
 }
@@ -103,11 +114,15 @@ impl SystemHealth {
             thread_count: AtomicU32::new(0),
             fd_count: AtomicU32::new(0),
             health_score: AtomicU32::new(10000), // Start with perfect health
-            last_update: AtomicU64::new(0),
+            last_update_ms: AtomicU64::new(0),
             update_interval_ms: 1000, // 1 second default
             created_at: Instant::now(),
+            #[cfg(target_os = "linux")]
+            proc_cpu_prev: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(target_os = "linux")]
+            proc_cpu_prev_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
             #[cfg(not(target_os = "linux"))]
-            sys: std::sync::Mutex::new(System::new()),
+            sys: parking_lot::Mutex::new(System::new()),
             #[cfg(not(target_os = "linux"))]
             pid: get_current_pid().ok(),
         };
@@ -219,12 +234,10 @@ impl SystemHealth {
     pub fn snapshot(&self) -> SystemSnapshot {
         self.maybe_update();
 
-        let last_update_ns = self.last_update.load(Ordering::Relaxed);
-        let last_update = if last_update_ns > 0 {
-            Duration::from_nanos(last_update_ns)
-        } else {
-            Duration::ZERO
-        };
+        // Report **time since last update** (not "monotonic ms at last update").
+        let now_ms = self.created_at.elapsed().as_millis() as u64;
+        let last_ms = self.last_update_ms.load(Ordering::Relaxed);
+        let last_update = Duration::from_millis(now_ms.saturating_sub(last_ms));
 
         SystemSnapshot {
             system_cpu_percent: self.system_cpu.load(Ordering::Relaxed) as f64 / 100.0,
@@ -256,16 +269,16 @@ impl SystemHealth {
 
     #[inline]
     fn maybe_update(&self) {
-        let now = self.created_at.elapsed().as_millis() as u64;
-        let last_update = self.last_update.load(Ordering::Relaxed);
+        let now_ms = self.created_at.elapsed().as_millis() as u64;
+        let last_ms = self.last_update_ms.load(Ordering::Relaxed);
 
-        if now >= last_update && (now - last_update) > self.update_interval_ms {
+        if now_ms.saturating_sub(last_ms) > self.update_interval_ms {
             self.update_metrics();
         }
     }
 
     fn update_metrics(&self) {
-        let now_ns = self.created_at.elapsed().as_nanos() as u64;
+        let now_ms = self.created_at.elapsed().as_millis() as u64;
 
         // Update system metrics
         if let Ok(cpu) = self.get_system_cpu() {
@@ -305,7 +318,7 @@ impl SystemHealth {
         self.health_score
             .store((health * 100.0) as u32, Ordering::Relaxed);
 
-        self.last_update.store(now_ns, Ordering::Relaxed);
+        self.last_update_ms.store(now_ms, Ordering::Relaxed);
     }
 
     fn calculate_health_score(&self) -> f64 {
@@ -399,7 +412,7 @@ impl SystemHealth {
     #[cfg(not(target_os = "linux"))]
     fn get_system_cpu(&self) -> io::Result<f64> {
         // Cross-platform via sysinfo
-        let mut guard = self.sys.lock().unwrap();
+        let mut guard = self.sys.lock();
         guard.refresh_cpu();
         Ok(guard.global_cpu_info().cpu_usage() as f64)
     }
@@ -445,7 +458,7 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_system_memory_mb(&self) -> io::Result<u64> {
-        let mut guard = self.sys.lock().unwrap();
+        let mut guard = self.sys.lock();
         guard.refresh_memory();
         // sysinfo reports memory in KiB
         let used_kib = guard.used_memory();
@@ -465,32 +478,55 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_load_average(&self) -> io::Result<f64> {
-        let guard = self.sys.lock().unwrap();
+        let guard = self.sys.lock();
         let la = guard.load_average();
         Ok(la.one)
     }
 
     #[cfg(target_os = "linux")]
     fn get_process_cpu(&self) -> io::Result<f64> {
+        // Delta sample: ((utime + stime) - prev) / (clock_ticks_per_sec * elapsed_s * cores) * 100
+        // First sample returns 0 (no prior baseline) and seeds the state.
         let contents = std::fs::read_to_string("/proc/self/stat")?;
         let parts: Vec<&str> = contents.split_whitespace().collect();
-
-        if parts.len() >= 15 {
-            let utime: u64 = parts[13].parse().unwrap_or(0);
-            let stime: u64 = parts[14].parse().unwrap_or(0);
-            let total = utime + stime;
-
-            // This is a simplified calculation - real CPU% would need
-            // to track changes over time and account for clock ticks
-            Ok(total as f64 * 0.01) // Very rough approximation
-        } else {
-            Ok(0.0)
+        if parts.len() < 15 {
+            return Ok(0.0);
         }
+        let utime: u64 = parts[13].parse().unwrap_or(0);
+        let stime: u64 = parts[14].parse().unwrap_or(0);
+        let total_ticks = utime.saturating_add(stime);
+        let now_ms = self.created_at.elapsed().as_millis() as u64;
+
+        let prev_ticks = self.proc_cpu_prev.load(Ordering::Relaxed);
+        let prev_ms = self.proc_cpu_prev_ms.load(Ordering::Relaxed);
+
+        // Store current sample for the next call.
+        self.proc_cpu_prev.store(total_ticks, Ordering::Relaxed);
+        self.proc_cpu_prev_ms.store(now_ms, Ordering::Relaxed);
+
+        if prev_ms == u64::MAX {
+            // First sample — no delta yet.
+            return Ok(0.0);
+        }
+        let elapsed_ms = now_ms.saturating_sub(prev_ms);
+        if elapsed_ms == 0 {
+            return Ok(0.0);
+        }
+        let delta_ticks = total_ticks.saturating_sub(prev_ticks) as f64;
+        // Linux clock ticks per second is conventionally 100; the precise value
+        // would come from `sysconf(_SC_CLK_TCK)`, but the standard kernel build
+        // uses USER_HZ=100 and this matches `/proc/stat` semantics.
+        let clk_tck: f64 = 100.0;
+        let elapsed_s = elapsed_ms as f64 / 1000.0;
+        let cores = num_cpus::get().max(1) as f64;
+        // Per-core percentage: 100% means one whole core saturated.
+        let pct = (delta_ticks / (clk_tck * elapsed_s * cores)) * 100.0;
+        Ok(pct.clamp(0.0, 100.0))
     }
 
     #[cfg(not(target_os = "linux"))]
     fn get_process_cpu(&self) -> io::Result<f64> {
-        let mut guard = self.sys.lock().unwrap();
+        let mut guard = self.sys.lock();
         if let Some(pid) = self.pid {
             guard.refresh_process(pid);
             if let Some(proc_) = guard.process(pid) {
@@ -522,7 +558,7 @@ impl SystemHealth {
 
     #[cfg(not(target_os = "linux"))]
     fn get_process_memory_mb(&self) -> io::Result<u64> {
-        let mut guard = self.sys.lock().unwrap();
+        let mut guard = self.sys.lock();
         if let Some(pid) = self.pid {
             guard.refresh_process(pid);
             if let Some(proc_) = guard.process(pid) {
@@ -648,8 +684,10 @@ impl std::fmt::Display for HealthStatus {
 }
 
 // Thread safety
-unsafe impl Send for SystemHealth {}
-unsafe impl Sync for SystemHealth {}
+// SystemHealth is composed of atomic types (Send + Sync), `Instant` (Send +
+// Sync), `parking_lot::Mutex<sysinfo::System>` (Send + Sync via the contained
+// `System: Send`), and a `sysinfo::Pid` (Send + Sync). The compiler derives
+// Send + Sync automatically; no explicit `unsafe impl` is required.
 
 #[cfg(test)]
 mod tests {
@@ -762,6 +800,41 @@ mod tests {
         // Should still work with custom interval
         let _cpu = health.cpu_used();
         let _score = health.health_score();
+    }
+
+    #[test]
+    fn test_maybe_update_actually_refreshes_after_interval() {
+        // 0.9.2 regression: maybe_update previously compared milliseconds
+        // against a nanosecond-typed `last_update`, which froze the throttle
+        // and pinned all values to their initial reads. After the fix,
+        // `last_update_ms` is observed to advance once the interval elapses.
+        let health = SystemHealth::with_interval(Duration::from_millis(50));
+        let snap_before = health.snapshot();
+        let last_ms_before = health.last_update_ms.load(Ordering::Relaxed);
+
+        // Sleep beyond the interval and then poke the cache.
+        thread::sleep(Duration::from_millis(120));
+        let _ = health.cpu_used(); // triggers maybe_update path
+        let snap_after = health.snapshot();
+        let last_ms_after = health.last_update_ms.load(Ordering::Relaxed);
+
+        assert!(
+            last_ms_after > last_ms_before,
+            "last_update_ms should advance after sleeping past the throttle interval \
+             (before={last_ms_before}, after={last_ms_after})",
+        );
+        // The `last_update` Duration on the snapshot should be small (since
+        // we just refreshed) rather than equal-to-monotonic-time-since-creation,
+        // which was the prior bug.
+        assert!(
+            snap_after.last_update <= Duration::from_secs(1),
+            "snapshot.last_update should be 'time since last refresh', \
+             got {:?}",
+            snap_after.last_update,
+        );
+        // Sanity: snapshot fields still produce finite values.
+        assert!(snap_before.system_cpu_percent.is_finite());
+        assert!(snap_after.system_cpu_percent.is_finite());
     }
 
     #[test]

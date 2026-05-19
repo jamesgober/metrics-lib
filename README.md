@@ -4,7 +4,7 @@
     <b>metrics-lib</b>
     <br>
     <sub>
-        <sup>PERFORMANCE &nbsp;+&nbsp; DIAGNOSTICS</sup>
+        <sup>RUST PERFORMANCE DIAGNOSTICS</sup>
     </sub>
 </h1>
 
@@ -137,13 +137,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.9.1"
+metrics-lib = "0.9.2"
 
 # Optional features
-metrics-lib = { version = "0.9.1", features = ["async"] }
+metrics-lib = { version = "0.9.2", features = ["async"] }
 
 # Full feature set (stable + async + serde)
-metrics-lib = { version = "0.9.1", features = ["full"] }
+metrics-lib = { version = "0.9.2", features = ["full"] }
 ```
 
 <hr>
@@ -535,14 +535,27 @@ cargo test --target x86_64-unknown-linux-gnu
 <hr>
 <br>
 
-## Comparison
+## Performance Notes
 
-| Library | Counter ns/op | Gauge ns/op | Timer ns/op | Memory/Metric | Features |
-|---------|---------------|-------------|-------------|---------------|----------|
-| **metrics-lib (latest local run)** | **1.48** | **0.40** | **3.17** | **64B** | ✅ Async, Circuit breakers, System monitoring |
-| metrics-rs | N/A in this repo run | N/A in this repo run | N/A in this repo run | N/A in this repo run | External crate |
-| prometheus | N/A in this repo run | N/A in this repo run | N/A in this repo run | N/A in this repo run | External crate |
-| statsd | N/A in this repo run | N/A in this repo run | N/A in this repo run | N/A in this repo run | External crate |
+Latest local Criterion means (Windows x86_64, Rust stable, release build,
+**held `Arc<Counter>` / `Arc<Gauge>` / `Arc<Timer>` handle** — see Methodology
+above):
+
+| Operation         | ns/op | M ops/sec | Memory/metric |
+|-------------------|------:|----------:|--------------:|
+| Counter increment |  1.48 |    676.36 |          64 B |
+| Gauge set         |  0.40 |   2500.31 |          64 B |
+| Timer record      |  3.17 |    314.99 |          64 B |
+
+**Calling `metrics().counter("name")` on every increment is slower** than
+holding the `Arc` — the global lookup costs an `RwLock` read + `HashMap` hit
++ `Arc::clone()`. Cache the handle in hot loops. A side-by-side bench
+(`global_metrics` group in `cargo bench`) shows the realistic global-lookup
+cost for comparison.
+
+A populated head-to-head comparison against `metrics-rs`, `prometheus`, and
+`statsd` will ship with the v1.0.0 release once equivalent test fixtures are
+in place.
 
 <hr>
 <br>
@@ -567,13 +580,13 @@ cargo test --target x86_64-unknown-linux-gnu
 
 ```toml
 # All stable features:
-metrics-lib = { version = "0.9.1", features = ["all"] }
+metrics-lib = { version = "0.9.2", features = ["all"] }
 
 # Full build including async and serde:
-metrics-lib = { version = "0.9.1", features = ["full"] }
+metrics-lib = { version = "0.9.2", features = ["full"] }
 
 # Minimal build (counter only):
-metrics-lib = { version = "0.9.1", features = ["minimal"] }
+metrics-lib = { version = "0.9.2", features = ["minimal"] }
 ```
 
 ### Runtime Configuration

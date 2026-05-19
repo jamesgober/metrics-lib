@@ -4,7 +4,12 @@
 //! In this repository setup, the previous harness produced `running 0 tests`
 //! during `cargo test`, so it did not contribute executable coverage.
 
+#[cfg(any(
+    all(feature = "count", feature = "gauge", feature = "timer"),
+    feature = "meter"
+))]
 use metrics_lib::{init, metrics};
+#[cfg(all(feature = "count", feature = "gauge", feature = "timer"))]
 use std::time::Duration;
 
 #[test]
