@@ -2,7 +2,7 @@
 // Chaos Testing Suite: concurrent access and system pressure
 // Gated to avoid CI flakiness and long runtimes by default.
 // Run with: cargo test --features bench-tests -- --ignored --test chaos_tests
-#![cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
+#![cfg(all(test, feature = "bench-tests", not(tarpaulin), not(coverage)))]
 
 use std::sync::Arc;
 use std::thread;

@@ -1022,7 +1022,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "bench-tests", not(tarpaulin)))]
+#[cfg(all(test, feature = "bench-tests", not(tarpaulin), not(coverage)))]
 #[allow(unused_imports)]
 mod benchmarks {
     use super::*;

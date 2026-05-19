@@ -84,6 +84,13 @@ jobs:
       uses: taiki-e/install-action@cargo-llvm-cov
     - name: Generate coverage summary and enforce threshold (85%)
       shell: bash
+      # `--cfg coverage` activates the `not(coverage)` gates on the
+      # timing-coupled `bench-tests` modules so they don't fire under
+      # llvm-cov instrumentation (where their `< Nns/op` assertions are
+      # unreliable). The functional code paths are still exercised by
+      # the regular unit tests and Criterion bench targets.
+      env:
+        RUSTFLAGS: "--cfg coverage"
       run: |
         set -euxo pipefail
         cargo llvm-cov --summary-only --workspace --all-features \
@@ -91,6 +98,8 @@ jobs:
           --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
     - name: Generate LCOV report
       shell: bash
+      env:
+        RUSTFLAGS: "--cfg coverage"
       run: |
         set -euxo pipefail
         mkdir -p target/coverage
