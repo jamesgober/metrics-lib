@@ -10,6 +10,96 @@
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-05-18
+
+**Performance Tuning release.** Replaces the lazy `SystemHealth::maybe_update`
+read-path mutex with a dedicated background sampler thread (readers are now
+pure atomic loads), removes the 16 timing-coupled `assert!(elapsed/iter < N)`
+bench-test assertions that flaked on coverage runs, tightens the histogram
+hot path, and expands the Criterion suite with labels, histogram, exporter,
+and cached-handle-vs-global-lookup benchmarks. Zero breaking changes.
+
+### Added
+
+- `src/system_health.rs` — new `HealthInner` struct holds the atomic state;
+  `SystemHealth` now wraps `Arc<HealthInner>` + an owned `SamplerHandle`.
+  A named OS thread (`metrics-lib-health-sampler`) wakes every
+  `update_interval_ms` and refreshes the cached values via
+  `inner.update_metrics()`. Readers (`cpu_used` / `mem_used_mb` /
+  `health_score` / `snapshot` / `process` / …) load atomics directly with
+  no mutex acquisition.
+- `SystemHealth::manual()` — convenience constructor for the
+  no-sampler-thread mode (equivalent to
+  `SystemHealth::with_interval(Duration::ZERO)`). Callers in tests,
+  short-lived snapshots, or other zero-thread environments can opt out of
+  the background sampler.
+- `SystemHealth::update_interval_ms() -> u64` — exposes the configured
+  interval (`0` = manual mode).
+- `SamplerHandle` — internal RAII guard that owns the sampler thread.
+  `Drop` sets a stop flag, unparks the thread, and joins it; sleeps are
+  bounded to `MAX_SLEEP_CHUNK_MS = 1000 ms` so `Drop` latency is capped
+  even on long configured intervals.
+- New regression tests: `test_background_sampler_refreshes_snapshot_after_interval`,
+  `test_manual_mode_does_not_spawn_sampler`,
+  `test_custom_interval_floors_to_50ms`,
+  `test_drop_joins_sampler_thread`.
+- `benches/metrics_bench.rs` — five new Criterion groups:
+  - `labels` — `LabelSet::from`, `to_prometheus`, hashing.
+  - `histogram` (feature-gated) — `observe` on the default-seconds /
+    5-bucket / 11-bucket layouts, concurrent 4-thread observe, `quantile`,
+    `snapshot`.
+  - `exporters` — full-registry render benchmarks for Prometheus,
+    OpenMetrics, JSON, StatsD, and OTLP (each behind its feature gate).
+  - `cached_vs_global` — counter increment on a cached `Arc` vs.
+    `metrics().counter("name").inc()` per call vs. labeled global lookup.
+    Makes the cached-handle hot-path advantage measurable on the user's
+    own hardware.
+- `docs/PERFORMANCE_REVIEW.md` — rewritten for v0.9.4 with bench-group
+  inventory, cached-vs-global-lookup distinction, methodology, and the
+  full local reproduction recipe.
+
+### Changed
+
+- `src/histogram.rs` (`observe`, `observe_finite`): tightened the hot
+  path. `#[inline(always)]` on both, and the bucket store uses
+  `bucket_counts.get(idx)` (single bounds check + index op) instead of
+  the previous `idx < len` branch followed by `[idx]` indexing.
+  Functional behaviour and atomic ordering are unchanged. Documentation
+  block now spells out the three `Relaxed` ops on the success path.
+- `src/{counter,gauge,timer,rate_meter,system_health}.rs` (`mod
+  benchmarks`): removed the 16 inline `assert!(elapsed.as_nanos() /
+  iterations < N)` timing-coupled assertions. The bench-test loops still
+  print ns/op for ad-hoc inspection and verify the operation count;
+  Criterion (and the GitHub-Pages-hosted benchmark-regression action) is
+  the authoritative regression detector.
+- `src/system_health.rs` — every public read accessor is now a pure
+  atomic load on `self.inner.*` with no `maybe_update()` call. Snapshot
+  reads on macOS/Windows no longer briefly serialise on the
+  `sysinfo::System` mutex; that mutex is now exclusively the sampler
+  thread's domain.
+- `.github/workflows/{ci,setup-gh-pages}.yml` — added
+  `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"` at the top-level `env:` so
+  every JS action (`actions/checkout@v4`, `actions/cache@v4`,
+  `actions/upload-artifact@v4`, …) runs on Node.js 24, silencing the
+  "Node.js 20 actions are deprecated" runner warnings ahead of GitHub's
+  June 2026 forced migration. `bench.yml` already had this flag set.
+- `README.md` — new "Telemetry & Exporters" matrix prominently
+  showcasing all five exporters with feature flags + output types. The
+  "Performance First" callouts now distinguish cached-handle numbers from
+  the global-lookup path, and version refs are bumped to `0.9.4`.
+- `Cargo.toml` package version → `0.9.4`. `docs/API.md` install snippets
+  bumped to `0.9.4`. No feature flag changes.
+
+### Fixed
+
+- `src/system_health.rs::run_sampler` — uses a manual ceiling-division
+  expression (`(interval_ms + MAX - 1) / MAX`) instead of
+  `u128::div_ceil`, which is stable since Rust 1.73 and would violate
+  the project's MSRV of 1.70. Clippy's `incompatible_msrv` gate is now
+  green on `--all-features`.
+
+
+
 ## [0.9.3] - 2026-05-18
 
 **Telemetry release.** Ships labeled metrics with bounded cardinality, a
@@ -779,7 +869,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/jamesgober/metrics-lib/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/jamesgober/metrics-lib/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jamesgober/metrics-lib/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/jamesgober/metrics-lib/compare/v0.9.0...v0.9.1

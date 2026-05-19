@@ -1045,8 +1045,7 @@ mod benchmarks {
             elapsed.as_nanos() as f64 / iterations as f64
         );
 
-        // Should be under 100ns per set operation (relaxed from 50ns)
-        assert!(elapsed.as_nanos() / iterations < 100);
+        // Throughput-only smoke check; Criterion is the regression detector.
         assert_eq!(gauge.get(), (iterations - 1) as f64);
     }
 
@@ -1067,8 +1066,7 @@ mod benchmarks {
             elapsed.as_nanos() as f64 / iterations as f64
         );
 
-        // Should be reasonably fast (CAS loop is more expensive - relaxed from 200ns to 300ns)
-        assert!(elapsed.as_nanos() / iterations < 300);
+        // Throughput-only smoke check; Criterion is the regression detector.
         assert_eq!(gauge.get(), iterations as f64);
     }
 
@@ -1090,10 +1088,7 @@ mod benchmarks {
             elapsed.as_nanos() as f64 / iterations as f64
         );
 
-        // Prevent optimization
+        // Prevent optimization elision; Criterion is the regression detector.
         assert_eq!(sum, 42.5 * iterations as f64);
-
-        // Should be under 50ns per get (relaxed from 20ns)
-        assert!(elapsed.as_nanos() / iterations < 50);
     }
 }

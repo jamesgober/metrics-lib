@@ -55,12 +55,15 @@
 
 <h2>Performance First</h2>
 
-Latest local Criterion means (`cargo bench --bench metrics_bench --features meter`, Windows x86_64, Rust stable):
+Latest local Criterion means (`cargo bench --bench metrics_bench --all-features`, Windows x86_64, Rust stable). Numbers are for the **cached-handle** hot-path pattern (hold an `Arc<Counter>` / `Arc<Gauge>` / … and call `.inc()` / `.set()` directly):
 
-- **Counter increment**: 1.48ns/op (676.36M ops/sec)
-- **Gauge set**: 0.40ns/op (2500.31M ops/sec)
-- **Timer record**: 3.17ns/op (314.99M ops/sec)
+- **Counter increment**: ~1.5 ns/op
+- **Gauge set**: ~0.4 ns/op
+- **Timer record**: ~3 ns/op
+- **Histogram observe**: ~10 ns/op (depends on bucket count)
 - **Memory**: 64 bytes per metric (cache-aligned)
+
+Calling `metrics().counter("name").inc()` per call (global lookup) is slower — it pays for an `RwLock::read()` + `HashMap::get(&str)` + `Arc::clone()`. The `cached_vs_global` Criterion group reports both numbers side-by-side; cache the `Arc` in hot loops.
 
 <br>
 <hr>
@@ -69,20 +72,40 @@ Latest local Criterion means (`cargo bench --bench metrics_bench --features mete
 ## Features
 
 ### Core Metrics
-- **🔢 Counters** - Atomic increment/decrement with overflow protection
-- **📊 Gauges** - IEEE 754 atomic floating-point with mathematical operations
-- **⏱️ Timers** - Nanosecond precision with RAII guards and batch recording
-- **📈 Rate Meters** - Tumbling window rates with burst detection and API limiting
-- **💾 System Health** - Built-in CPU, memory, and process monitoring
+- **🔢 Counters** — atomic increment/decrement with overflow-safe `try_*` variants
+- **📊 Gauges** — IEEE 754 atomic floating-point with non-finite guards
+- **⏱️ Timers** — nanosecond precision with RAII guards and batch recording
+- **📈 Rate Meters** — tumbling-window rates with burst detection and API limiting
+- **📐 Histograms** *(v0.9.3)* — bucketed observations with sum/count + quantile estimation
+- **🏷️ Labels** *(v0.9.3)* — `LabelSet` with bounded cardinality cap (default 10 000)
+- **💾 System Health** — background-sampled CPU / memory / load / threads / FDs / health score (v0.9.4: zero-contention reads)
+
+<br>
+
+### Telemetry & Exporters *(v0.9.3+)*
+
+Five built-in exporters render the registry into the format your backend speaks:
+
+| Backend | Module | Feature flag | Output |
+|---|---|---|---|
+| **Prometheus** text | `metrics_lib::exporters::prometheus` | *(always on)* | `String` — `text/plain; version=0.0.4` |
+| **OpenMetrics** text | `metrics_lib::exporters::openmetrics` | *(always on)* | `String` — `application/openmetrics-text` |
+| **JSON snapshot** | `metrics_lib::exporters::json` | `serde` | `RegistrySnapshot` / `String` |
+| **StatsD UDP** push | `metrics_lib::exporters::statsd` | `statsd` | UDP datagrams via `StatsdSink` (DogStatsD tags) |
+| **OTLP/HTTP+JSON** | `metrics_lib::exporters::otlp` | `otlp` *(→ `serde`)* | `String` — POST to `/v1/metrics` |
+
+All exporters honour [`LabelSet`](./docs/API.md#labels) and [`MetricMetadata`](./docs/API.md#metric-metadata) (help text + unit + kind) — `# HELP` / `# TYPE` / `# UNIT` lines, OTLP `description` / `unit`, StatsD tags.
+
+End-to-end runnable demos: [`labels_demo`](./examples/labels_demo.rs), [`histogram_latency`](./examples/histogram_latency.rs), [`prometheus_endpoint`](./examples/prometheus_endpoint.rs), [`statsd_push`](./examples/statsd_push.rs), [`otlp_push`](./examples/otlp_push.rs), [`snapshot_serde`](./examples/snapshot_serde.rs).
 
 <br>
 
 ### Advanced Features
-- **Lock-Free** - Zero locks in hot paths, pure atomic operations
-- **Async Native** - First-class async/await support with zero-cost abstractions
-- **Resilience** - Circuit breakers, adaptive sampling, and backpressure control
-- **Cross-Platform** - Linux, macOS, Windows with optimized system integrations
-- **Cache-Aligned** - 64-byte alignment prevents false sharing
+- **Hot-path lock-free** — pure atomic operations on every increment/record/observe
+- **Async Native** — first-class async/await support with zero-cost abstractions
+- **Resilience** — circuit breakers, adaptive sampling, backpressure control
+- **Cross-Platform** — Linux (`/proc`), macOS, Windows (`sysinfo`)
+- **Cache-Aligned** — 64-byte alignment prevents false sharing
 
 <br>
 <hr>
@@ -141,13 +164,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.9.3"
+metrics-lib = "0.9.4"
 
 # Optional features
-metrics-lib = { version = "0.9.3", features = ["async"] }
+metrics-lib = { version = "0.9.4", features = ["async"] }
 
 # Full feature set (stable + async + serde)
-metrics-lib = { version = "0.9.3", features = ["full"] }
+metrics-lib = { version = "0.9.4", features = ["full"] }
 ```
 
 <hr>
@@ -624,13 +647,13 @@ in place.
 
 ```toml
 # All stable features:
-metrics-lib = { version = "0.9.3", features = ["all"] }
+metrics-lib = { version = "0.9.4", features = ["all"] }
 
 # Full build including async and serde:
-metrics-lib = { version = "0.9.3", features = ["full"] }
+metrics-lib = { version = "0.9.4", features = ["full"] }
 
 # Minimal build (counter only):
-metrics-lib = { version = "0.9.3", features = ["minimal"] }
+metrics-lib = { version = "0.9.4", features = ["minimal"] }
 ```
 
 ### Runtime Configuration

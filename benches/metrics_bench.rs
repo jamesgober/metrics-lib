@@ -248,6 +248,204 @@ fn scaling_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================
+// v0.9.4 additions: labels, histogram, exporters, cached-vs-global.
+// ============================================================
+
+fn labels_benchmarks(c: &mut Criterion) {
+    use metrics_lib::LabelSet;
+    let mut group = c.benchmark_group("labels");
+
+    group.bench_function("from_array_2pairs", |b| {
+        b.iter(|| black_box(LabelSet::from([("method", "GET"), ("status", "200")])))
+    });
+
+    group.bench_function("from_array_4pairs", |b| {
+        b.iter(|| {
+            black_box(LabelSet::from([
+                ("method", "GET"),
+                ("status", "200"),
+                ("region", "us-east-1"),
+                ("env", "prod"),
+            ]))
+        })
+    });
+
+    group.bench_function("to_prometheus_3pairs", |b| {
+        let l = LabelSet::from([("a", "1"), ("b", "2"), ("c", "3")]);
+        b.iter(|| black_box(l.to_prometheus()))
+    });
+
+    group.bench_function("hash_eq", |b| {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let l = LabelSet::from([("a", "1"), ("b", "2"), ("c", "3")]);
+        b.iter(|| {
+            let mut h = DefaultHasher::new();
+            l.hash(&mut h);
+            black_box(h.finish())
+        })
+    });
+
+    group.finish();
+}
+
+#[cfg(feature = "histogram")]
+fn histogram_benchmarks(c: &mut Criterion) {
+    use metrics_lib::Histogram;
+    let mut group = c.benchmark_group("histogram");
+
+    let h = Histogram::default_seconds();
+    group.bench_function("observe_default_seconds", |b| {
+        b.iter(|| h.observe(black_box(0.05)))
+    });
+
+    let h = Histogram::with_buckets([0.01, 0.05, 0.1, 0.5, 1.0]);
+    group.bench_function("observe_5buckets", |b| {
+        b.iter(|| h.observe(black_box(0.07)))
+    });
+
+    let h = Histogram::with_buckets([
+        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    ]);
+    group.bench_function("observe_11buckets_uniform", |b| {
+        let mut i: u64 = 0;
+        b.iter(|| {
+            i = i.wrapping_add(1);
+            let v = 0.001 + ((i % 100) as f64) * 0.1;
+            h.observe(black_box(v))
+        })
+    });
+
+    // Concurrent observe: same histogram, multiple writers.
+    group.bench_function("observe_concurrent_4_threads", |b| {
+        let h = Arc::new(Histogram::default_seconds());
+        b.iter(|| {
+            let handles: Vec<_> = (0..4)
+                .map(|tid| {
+                    let h = Arc::clone(&h);
+                    std::thread::spawn(move || {
+                        for i in 0..1000 {
+                            let v = 0.005 + ((i + tid) % 10) as f64 * 0.05;
+                            h.observe(v);
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        })
+    });
+
+    // Quantile estimation (read path).
+    let h = Histogram::default_seconds();
+    for _ in 0..10_000 {
+        h.observe(0.05);
+    }
+    group.bench_function("quantile_p95", |b| {
+        b.iter(|| black_box(h.quantile(black_box(0.95))))
+    });
+
+    group.bench_function("snapshot", |b| b.iter(|| black_box(h.snapshot())));
+
+    group.finish();
+}
+
+fn exporter_benchmarks(c: &mut Criterion) {
+    use metrics_lib::{exporters, Counter, Gauge, LabelSet, Registry, Timer, Unit};
+    let mut group = c.benchmark_group("exporters");
+
+    // Build a representative populated registry once.
+    let registry = Registry::new();
+    registry.describe_counter("http_requests", "Total HTTP requests", Unit::Custom("1"));
+    registry.describe_gauge("inflight", "Inflight requests", Unit::Custom("1"));
+    registry.describe_timer("rpc_latency", "RPC latency", Unit::Seconds);
+    for status in ["200", "400", "500"] {
+        for method in ["GET", "POST", "DELETE"] {
+            let labels = LabelSet::from([("method", method), ("status", status)]);
+            let c: std::sync::Arc<Counter> =
+                registry.get_or_create_counter_with("http_requests", &labels);
+            c.add(42);
+            let g: std::sync::Arc<Gauge> = registry.get_or_create_gauge_with("inflight", &labels);
+            g.set(7.0);
+            let t: std::sync::Arc<Timer> =
+                registry.get_or_create_timer_with("rpc_latency", &labels);
+            t.record_ns(1234);
+        }
+    }
+    #[cfg(feature = "histogram")]
+    {
+        registry.configure_histogram(
+            "rpc_duration_seconds",
+            [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+        );
+        registry.describe_histogram("rpc_duration_seconds", "RPC duration", Unit::Seconds);
+        let h = registry.get_or_create_histogram("rpc_duration_seconds");
+        for i in 0..1_000 {
+            h.observe(0.001 + (i % 100) as f64 * 0.005);
+        }
+    }
+
+    group.bench_function("prometheus_render", |b| {
+        b.iter(|| black_box(exporters::prometheus::render(&registry)))
+    });
+
+    group.bench_function("openmetrics_render", |b| {
+        b.iter(|| black_box(exporters::openmetrics::render(&registry)))
+    });
+
+    #[cfg(feature = "serde")]
+    group.bench_function("json_render", |b| {
+        b.iter(|| black_box(exporters::json::render(&registry)))
+    });
+
+    #[cfg(feature = "statsd")]
+    group.bench_function("statsd_render", |b| {
+        use std::net::UdpSocket;
+        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sink = exporters::statsd::StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
+        b.iter(|| black_box(sink.render(&registry)))
+    });
+
+    #[cfg(feature = "otlp")]
+    group.bench_function("otlp_render", |b| {
+        b.iter(|| black_box(exporters::otlp::render(&registry, "bench-service")))
+    });
+
+    group.finish();
+}
+
+fn cached_vs_global_benchmarks(c: &mut Criterion) {
+    init();
+    let mut group = c.benchmark_group("cached_vs_global");
+
+    // Cached handle: the recommended hot-path pattern.
+    let cached: std::sync::Arc<metrics_lib::Counter> = metrics().counter("cached_handle_bench");
+    group.bench_function("counter_inc_cached_handle", |b| b.iter(|| cached.inc()));
+
+    // Global lookup: `metrics().counter("name").inc()` per call. Includes
+    // the registry `RwLock::read()` + `HashMap::get(&str)` + `Arc::clone()`
+    // path. This is the realistic cost for code that hasn't cached the
+    // handle.
+    group.bench_function("counter_inc_global_lookup", |b| {
+        b.iter(|| metrics().counter(black_box("global_lookup_bench")).inc())
+    });
+
+    // Labeled global lookup — each call also allocates the `(String,
+    // LabelSet)` composite key.
+    let labels = metrics_lib::LabelSet::from([("k", "v")]);
+    group.bench_function("counter_inc_global_labeled_lookup", |b| {
+        b.iter(|| {
+            metrics()
+                .counter_with(black_box("labeled_lookup_bench"), &labels)
+                .inc()
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     counter_benchmarks,
@@ -255,6 +453,17 @@ criterion_group!(
     timer_benchmarks,
     rate_meter_benchmarks,
     global_metrics_benchmarks,
-    scaling_benchmarks
+    scaling_benchmarks,
+    labels_benchmarks,
+    exporter_benchmarks,
+    cached_vs_global_benchmarks,
 );
+
+#[cfg(feature = "histogram")]
+criterion_group!(histogram_benches, histogram_benchmarks);
+
+#[cfg(feature = "histogram")]
+criterion_main!(benches, histogram_benches);
+
+#[cfg(not(feature = "histogram"))]
 criterion_main!(benches);

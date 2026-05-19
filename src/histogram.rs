@@ -170,7 +170,14 @@ impl Histogram {
 
     /// Record one observation. Non-finite values are silently dropped; use
     /// [`Self::try_observe`] to receive an explicit error instead.
-    #[inline]
+    ///
+    /// Hot-path semantics (v0.9.4):
+    /// - Single binary-search through bucket bounds (O(log B)).
+    /// - Three `Relaxed` atomic operations on the success path:
+    ///   one `fetch_add` on the matched bucket (skipped for the implicit
+    ///   `+Inf` bucket), one `fetch_add` on `total`, and one CAS on
+    ///   `sum_bits`. The CAS loop retries only under writer contention.
+    #[inline(always)]
     pub fn observe(&self, value: f64) {
         if !value.is_finite() {
             return;
@@ -192,14 +199,16 @@ impl Histogram {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     fn observe_finite(&self, value: f64) {
         // Binary-search for the matching bucket. Anything larger than the
-        // last explicit bound lands in the implicit +Inf bucket — that is,
-        // it bumps `total` but not any `bucket_counts[i]`.
+        // last explicit bound lands in the implicit `+Inf` bucket — that
+        // bumps `total` but no `bucket_counts[i]`.
         let idx = self.bucket_bounds.partition_point(|&b| b < value);
-        if idx < self.bucket_counts.len() {
-            self.bucket_counts[idx].fetch_add(1, Ordering::Relaxed);
+        // `get(idx)` folds the bounds check and the index into one op
+        // (no panic path, no explicit `< len` branch).
+        if let Some(slot) = self.bucket_counts.get(idx) {
+            slot.fetch_add(1, Ordering::Relaxed);
         }
         self.total.fetch_add(1, Ordering::Relaxed);
 
