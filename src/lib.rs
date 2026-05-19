@@ -77,12 +77,17 @@ mod async_support;
 mod counter;
 #[cfg(feature = "gauge")]
 mod gauge;
+#[cfg(feature = "histogram")]
+mod histogram;
 #[cfg(feature = "meter")]
 mod rate_meter;
 #[cfg(feature = "timer")]
 mod timer;
 
 // Always-compiled infrastructure modules.
+pub mod exporters;
+mod labels;
+mod metadata;
 mod registry;
 mod system_health;
 
@@ -97,11 +102,15 @@ pub use async_support::{AsyncMetricBatch, AsyncMetricsBatcher, AsyncTimerExt, As
 pub use counter::*;
 #[cfg(feature = "gauge")]
 pub use gauge::{Gauge, GaugeStats};
+#[cfg(feature = "histogram")]
+pub use histogram::{Histogram, HistogramBucket, HistogramSnapshot, DEFAULT_SECONDS_BUCKETS};
 #[cfg(feature = "meter")]
 pub use rate_meter::{RateMeter, RateStats};
 #[cfg(feature = "timer")]
 pub use timer::*;
 
+pub use labels::{Label, LabelSet};
+pub use metadata::{MetricKind, MetricMetadata, Unit};
 pub use registry::*;
 pub use system_health::*;
 
@@ -162,6 +171,28 @@ impl MetricsCore {
         self.registry.get_or_create_counter(name)
     }
 
+    /// Get or create a labeled counter. Requires the `count` feature.
+    ///
+    /// Routes to the cardinality overflow sink when the cap is full; use
+    /// [`Self::try_counter_with`] to receive an explicit error instead.
+    #[cfg(feature = "count")]
+    #[inline]
+    pub fn counter_with(&self, name: &str, labels: &LabelSet) -> std::sync::Arc<Counter> {
+        self.registry.get_or_create_counter_with(name, labels)
+    }
+
+    /// Labeled counter returning `Err(CardinalityExceeded)` when the cap is
+    /// full. Requires the `count` feature.
+    #[cfg(feature = "count")]
+    #[inline]
+    pub fn try_counter_with(
+        &self,
+        name: &str,
+        labels: &LabelSet,
+    ) -> Result<std::sync::Arc<Counter>> {
+        self.registry.try_get_or_create_counter_with(name, labels)
+    }
+
     /// Get or create a gauge by name. Requires the `gauge` feature.
     ///
     /// `name` is accepted as `&str` — see [`Self::counter`] for allocation
@@ -170,6 +201,21 @@ impl MetricsCore {
     #[inline(always)]
     pub fn gauge(&self, name: &str) -> std::sync::Arc<Gauge> {
         self.registry.get_or_create_gauge(name)
+    }
+
+    /// Get or create a labeled gauge. Requires the `gauge` feature.
+    #[cfg(feature = "gauge")]
+    #[inline]
+    pub fn gauge_with(&self, name: &str, labels: &LabelSet) -> std::sync::Arc<Gauge> {
+        self.registry.get_or_create_gauge_with(name, labels)
+    }
+
+    /// Labeled gauge returning `Err(CardinalityExceeded)` when the cap is
+    /// full. Requires the `gauge` feature.
+    #[cfg(feature = "gauge")]
+    #[inline]
+    pub fn try_gauge_with(&self, name: &str, labels: &LabelSet) -> Result<std::sync::Arc<Gauge>> {
+        self.registry.try_get_or_create_gauge_with(name, labels)
     }
 
     /// Get or create a timer by name. Requires the `timer` feature.
@@ -182,6 +228,21 @@ impl MetricsCore {
         self.registry.get_or_create_timer(name)
     }
 
+    /// Get or create a labeled timer. Requires the `timer` feature.
+    #[cfg(feature = "timer")]
+    #[inline]
+    pub fn timer_with(&self, name: &str, labels: &LabelSet) -> std::sync::Arc<Timer> {
+        self.registry.get_or_create_timer_with(name, labels)
+    }
+
+    /// Labeled timer returning `Err(CardinalityExceeded)` when the cap is
+    /// full. Requires the `timer` feature.
+    #[cfg(feature = "timer")]
+    #[inline]
+    pub fn try_timer_with(&self, name: &str, labels: &LabelSet) -> Result<std::sync::Arc<Timer>> {
+        self.registry.try_get_or_create_timer_with(name, labels)
+    }
+
     /// Get or create a rate meter by name. Requires the `meter` feature.
     ///
     /// `name` is accepted as `&str` — see [`Self::counter`] for allocation
@@ -190,6 +251,57 @@ impl MetricsCore {
     #[inline(always)]
     pub fn rate(&self, name: &str) -> std::sync::Arc<RateMeter> {
         self.registry.get_or_create_rate_meter(name)
+    }
+
+    /// Get or create a labeled rate meter. Requires the `meter` feature.
+    #[cfg(feature = "meter")]
+    #[inline]
+    pub fn rate_with(&self, name: &str, labels: &LabelSet) -> std::sync::Arc<RateMeter> {
+        self.registry.get_or_create_rate_meter_with(name, labels)
+    }
+
+    /// Labeled rate meter returning `Err(CardinalityExceeded)` when the cap
+    /// is full. Requires the `meter` feature.
+    #[cfg(feature = "meter")]
+    #[inline]
+    pub fn try_rate_with(
+        &self,
+        name: &str,
+        labels: &LabelSet,
+    ) -> Result<std::sync::Arc<RateMeter>> {
+        self.registry
+            .try_get_or_create_rate_meter_with(name, labels)
+    }
+
+    /// Get or create an unlabeled histogram. Requires the `histogram`
+    /// feature.
+    ///
+    /// Uses buckets pre-configured via [`Registry::configure_histogram`] for
+    /// the same name, or the standard Prometheus latency-seconds buckets
+    /// ([`crate::DEFAULT_SECONDS_BUCKETS`]) when none configured.
+    #[cfg(feature = "histogram")]
+    #[inline]
+    pub fn histogram(&self, name: &str) -> std::sync::Arc<Histogram> {
+        self.registry.get_or_create_histogram(name)
+    }
+
+    /// Get or create a labeled histogram. Requires the `histogram` feature.
+    #[cfg(feature = "histogram")]
+    #[inline]
+    pub fn histogram_with(&self, name: &str, labels: &LabelSet) -> std::sync::Arc<Histogram> {
+        self.registry.get_or_create_histogram_with(name, labels)
+    }
+
+    /// Labeled histogram returning `Err(CardinalityExceeded)` when the cap
+    /// is full. Requires the `histogram` feature.
+    #[cfg(feature = "histogram")]
+    #[inline]
+    pub fn try_histogram_with(
+        &self,
+        name: &str,
+        labels: &LabelSet,
+    ) -> Result<std::sync::Arc<Histogram>> {
+        self.registry.try_get_or_create_histogram_with(name, labels)
     }
 
     /// Time a synchronous closure and record the elapsed duration.
@@ -250,6 +362,11 @@ pub enum MetricsError {
     WouldBlock,
     /// Global metrics were not initialized and the operation requires initialization.
     NotInitialized,
+    /// Registering this `(name, labels)` combination would exceed the
+    /// configured cardinality cap. The `try_*_with` lookup variants return
+    /// this error; the non-`try` variants route to a per-type sink instead
+    /// (see [`Registry::set_cardinality_cap`]).
+    CardinalityExceeded,
     /// Configuration error with details.
     Config(String),
 }
@@ -266,6 +383,9 @@ impl std::fmt::Display for MetricsError {
             MetricsError::OverLimit => write!(f, "Operation would exceed limit"),
             MetricsError::WouldBlock => write!(f, "Operation would block"),
             MetricsError::NotInitialized => write!(f, "Global metrics not initialized"),
+            MetricsError::CardinalityExceeded => {
+                write!(f, "Cardinality cap exceeded for labeled metric")
+            }
             MetricsError::Config(msg) => write!(f, "Configuration error: {msg}"),
         }
     }

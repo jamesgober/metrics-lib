@@ -195,6 +195,7 @@ impl AdaptiveSampler {
 
 /// Sampling statistics snapshot from an [`AdaptiveSampler`].
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SamplingStats {
     /// Number of samples accepted during the current measurement window.
     pub samples_taken: u64,

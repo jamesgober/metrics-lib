@@ -28,6 +28,7 @@ pub struct Counter {
 
 /// Counter statistics
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct CounterStats {
     /// Current counter value
     pub value: u64,

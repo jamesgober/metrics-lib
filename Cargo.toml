@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "metrics-lib"
-version = "0.9.2"
+version = "0.9.3"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.70"
@@ -71,23 +71,31 @@ bench-tests = []
 async       = ["dep:tokio"]
 
 # Histogram type with configurable buckets and quantile estimation.
-#
-# Reserved in 0.9.2 (depends on `sample`); the type lands in 0.9.3 along
-# with the telemetry exporters. Enabling this flag today compiles cleanly
-# but does not yet expose a Histogram API.
 histogram   = ["sample"]
 
-# Wire Serde derive support for stats and snapshot types.
-#
-# Reserved in 0.9.2; full `Serialize`/`Deserialize` impls for `CounterStats`,
-# `GaugeStats`, `TimerStats`, `RateStats`, `SystemSnapshot`, `ProcessStats`,
-# and `HealthStatus` land in 0.9.3 alongside the JSON snapshot exporter.
-serde       = ["dep:serde"]
+# Wire Serde derive support for stats and snapshot types, plus the
+# `exporters::json` JSON snapshot exporter (pulls in `serde_json`).
+serde       = ["dep:serde", "dep:serde_json"]
+
+# Built-in StatsD UDP exporter (`exporters::statsd`). No new transitive deps
+# — uses `std::net::UdpSocket`.
+statsd      = []
+
+# Built-in OTLP/HTTP+JSON exporter (`exporters::otlp`). Requires the
+# `serde` feature so the OTLP payload can be serialised.
+otlp        = ["serde"]
+
+# All built-in exporters (Prometheus + OpenMetrics are always-on; this flag
+# adds JSON snapshot + StatsD UDP + OTLP/HTTP+JSON).
+exporters-all = ["serde", "statsd", "otlp"]
 
 # Aggregate flags. `all` excludes runtime-dependent features so it can be
 # enabled on environments that don't link against Tokio or Serde.
 all  = ["count", "gauge", "timer", "meter", "sample", "histogram"]
-full = ["count", "gauge", "timer", "meter", "sample", "histogram", "async", "serde"]
+full = [
+    "count", "gauge", "timer", "meter", "sample", "histogram",
+    "async", "serde", "statsd", "otlp",
+]
 
 # Default build: counters + gauges + timers (the most common subset).
 default = ["count", "gauge", "timer"]
@@ -166,6 +174,31 @@ name = "cpu_stats"
 [[example]]
 name = "memory_stats"
 
+# v0.9.3 telemetry examples.
+[[example]]
+name = "labels_demo"
+required-features = ["count"]
+
+[[example]]
+name = "histogram_latency"
+required-features = ["histogram"]
+
+[[example]]
+name = "prometheus_endpoint"
+required-features = ["async", "count", "gauge", "timer", "histogram"]
+
+[[example]]
+name = "statsd_push"
+required-features = ["statsd", "count", "gauge", "timer"]
+
+[[example]]
+name = "otlp_push"
+required-features = ["otlp", "count", "gauge", "timer", "histogram"]
+
+[[example]]
+name = "snapshot_serde"
+required-features = ["serde", "count", "gauge"]
+
 
 
 # DEPENDENCIES
@@ -173,6 +206,7 @@ name = "memory_stats"
 [dependencies]
 tokio = { version = "1.0", features = ["rt", "time", "macros", "sync"], optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
 num_cpus    = "1.16"
 parking_lot = "0.12"
 sysinfo = { version = "0.29", default-features = false }

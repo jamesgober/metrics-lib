@@ -65,6 +65,7 @@ pub struct SystemHealth {
 
 /// System resource usage snapshot
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SystemSnapshot {
     /// System CPU usage percentage (0.0-100.0)
     pub system_cpu_percent: f64,
@@ -88,6 +89,7 @@ pub struct SystemSnapshot {
 
 /// Process-specific resource usage
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ProcessStats {
     /// CPU usage percentage
     pub cpu_percent: f64,
@@ -608,6 +610,7 @@ impl SystemHealth {
 
 /// System health status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum HealthStatus {
     /// System is healthy (80%+ score)
     Healthy,

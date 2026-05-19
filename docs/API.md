@@ -60,7 +60,11 @@ EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
   - [`Gauge`](#gauge)
   - [`Timer`](#timer)
   - [`RateMeter`](#ratemeter)
+  - [`Histogram` (v0.9.3)](#histogram)
+  - [`LabelSet` & Labels (v0.9.3)](#labels)
+  - [Metric metadata (v0.9.3)](#metric-metadata)
   - [`SystemHealth`](#systemhealth)
+  - [Exporters (v0.9.3)](#exporters)
   - [Async support](#async-support)
   - [Adaptive controls](#adaptive-controls)
   - [Prelude](#prelude)
@@ -120,7 +124,7 @@ EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-metrics-lib = "0.9.2"
+metrics-lib = "0.9.3"
 ```
 
 <br>
@@ -486,6 +490,194 @@ Specialized meters (re-exported as `rate_meter_specialized`):
 
 <br>
 
+<h3 id="histogram"><code>Histogram</code></h3>
+
+Source: `src/histogram.rs` — requires the `histogram` Cargo feature.
+
+A bucketed observation type compatible with Prometheus / OpenMetrics histogram
+semantics. Each bucket counts observations with value `<= upper_bound`;
+exports render the buckets in cumulative form. The implicit `+Inf` bucket
+always equals the total observation count. `sum` and `count` are tracked
+separately for `_sum` / `_count` companion series.
+
+Construction:
+- `Histogram::with_buckets(bounds: impl IntoIterator<Item = f64>)` — explicit upper bounds.
+- `Histogram::linear(start, width, count)` — `start, start+width, …, start+(count-1)*width`.
+- `Histogram::exponential(start, factor, count)` — `start, start*factor, …`.
+- `Histogram::default_seconds()` — the Prometheus default latency-seconds buckets
+  (`[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]`).
+- `DEFAULT_SECONDS_BUCKETS: &[f64]` — re-exported constant for the same buckets.
+
+Observation:
+- `observe(value: f64)` — non-finite values are silently dropped.
+- `try_observe(value: f64) -> Result<()>` — returns
+  `Err(MetricsError::InvalidValue)` for NaN / ±∞.
+
+Read accessors:
+- `count() -> u64`, `sum() -> f64`, `mean() -> f64`, `age() -> Duration`.
+- `quantile(q: f64) -> f64` — clamped to `0.0..=1.0`; bucket-interpolated
+  estimate, returns `0.0` on empty.
+- `snapshot() -> HistogramSnapshot { buckets: Vec<HistogramBucket>, sum, count, age }` —
+  buckets rendered cumulatively, trailing `+Inf` bucket appended.
+- `reset()` — clears all bucket counters and sum/count.
+
+Example:
+```rust
+# #[cfg(feature = "histogram")]
+# {
+use metrics_lib::Histogram;
+
+let h = Histogram::with_buckets([0.01, 0.05, 0.1, 0.5, 1.0]);
+h.observe(0.005);
+h.observe(0.08);
+h.observe(0.42);
+h.observe(2.0); // +Inf bucket
+
+assert_eq!(h.count(), 4);
+assert!(h.quantile(0.5) > 0.0);
+let snap = h.snapshot();
+assert_eq!(snap.buckets.last().unwrap().upper_bound, f64::INFINITY);
+# }
+```
+
+Registry integration:
+```rust
+# #[cfg(feature = "histogram")]
+# {
+use metrics_lib::{init, metrics, LabelSet};
+
+init();
+
+// Optional: pre-configure buckets for a metric name.
+metrics().registry().configure_histogram(
+    "rpc_duration_seconds",
+    [0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0],
+);
+
+// Labeled histogram. First registration with a given `(name, labels)` tuple
+// allocates a new `Arc<Histogram>` using the configured buckets (or the
+// Prometheus default seconds layout if none configured).
+let labels = LabelSet::from([("route", "/search")]);
+let h = metrics().histogram_with("rpc_duration_seconds", &labels);
+h.observe(0.087);
+# }
+```
+
+<br>
+
+<h3 id="labels"><code>LabelSet</code> & labeled metrics</h3>
+
+Source: `src/labels.rs`.
+
+`LabelSet` is a sorted, deduplicated `(key, value)` collection that
+distinguishes one metric *instance* from another sharing the same name. The
+inner storage is sorted by key so two label sets with the same contents but
+different insertion orders hash and compare equal.
+
+Construction:
+- `LabelSet::EMPTY` / `LabelSet::new()` — empty set, allocation-free.
+- `LabelSet::from([(k, v), ...])` / `FromIterator<(K, V)>` — accepts both
+  string literals (`&'static str`) and owned `String`s.
+- `let mut l = LabelSet::new(); l.add("k", "v");` — incremental build,
+  builder-style.
+- `.with("k", "v")` — consuming variant for chained construction.
+
+Read accessors:
+- `len() -> usize`, `is_empty() -> bool`.
+- `iter() -> impl Iterator<Item = (&str, &str)>` — sorted by key.
+- `get(key) -> Option<&str>`, `remove(key) -> bool`.
+- `to_prometheus() -> String` — `{k="v",k="v"}` (used by exporters).
+- `to_statsd() -> String` — `|#k:v,k:v` (DogStatsD format).
+
+Cardinality control (on the registry):
+- `Registry::set_cardinality_cap(usize)` — default `DEFAULT_CARDINALITY_CAP = 10_000`.
+- `Registry::cardinality_cap() -> usize`,
+  `Registry::cardinality_count() -> usize`,
+  `Registry::cardinality_overflows() -> u64`.
+
+When a fresh `(name, labels)` registration would exceed the cap:
+- `try_*_with` returns `Err(MetricsError::CardinalityExceeded)`.
+- `*_with` (non-`try`) routes to a process-global per-type overflow sink
+  (never exported; observable via `cardinality_overflows`).
+
+Labeled lookup methods on `MetricsCore` (each gated on its metric-type
+feature):
+
+- `counter_with(name, &LabelSet) -> Arc<Counter>` /
+  `try_counter_with(...) -> Result<Arc<Counter>>`
+- `gauge_with(name, &LabelSet) -> Arc<Gauge>` / `try_gauge_with`
+- `timer_with(name, &LabelSet) -> Arc<Timer>` / `try_timer_with`
+- `rate_with(name, &LabelSet) -> Arc<RateMeter>` / `try_rate_with`
+- `histogram(name) -> Arc<Histogram>` (unlabeled),
+  `histogram_with(name, &LabelSet) -> Arc<Histogram>` / `try_histogram_with`
+
+Example:
+```rust
+# #[cfg(feature = "count")]
+# {
+use metrics_lib::{init, metrics, LabelSet, MetricsError};
+
+init();
+
+let labels = LabelSet::from([("method", "GET"), ("status", "200")]);
+metrics().counter_with("http_requests", &labels).inc();
+
+// Tight cap + explicit overflow handling.
+metrics().registry().set_cardinality_cap(4);
+let bad = LabelSet::from([("trace_id", "deadbeef")]);
+match metrics().try_counter_with("http_requests", &bad) {
+    Ok(c) => c.inc(),
+    Err(MetricsError::CardinalityExceeded) => { /* drop or downsample */ }
+    Err(e) => panic!("unexpected error: {e}"),
+}
+# }
+```
+
+<br>
+
+<h3 id="metric-metadata">Metric metadata</h3>
+
+Source: `src/metadata.rs`.
+
+Per-metric metadata (help text, unit, kind) feeds the `# HELP` / `# TYPE` /
+`# UNIT` lines in Prometheus / OpenMetrics output, the `description` field
+in OTLP, and unit suffixes in StatsD. Metadata is optional — every metric
+exports successfully without it.
+
+Types:
+- `MetricKind` — `Counter | Gauge | Timer | Rate | Histogram`.
+- `Unit` — enumerated standard units (`Seconds`, `Milliseconds`, `Bytes`,
+  `Percent`, …) plus `Unit::Custom(&'static str)` for free-form unit names.
+- `MetricMetadata { help: Cow<'static, str>, unit: Unit, kind: MetricKind }`.
+
+Registry methods:
+- `Registry::describe(name, MetricMetadata)` — store/replace metadata for a name.
+- `Registry::describe_counter(name, help, unit)`
+- `Registry::describe_gauge(name, help, unit)`
+- `Registry::describe_timer(name, help, unit)`
+- `Registry::describe_rate(name, help, unit)`
+- `Registry::describe_histogram(name, help, unit)`
+- `Registry::metadata(name) -> Option<MetricMetadata>`.
+
+Example:
+```rust
+use metrics_lib::{init, metrics, Unit};
+
+init();
+metrics().registry().describe_counter(
+    "http_requests",
+    "Total HTTP requests handled",
+    Unit::Custom("1"),
+);
+metrics().registry().describe_histogram(
+    "http_request_duration_seconds",
+    "Request handler latency",
+    Unit::Seconds,
+);
+```
+
+<br>
+
 ### `SystemHealth`
 
 Source: `src/system_health.rs`
@@ -552,6 +744,119 @@ Examples:
 - Depending on platform and sysinfo version, raw memory values may be reported in KiB or bytes. The provided `examples/memory_stats.rs` auto‑detects units for display (MB/GB) while keeping percentage calculations consistent.
 - For production use, prefer using percentages for alerts and apply consistent conversion for display. If you need exact byte precision on macOS or Windows, consider platform APIs (e.g., `sysctl` on macOS, WinAPI on Windows) in a background task, or contribute native backends to `SystemHealth`.
 - The example includes a small documented helper `normalize_sysinfo_memory_to_mb(...)` explaining invariants and edge cases; see `examples/memory_stats.rs` (comment block above the function) for details.
+
+<br>
+
+<h3 id="exporters">Exporters (v0.9.3)</h3>
+
+Five built-in exporters render the registry into popular telemetry formats.
+Each is a stateless function (or thin sink for push transports) that
+accepts a `&Registry` and produces a backend-specific output.
+
+| Backend | Module | Feature flag | Output |
+|---|---|---|---|
+| Prometheus text | `metrics_lib::exporters::prometheus` | (always on) | `String` |
+| OpenMetrics text | `metrics_lib::exporters::openmetrics` | (always on) | `String` (with trailing `# EOF\n`) |
+| JSON snapshot | `metrics_lib::exporters::json` | `serde` | `String` / `RegistrySnapshot` |
+| StatsD UDP | `metrics_lib::exporters::statsd` | `statsd` | UDP datagrams via `StatsdSink` |
+| OTLP/HTTP+JSON | `metrics_lib::exporters::otlp` | `otlp` (→ `serde`) | `String` POST body |
+
+All exporters honour [`LabelSet`](#labels) and [metric metadata](#metric-metadata):
+
+- Prometheus / OpenMetrics: labels appear as `{k="v",k="v"}`; help/unit
+  metadata becomes `# HELP` / `# TYPE` / `# UNIT` lines. OpenMetrics adds
+  the `_total` suffix on counter samples and ends with `# EOF\n`.
+- JSON snapshot: labels serialise as nested JSON objects; metadata appears
+  per-series.
+- StatsD: labels become DogStatsD tags (`|#k:v,k:v`); the wire format uses
+  cumulative gauge mode (`|g`) since StatsD counters are deltas and the
+  registry stores totals.
+- OTLP: labels become `attributes`; mapped to OTLP `Sum` (counters,
+  monotonic + cumulative), `Gauge`, or `Histogram` (timers + histograms).
+
+Example — Prometheus `/metrics` body:
+
+```rust
+# #[cfg(feature = "count")]
+# {
+use metrics_lib::{init, metrics, LabelSet, Unit};
+use metrics_lib::exporters::prometheus;
+
+init();
+
+metrics().registry().describe_counter(
+    "http_requests",
+    "Total HTTP requests",
+    Unit::Custom("1"),
+);
+let labels = LabelSet::from([("status", "200")]);
+metrics().counter_with("http_requests", &labels).add(7);
+
+let body = prometheus::render(metrics().registry());
+assert!(body.contains("# HELP http_requests Total HTTP requests"));
+assert!(body.contains(r#"http_requests{status="200"} 7"#));
+# }
+```
+
+Example — JSON snapshot (feature = "serde"):
+
+```rust
+# #[cfg(all(feature = "serde", feature = "count"))]
+# {
+use metrics_lib::{init, metrics};
+use metrics_lib::exporters::json;
+
+init();
+metrics().counter("hits").inc();
+
+let snap = json::snapshot(metrics().registry());
+assert_eq!(snap.schema_version, 1);
+assert!(!snap.counters.is_empty());
+
+// Or render directly to a JSON string.
+let body = json::render(metrics().registry());
+let _v: serde_json::Value = serde_json::from_str(&body).unwrap();
+# }
+```
+
+Example — StatsD push (feature = "statsd"):
+
+```no_run
+# #[cfg(all(feature = "statsd", feature = "count"))]
+# {
+use metrics_lib::{init, metrics};
+use metrics_lib::exporters::statsd::StatsdSink;
+
+init();
+metrics().counter("requests").inc();
+
+let sink = StatsdSink::new("127.0.0.1:8125")
+    .expect("bind UDP")
+    .with_prefix("svc.");
+sink.send(metrics().registry()).expect("statsd push");
+# }
+```
+
+Example — OTLP/HTTP+JSON (feature = "otlp"):
+
+```rust
+# #[cfg(all(feature = "otlp", feature = "count"))]
+# {
+use metrics_lib::{init, metrics};
+use metrics_lib::exporters::otlp;
+
+init();
+metrics().counter("requests").inc();
+
+let payload: String = otlp::render(metrics().registry(), "my-service");
+// POST `payload` to <collector>/v1/metrics with Content-Type: application/json
+let _ = payload;
+# }
+```
+
+End-to-end runnable examples live in `examples/`:
+`labels_demo`, `histogram_latency`, `prometheus_endpoint`, `statsd_push`,
+`otlp_push`, `snapshot_serde`.
 
 <br>
 

@@ -43,6 +43,7 @@ pub struct RunningTimer<'a> {
 
 /// Timer statistics
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TimerStats {
     /// Total number of timing samples
     pub count: u64,

@@ -13,11 +13,12 @@
     <a href="https://crates.io/crates/metrics-lib" alt="Download metrics-lib"><img alt="Crates.io Downloads" src="https://img.shields.io/crates/d/metrics-lib?color=%230099ff"></a>
     <a href="https://docs.rs/metrics-lib" title="metrics-lib Documentation"><img alt="docs.rs" src="https://img.shields.io/docsrs/metrics-lib"></a>
     <a href="https://github.com/jamesgober/metrics-lib/actions"><img alt="GitHub CI" src="https://github.com/jamesgober/metrics-lib/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="https://github.com/rust-lang/rfcs/blob/master/text/2495-min-rust-version.md" title="MSRV"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.70%2B-blue"></a>
+    <br>
     <a href="https://github.com/jamesgober/metrics-lib/actions/workflows/bench.yml" title="metrics-lib Benchmarks"><img alt="Benchmarks" src="https://github.com/jamesgober/metrics-lib/actions/workflows/bench.yml/badge.svg"></a>
     <a href="https://jamesgober.github.io/metrics-lib/" title="Benchmark Regression">
-        <img alt="Benchmark Regression" src="https://img.shields.io/github/actions/workflow/status/jamesgober/metrics-lib/ci.yml?branch=main&label=Benchmark%20Regression&logo=github">
+        <img alt="Benchmark Regression" src="https://img.shields.io/github/actions/workflow/status/jamesgober/metrics-lib/ci.yml?branch=main&label=Regression&logo=github">
     </a>
-    <a href="https://github.com/rust-lang/rfcs/blob/master/text/2495-min-rust-version.md" title="MSRV"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.70%2B-blue"></a>
 </div>
 
 <br>
@@ -94,7 +95,10 @@ For a complete reference with examples, see `docs/API.md`.
 - [`Gauge`](./docs/API.md#gauge) — atomic f64 gauges with math ops, EMA, and min/max helpers
 - [`Timer`](./docs/API.md#timer) — nanosecond timers, RAII guards, and closure/async timing
 - [`RateMeter`](./docs/API.md#ratemeter) — tumbling-window rate tracking and bursts
+- [`Histogram`](./docs/API.md#histogram) — bucketed observations with sum/count and approximate quantiles (v0.9.3)
+- [`LabelSet`](./docs/API.md#labels) — labeled metric instances with bounded cardinality (v0.9.3)
 - [`SystemHealth`](./docs/API.md#systemhealth) — CPU, memory, load, threads, FDs, health score
+- [Exporters](./docs/API.md#exporters) — Prometheus, OpenMetrics, JSON snapshot, StatsD UDP, OTLP/HTTP+JSON (v0.9.3)
 - [Async support](./docs/API.md#async-support) — `AsyncTimerExt`, `AsyncMetricBatch`
 - [Adaptive controls](./docs/API.md#adaptive-controls) — sampling, circuit breaker, backpressure
 - [Prelude](./docs/API.md#prelude) — convenient re-exports
@@ -137,13 +141,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-metrics-lib = "0.9.2"
+metrics-lib = "0.9.3"
 
 # Optional features
-metrics-lib = { version = "0.9.2", features = ["async"] }
+metrics-lib = { version = "0.9.3", features = ["async"] }
 
 # Full feature set (stable + async + serde)
-metrics-lib = { version = "0.9.2", features = ["full"] }
+metrics-lib = { version = "0.9.3", features = ["full"] }
 ```
 
 <hr>
@@ -184,6 +188,46 @@ let memory_gb = metrics().system().mem_used_gb();
 // Rate metering
 metrics().rate("api_calls").tick();
 ```
+
+## Telemetry & Exporters (v0.9.3+)
+
+Five built-in exporters render the current registry state to popular
+backends. All exporters share label and metadata support.
+
+```rust
+use metrics_lib::{init, metrics, LabelSet, Unit};
+use metrics_lib::exporters::{prometheus, openmetrics};
+
+init();
+
+// One-time metric descriptions feed `# HELP` / `# TYPE` / `# UNIT` lines.
+metrics().registry().describe_counter(
+    "http_requests",
+    "Total HTTP requests",
+    Unit::Custom("1"),
+);
+
+// Labeled metrics — `(name, labels)` is the identity.
+let labels = LabelSet::from([("method", "GET"), ("status", "200")]);
+metrics().counter_with("http_requests", &labels).inc();
+
+// Render the registry to Prometheus text format.
+let body = prometheus::render(metrics().registry());
+// Or OpenMetrics:
+let body_om = openmetrics::render(metrics().registry());
+```
+
+| Exporter | Feature flag | Module | Output |
+|---|---|---|---|
+| Prometheus text | (always on) | `metrics_lib::exporters::prometheus` | `String` |
+| OpenMetrics text | (always on) | `metrics_lib::exporters::openmetrics` | `String` |
+| JSON snapshot | `serde` | `metrics_lib::exporters::json` | `String` / `RegistrySnapshot` |
+| StatsD UDP push | `statsd` | `metrics_lib::exporters::statsd` | UDP packets via `StatsdSink` |
+| OTLP/HTTP+JSON | `otlp` (→ `serde`) | `metrics_lib::exporters::otlp` | `String` (POST to `/v1/metrics`) |
+
+End-to-end examples live in [`examples/`](./examples): `labels_demo`,
+`histogram_latency`, `prometheus_endpoint`, `statsd_push`, `otlp_push`,
+`snapshot_serde`.
 
 ## Observability Quick Start
 
@@ -580,13 +624,13 @@ in place.
 
 ```toml
 # All stable features:
-metrics-lib = { version = "0.9.2", features = ["all"] }
+metrics-lib = { version = "0.9.3", features = ["all"] }
 
 # Full build including async and serde:
-metrics-lib = { version = "0.9.2", features = ["full"] }
+metrics-lib = { version = "0.9.3", features = ["full"] }
 
 # Minimal build (counter only):
-metrics-lib = { version = "0.9.2", features = ["minimal"] }
+metrics-lib = { version = "0.9.3", features = ["minimal"] }
 ```
 
 ### Runtime Configuration

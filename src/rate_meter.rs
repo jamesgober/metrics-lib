@@ -71,6 +71,7 @@ pub struct RateMeter {
 
 /// Rate statistics
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct RateStats {
     /// Total events recorded
     pub total_events: u64,

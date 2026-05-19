@@ -28,6 +28,7 @@ pub struct Gauge {
 
 /// Gauge statistics
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct GaugeStats {
     /// Current gauge value
     pub value: f64,

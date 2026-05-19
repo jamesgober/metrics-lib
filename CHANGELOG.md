@@ -10,6 +10,156 @@
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-05-18
+
+**Telemetry release.** Ships labeled metrics with bounded cardinality, a
+production-quality `Histogram` type, full `serde` derive coverage for every
+stats / snapshot type, and **five built-in exporters** (Prometheus,
+OpenMetrics, JSON snapshot, StatsD UDP push, OTLP/HTTP+JSON). Six new
+runnable examples demonstrate each end-to-end. All changes are additive —
+zero breaking changes for existing 0.9.2 call-sites.
+
+### Added
+
+- `src/labels.rs` (new module): `Label` type alias and `LabelSet` —
+  sorted/deduplicated label key/value collection with stable hashing and
+  rendering. Construction via `LabelSet::EMPTY` / `LabelSet::new()` /
+  `LabelSet::from([(k, v), ...])` / `FromIterator<(K, V)>` /
+  `.add(k, v)` / `.with(k, v)`. Helpers `to_prometheus()` and
+  `to_statsd()` produce canonical wire formats with appropriate escaping.
+  `serde::Serialize` is wired behind the `serde` feature (serialises as a
+  flat JSON map).
+- `src/histogram.rs` (new module, gated on `histogram`): `Histogram`,
+  `HistogramSnapshot`, `HistogramBucket` types. Construction via
+  `Histogram::with_buckets`, `Histogram::linear`,
+  `Histogram::exponential`, `Histogram::default_seconds`. Observation via
+  `observe(value)` (silently drops non-finite) and `try_observe(value)`
+  (returns `MetricsError::InvalidValue`). Read API:
+  `count()`, `sum()`, `mean()`, `age()`, `quantile(q)` (bucket-interpolated
+  estimate), `snapshot()` (cumulative buckets with trailing `+Inf`),
+  `reset()`. The `DEFAULT_SECONDS_BUCKETS` constant (the Prometheus default
+  latency-seconds bucket layout) is re-exported from the crate root.
+- `src/metadata.rs` (new module): `MetricKind` (`Counter` / `Gauge` /
+  `Timer` / `Rate` / `Histogram`), `Unit` (enumerated standard units plus
+  `Custom(&'static str)`), and `MetricMetadata { help, unit, kind }`.
+  Powers `# HELP` / `# TYPE` / `# UNIT` lines in Prometheus / OpenMetrics
+  output, the `description` field in OTLP, and unit suffixes in StatsD.
+- `Registry`: new labeled-metric storage (`HashMap<(String, LabelSet),
+  Arc<T>>`) for every metric type, alongside the existing unlabeled
+  fast-path maps. Methods added (each gated on the relevant feature):
+  - `get_or_create_counter_with(name, &LabelSet)` /
+    `try_get_or_create_counter_with(...)`
+  - `get_or_create_gauge_with` / `try_get_or_create_gauge_with`
+  - `get_or_create_timer_with` / `try_get_or_create_timer_with`
+  - `get_or_create_rate_meter_with` / `try_get_or_create_rate_meter_with`
+  - `get_or_create_histogram` / `get_or_create_histogram_with` /
+    `try_get_or_create_histogram_with`
+  - `configure_histogram(name, buckets)` — pre-register bucket boundaries
+    for a metric name (used by the next `histogram*` registration).
+  - Snapshot accessors for exporters: `counter_entries()`,
+    `gauge_entries()`, `timer_entries()`, `rate_meter_entries()`,
+    `histogram_entries()` — each returns `Vec<(String, LabelSet, Arc<T>)>`
+    over both unlabeled and labeled instances.
+  - Metadata API: `describe(name, MetricMetadata)`,
+    `describe_counter / describe_gauge / describe_timer /
+    describe_rate / describe_histogram`, `metadata(name) ->
+    Option<MetricMetadata>`.
+  - Cardinality control: `set_cardinality_cap(usize)`,
+    `cardinality_cap()`, `cardinality_count()`,
+    `cardinality_overflows()`. Default cap: `DEFAULT_CARDINALITY_CAP =
+    10_000` unique `(name, labels)` tuples across **all** labeled metric
+    types. Exceeding the cap routes `*_with` calls to per-type
+    process-global overflow sinks (never exported, never panicking) and
+    returns `Err(MetricsError::CardinalityExceeded)` from the `try_*_with`
+    paths.
+- `MetricsCore`: new labeled lookup methods (`counter_with` /
+  `try_counter_with` / `gauge_with` / `try_gauge_with` / `timer_with` /
+  `try_timer_with` / `rate_with` / `try_rate_with` / `histogram` /
+  `histogram_with` / `try_histogram_with`).
+- `MetricsError::CardinalityExceeded` — new error variant returned by
+  every `try_*_with` lookup when the cap is full.
+- `src/exporters/` (new top-level public module): each sub-module renders
+  a `&Registry` to a backend format.
+  - `exporters::prometheus::render` / `render_into` — Prometheus text
+    exposition format. Counters/gauges/timers (rendered as a Prometheus
+    `summary` shape), rate meters, and histograms (cumulative `_bucket`
+    rows + `_sum` + `_count`) all supported with labels and metadata.
+  - `exporters::openmetrics::render` / `render_into` — OpenMetrics
+    superset with `_total` suffix on counters, full `# UNIT` lines, and
+    trailing `# EOF\n`.
+  - `exporters::json` (behind `serde`) — `RegistrySnapshot` plus
+    sub-series structs (`CounterSeries`, `GaugeSeries`, `TimerSeries`,
+    `RateSeries`, `HistogramSeries`, `CardinalitySnapshot`) all deriving
+    `serde::Serialize`. Convenience: `snapshot(registry)`,
+    `render(registry) -> String`, `render_pretty(registry) -> String`.
+  - `exporters::statsd` (behind `statsd`) — `StatsdSink` push exporter
+    with `new(addr)`, `with_socket`, `with_prefix`, `with_packet_size`,
+    `send(registry)`, `render(registry)`. Cumulative-gauge wire mode
+    (`|g`) + DogStatsD tag extension; automatic MTU-bounded packet
+    splitting.
+  - `exporters::otlp` (behind `otlp`, which pulls in `serde`) —
+    OTLP/HTTP+JSON metrics payload via `build(registry, service_name) ->
+    ExportMetricsServiceRequest`, `render(registry, service_name) ->
+    String`, `render_pretty(registry, service_name) -> String`. Maps
+    Counter → `Sum (isMonotonic=true)`, Gauge → `Gauge`, Timer / Histogram
+    → `Histogram` (non-cumulative `bucketCounts` + `explicitBounds`),
+    RateMeter → `Gauge` with `_per_second` suffix.
+- `#[derive(serde::Serialize)]` is now wired behind the `serde` feature
+  on every stats / snapshot type: `CounterStats`, `GaugeStats`,
+  `TimerStats`, `RateStats`, `SystemSnapshot`, `ProcessStats`,
+  `HealthStatus`, `SamplingStats`, `MetricKind`, `Unit`,
+  `MetricMetadata`, `HistogramSnapshot`, `HistogramBucket`, `LabelSet`.
+- Six new examples in `examples/`:
+  - `labels_demo` — labeled counters + cardinality control walkthrough.
+  - `histogram_latency` — `Histogram` with p50/p95/p99 readouts.
+  - `prometheus_endpoint` — Axum `/metrics` handler backed by the
+    Prometheus exporter.
+  - `statsd_push` — `StatsdSink` UDP push with DogStatsD tags and prefix.
+  - `otlp_push` — render OTLP/HTTP+JSON payload for a collector POST.
+  - `snapshot_serde` — `exporters::json` pretty-printed registry dump.
+- `Cargo.toml`: new feature flags `statsd`, `otlp` (auto-enables
+  `serde`), `exporters-all` (`serde + statsd + otlp`). `serde` now wires
+  through to an optional `serde_json = "1.0"` dependency used by the
+  JSON exporter. `full` aggregate flag now includes `statsd` + `otlp`.
+- `docs/API.md`: new `# Histogram`, `# Labels`, `# Metric metadata`,
+  `# Exporters (v0.9.3)` sections (each with multiple code examples
+  covering happy path + error cases).
+- `README.md`: new "Telemetry & Exporters" section with the full
+  exporter table and a runnable code snippet, plus updated API Overview
+  bullets calling out `Histogram` / `LabelSet` / `Exporters`.
+
+### Changed
+
+- `Registry::clear` now also clears labeled maps, metadata, and resets
+  `cardinality_count` (overflow count is monotonic and intentionally
+  preserved).
+- `Registry::metric_count` now also counts labeled instances and
+  histograms.
+- `Cargo.toml`: package version bumped to `0.9.3`. `histogram` and
+  `serde` features are no longer "reserved" — both are fully implemented
+  in 0.9.3.
+- `src/exporters/prometheus.rs` + `openmetrics.rs`: helpers
+  (`emit_help_and_type`, `emit_help_type_unit`, `escape_help`,
+  `merge_le_label`, `format_u64`, `format_f64`) are now per-feature
+  gated so the modules compile cleanly under every feature combination
+  (including `--no-default-features`).
+- `src/registry.rs`: imports (`Arc`, `OnceLock`, `LabelSet`,
+  `MetricsError`, `Result`) and the `try_acquire_slot` helper are gated
+  on `any(count, gauge, timer, meter, histogram)` so the registry
+  compiles warning-free with no metric features enabled.
+- `metadata::Unit` now derives `Default` (replacing the manual `impl
+  Default` flagged by clippy's `derivable_impls`).
+- All version refs in `README.md` and `docs/API.md` bumped from `0.9.2`
+  to `0.9.3`.
+
+### Fixed
+
+- Internal: registry's `metric_count` previously underreported when
+  labeled metrics were present (the labeled maps didn't exist before).
+  Now sums both tracks.
+
+
+
 ## [0.9.2] - 2026-05-18
 
 **API fix and cleanup release.** Fixes the `SystemHealth` refresh-throttle
@@ -629,7 +779,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/jamesgober/metrics-lib/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jamesgober/metrics-lib/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/jamesgober/metrics-lib/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/jamesgober/metrics-lib/compare/v0.8.6...v0.9.0
