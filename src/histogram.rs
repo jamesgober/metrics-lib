@@ -734,14 +734,10 @@ mod tests {
         assert_eq!(values, vec![Some(0.05), Some(0.5), Some(50.0)]);
         assert!(snap.exemplar(0).unwrap().timestamp > 0.0);
         // Exporters that drop exemplars never copy them.
-        assert!(h.snapshot_counts().exemplars.is_empty());
+        assert_eq!(h.snapshot_counts().exemplars.len(), 0);
         // A histogram without exemplars allocates none.
-        assert!(
-            Histogram::with_buckets([1.0])
-                .snapshot()
-                .exemplars
-                .is_empty()
-        );
+        let plain = Histogram::with_buckets([1.0]).snapshot();
+        assert_eq!(plain.exemplars.capacity(), 0);
         assert_eq!(h.count(), 3);
     }
 
