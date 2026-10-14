@@ -10,7 +10,19 @@
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-10-13
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [2.0.0] - 2026-10-14
 
 A correctness release. The 2026-10-13 audit found bugs that 1.0 had frozen
 into its API: Prometheus/OpenMetrics output that scrapers reject, memory
@@ -42,7 +54,9 @@ and its replacement is listed in
 - Histogram exemplars (`observe_with_exemplar`), emitted in OpenMetrics;
   with the `tracing` feature, `span_exemplar` and
   `observe_with_span_exemplar` take the trace context from the current
-  span.
+  span. Exemplars live in `HistogramSnapshot::exemplars` (empty and
+  unallocated when none were recorded), so `HistogramBucket` keeps its 1.x
+  shape and exporters that cannot carry exemplars never copy them.
 - Owned timer guards: `Timer::start_owned`, `MetricsCore::start_timer`,
   `MetricsCore::time`; guards are `#[must_use]` and have `discard()`.
 - Standard Prometheus `process_*` series (`process_cpu_seconds_total`,
@@ -55,7 +69,14 @@ and its replacement is listed in
   metrics-lib registry.
 - Feature `http`: `MetricsServer` (a dependency-free `/metrics` and
   `/health` endpoint with Prometheus/OpenMetrics content negotiation) and a
-  Pushgateway client (`push`, `push_add`, `delete`).
+  Pushgateway client (`push`, `push_add`, `delete`). The server serves each
+  connection on its own short-lived thread (at most `MAX_CONNECTIONS` = 16
+  at once, 503 beyond that), gives every client a total deadline to send
+  its request head (`REQUEST_TIMEOUT`, 5 s, then 408) and to read the
+  response (`RESPONSE_TIMEOUT`, 10 s), and answers heads over
+  `MAX_REQUEST_HEAD` (8 KiB) with 431. The Pushgateway client enforces one
+  deadline over connecting, sending and reading, and tries every resolved
+  address.
 - Feature `tower`: `RedLayer`, request rate/error/duration middleware for
   any tower service (axum, tonic, hyper).
 - OTLP: `OtlpExporter` with cumulative or delta temporality, stable series
@@ -205,25 +226,96 @@ Audit IDs refer to the 2026-10-13 audit.
   the guides compiles and runs; feature tables, paths, test counts, memory
   layout and performance figures match the code.
 
+Found by the independent re-audit of the 2.0.0 candidate and fixed before
+release (ML2 IDs):
+
+- ML2-001: `clippy::map_unwrap_or` in the Linux-only system code failed
+  CI on current stable; Linux and macOS code is now linted locally too.
+- ML2-002: one idle or slow client could stall `MetricsServer` for
+  seconds to hours, every scrape waited for a 50 ms accept poll, and an
+  oversized head was answered 200.
+- ML2-003: on Windows each `render_core` sampled the process through a
+  full process-table scan (hundreds of milliseconds on a busy host), and
+  the system sampler could take longer than its interval. Off Linux the
+  exporters now serve the system monitor's latest sample, and the monitor
+  backs off so it never samples more than a quarter of the time.
+- ML2-004: exemplars were stored inline in every `HistogramBucket`, which
+  made every snapshot several times larger and cloned exemplar labels for
+  exporters that drop them.
+- ML2-005: `Registry::clear` racing with registrations could leave the
+  series count below the real number of series and so let the cap be
+  exceeded.
+- ML2-006: the Pushgateway timeout applied per socket call (a 2 s timeout
+  took 28 s against a slow gateway), and only the first resolved address
+  was tried. Timeouts now surface as `TimedOut` on every platform.
+- ML2-007: StatsD and OTLP did not detect derived-name collisions (a timer
+  `t` and a counter `t.count`, a rate `q` and a gauge `q.per_second`); the
+  first family keeps the name, as in the text exporters, and the clash is
+  counted in `exposition_conflicts`.
+- ML2-008: `Summary::snapshot` copied the sketch once per quantile; it now
+  reads it once for all quantiles.
+- ML2-009: a reader racing the first recording (or a reset) of a timer
+  could export a minimum of 584 years.
+- ML2-010: resetting a registered counter, histogram, timer or summary did
+  not start a new OTLP series; the exporter now moves the start time.
+- ML2-011 / D29: `MetricsError` stated the wrong name and label-key rules.
+- ML2-012 / D33–D36: performance regressions and the cost of process
+  metrics off Linux were not disclosed; see Performance below and
+  `docs/PERFORMANCE.md`.
+- ML2-013: `RedLayer` did not time work done inside the inner `call`, and
+  a panic there left the in-flight gauge raised.
+- ML2-014: `remove`, `remove_series`, `metadata` and `kind_of` did not
+  repair names the way the lookups do; `ScopedRegistry` lacked
+  `describe_summary`, `describe_up_down_counter`, `remove*`, `metadata`
+  and `kind_of`; a clash between two counter types was reported as
+  "counter versus counter".
+- ML2-016: release mechanics (an empty milestone commit, an undated
+  `[Unreleased]` skeleton).
+- ML2-017: the lockfile is refreshed within the MSRV (tokio 1.53,
+  serde_json 1.0.154, http 1.5).
+- ML2-018: pedantic lints in tests, benches and examples.
+- D30: the README called MSRV bumps minor; they are major, as
+  `docs/STABILITY.md` says.
+- D31: the exposition property test now runs 2 048 random registries per
+  run, as documented.
+- D32: the README overstated the hot path as one atomic operation for
+  every type.
+- ML2-015 (exemplars dropped while another thread writes the same bucket's
+  exemplar) is documented behaviour and stays: the hot path never waits.
+
 ### Security
 
 - Names, label keys and label values can no longer inject lines into
   Prometheus, OpenMetrics or StatsD output, and every collection that
   grows with input is capped (ML-008, ML-009).
+- `MetricsServer` cannot be stalled by idle, slow or oversized clients
+  (ML2-002), and the Pushgateway client cannot hang past its timeout
+  (ML2-006).
 - `#![forbid(unsafe_code)]`.
 
 ### Performance
 
-Measured with Criterion on an AMD Ryzen 9 9950X3D, Windows 11, Rust 1.85,
-on a machine shared with other builds; `docs/PERFORMANCE.md` has the full
-table and the method. `Counter::inc` takes about 4.5 ns; the 1.x figure of
-about 1.5 ns did not reproduce on this machine, and the claim is corrected
-everywhere. With eight threads incrementing one counter, a
-`ShardedCounter` finished 7.5 to 8.7 times sooner than a `Counter` in two
-runs. A labeled registry lookup takes 84 ns with two labels (1.0: 136 ns
-with one label) and no longer allocates; unlabeled lookups cost 2 to 4 ns
-more than in 1.0 because they share the bounded family map. Rendering 400
-series as Prometheus text takes about 0.24 ms.
+Measured on an AMD Ryzen 9 9950X3D, Windows 11, on a machine shared with
+other builds; `docs/PERFORMANCE.md` has the full tables and the method,
+and `tools/compare-1x` reproduces the comparison with 1.0.0.
+
+- Unchanged: `Counter::inc` (3.9 ns), `Timer::record_ns` (7.6 ns),
+  `Histogram::observe` (12.6 ns). The 1.x claim of about 1.5 ns for
+  `Counter::inc` did not reproduce with the 1.0.0 code either; it is
+  corrected everywhere.
+- Faster: a labeled lookup takes 57 ns instead of 98 ns (−42 %) and no
+  longer allocates. With eight threads on one counter, `ShardedCounter`
+  finishes 5 to 9 times sooner than `Counter`. Rendering 400 series takes
+  0.14 ms.
+- Slower: an unlabeled lookup +8 % (+2 ns, the bounded family map, the
+  shard routing and the kind check); `Histogram::snapshot` +5 % (+2 ns, the
+  exemplar vector); `RateMeter::tick` +13 % and `rate()` +41 % (+5 ns and
+  +9 ns: the monotonic clock and the sliding-window estimate that fix
+  ML-014).
+- Off Linux, a fresh `process_*` sample costs a `sysinfo` scan of every
+  process (33–39 ms on the reference host, up to 500 ms under heavy
+  load); the exporters serve the system monitor's cached sample instead,
+  so after the first scrape `render_core` costs the same as `render`.
 
 ## [1.0.0] - 2026-05-19
 
