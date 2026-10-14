@@ -122,7 +122,9 @@ and its replacement is listed in
   stable and MSRV on Linux/macOS/Windows, a cargo-hack feature matrix, a
   coverage gate, a docs.rs build and a semver check; `deny.toml` has no
   advisory ignores. The Miri job is gone because the crate no longer
-  contains `unsafe` code.
+  contains `unsafe` code. Warnings are denied in CI instead of with
+  `#![deny(warnings)]`, so lints added to future compilers cannot break
+  downstream or docs.rs builds.
 
 ### Deprecated
 
