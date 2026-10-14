@@ -38,12 +38,16 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
+#[allow(clippy::cast_precision_loss)] // exact: 1e9 < 2^53
+const NANOS_PER_SEC_F64: f64 = NANOS_PER_SEC as f64;
 /// Smallest accepted primary window.
 pub const MIN_RATE_WINDOW: Duration = Duration::from_millis(1);
 
 /// One sliding-window counter.
 struct Window {
     width_ns: u64,
+    /// `1 / width_ns`, so the hot paths multiply instead of divide.
+    inv_width_ns: f64,
     /// Index (`now / width`) of the slot `current` belongs to.
     slot: AtomicU64,
     current: AtomicU64,
@@ -51,9 +55,11 @@ struct Window {
 }
 
 impl Window {
-    const fn new(width_ns: u64) -> Self {
+    #[allow(clippy::cast_precision_loss)] // widths are far below 2^52 ns
+    fn new(width_ns: u64) -> Self {
         Self {
             width_ns,
+            inv_width_ns: 1.0 / width_ns as f64,
             slot: AtomicU64::new(0),
             current: AtomicU64::new(0),
             previous: AtomicU64::new(0),
@@ -62,8 +68,21 @@ impl Window {
 
     #[inline]
     fn record(&self, now_ns: u64, n: u64) {
-        let target = now_ns / self.width_ns;
-        let mut seen = self.slot.load(Ordering::Acquire);
+        let seen = self.slot.load(Ordering::Acquire);
+        // Fast path: still inside the current slot (or an older clock
+        // reading than the last writer's), so no division and no CAS.
+        if now_ns < seen.saturating_add(1).saturating_mul(self.width_ns) {
+            let _ = self.current.fetch_add(n, Ordering::Relaxed);
+            return;
+        }
+        self.roll(now_ns / self.width_ns, seen);
+        let _ = self.current.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Advance to slot `target`, archiving the finished slot. Only the thread
+    /// that wins the compare-and-swap archives.
+    #[cold]
+    fn roll(&self, target: u64, mut seen: u64) {
         while target > seen {
             match self
                 .slot
@@ -73,29 +92,31 @@ impl Window {
                     let finished = self.current.swap(0, Ordering::AcqRel);
                     let carried = if target == seen + 1 { finished } else { 0 };
                     self.previous.store(carried, Ordering::Release);
-                    break;
+                    return;
                 }
                 Err(actual) => seen = actual,
             }
         }
-        let _ = self.current.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Sliding estimate of events in the last `width` at `now_ns`.
     #[allow(clippy::cast_precision_loss)] // statistics: f64 precision is the contract
     fn estimate(&self, now_ns: u64) -> f64 {
-        let target = now_ns / self.width_ns;
         let slot = self.slot.load(Ordering::Acquire);
         let current = self.current.load(Ordering::Relaxed) as f64;
         let previous = self.previous.load(Ordering::Relaxed) as f64;
-        let into_slot = (now_ns % self.width_ns) as f64 / self.width_ns as f64;
-        if target == slot {
-            previous * (1.0 - into_slot) + current
-        } else if target == slot + 1 {
-            current * (1.0 - into_slot)
-        } else if target < slot {
+        let start = slot.saturating_mul(self.width_ns);
+        if now_ns < start {
             // A reader with an older clock reading than the last writer.
-            current
+            return current;
+        }
+        let offset = now_ns - start;
+        if offset < self.width_ns {
+            let into_slot = offset as f64 * self.inv_width_ns;
+            previous * (1.0 - into_slot) + current
+        } else if offset < self.width_ns.saturating_mul(2) {
+            let into_slot = (offset - self.width_ns) as f64 * self.inv_width_ns;
+            current * (1.0 - into_slot)
         } else {
             0.0
         }
@@ -107,9 +128,9 @@ impl Window {
         self.previous.store(0, Ordering::Relaxed);
     }
 
-    #[allow(clippy::cast_precision_loss)]
-    fn width_secs(&self) -> f64 {
-        self.width_ns as f64 / NANOS_PER_SEC as f64
+    /// `1 / width` in seconds.
+    fn per_second_factor(&self) -> f64 {
+        self.inv_width_ns * NANOS_PER_SEC_F64
     }
 }
 
@@ -280,7 +301,7 @@ impl RateMeter {
 
     fn rate_at(&self, now_ns: u64) -> f64 {
         let w = self.primary_window();
-        w.estimate(now_ns) / w.width_secs()
+        w.estimate(now_ns) * w.per_second_factor()
     }
 
     /// Estimated events in the last second.
@@ -329,7 +350,7 @@ impl RateMeter {
     #[allow(clippy::cast_precision_loss)]
     fn can_allow_at(&self, now_ns: u64, n: u64, limit: f64) -> bool {
         let w = self.primary_window();
-        (w.estimate(now_ns) + n as f64) / w.width_secs() <= limit
+        (w.estimate(now_ns) + n as f64) * w.per_second_factor() <= limit
     }
 
     /// Record one event if [`RateMeter::can_allow`] says it fits under

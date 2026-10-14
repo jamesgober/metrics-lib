@@ -476,13 +476,20 @@ impl Histogram {
     pub(crate) fn snapshot_counts(&self) -> HistogramSnapshot {
         let mut buckets = Vec::with_capacity(self.bucket_bounds.len() + 1);
         let mut cumulative: u64 = 0;
-        for (bound, counter) in self.bucket_bounds.iter().zip(self.bucket_counts.iter()) {
-            cumulative = cumulative.saturating_add(counter.load(Ordering::Relaxed));
-            buckets.push(HistogramBucket {
-                upper_bound: *bound,
-                count: cumulative,
-            });
-        }
+        // `extend` over zipped slices writes without per-element capacity
+        // checks.
+        buckets.extend(
+            self.bucket_bounds
+                .iter()
+                .zip(self.bucket_counts.iter())
+                .map(|(bound, counter)| {
+                    cumulative = cumulative.saturating_add(counter.load(Ordering::Relaxed));
+                    HistogramBucket {
+                        upper_bound: *bound,
+                        count: cumulative,
+                    }
+                }),
+        );
         let count = self.count().max(cumulative);
         buckets.push(HistogramBucket {
             upper_bound: f64::INFINITY,
