@@ -20,12 +20,12 @@
 //!
 //! | Registry kind | Lines |
 //! |---|---|
-//! | counter | `name:Δ|c` (or `name:total|g`) |
-//! | up/down counter, gauge | `name:value|g` |
-//! | timer | `name.count` (counter rule), `name.sum_seconds`, `name.min_seconds`, `name.max_seconds` as `|g` |
-//! | rate meter | `name.total` (counter rule), `name.per_second|g` |
-//! | histogram | `name.count` (counter rule), `name.sum`, `name.p50`, `name.p95`, `name.p99` as `|g` |
-//! | summary | `name.count` (counter rule), `name.sum` and one `name.pNN` per quantile as `|g` |
+//! | counter | `name:Δ\|c` (or `name:total\|g`) |
+//! | up/down counter, gauge | `name:value\|g` |
+//! | timer | `name.count` (counter rule), `name.sum_seconds`, `name.min_seconds`, `name.max_seconds` as `\|g` |
+//! | rate meter | `name.total` (counter rule), `name.per_second\|g` |
+//! | histogram | `name.count` (counter rule), `name.sum`, `name.p50`, `name.p95`, `name.p99` as `\|g` |
+//! | summary | `name.count` (counter rule), `name.sum` and one `name.pNN` per quantile as `\|g` |
 //!
 //! A negative gauge is sent as `name:0|g` followed by `name:-x|g`: in the
 //! StatsD protocol a leading sign means "adjust by", so a bare `name:-5|g`
