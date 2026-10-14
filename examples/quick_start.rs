@@ -1,42 +1,30 @@
-//! Quick Start example for metrics-lib
+//! The basics: counters, gauges, timers and a Prometheus exposition.
 //!
-//! Run with:
-//!   cargo run --example quick_start --release
+//! Run with: `cargo run --example quick_start`
 
-use metrics_lib::{init, metrics};
+use metrics_lib::exporters::prometheus;
+use metrics_lib::{LabelSet, metrics};
 use std::time::Duration;
 
 fn main() {
-    // Initialize global registry once
-    init();
+    // The global instance initialises itself on first use.
+    let m = metrics();
 
-    // Counter usage
-    let c = metrics().counter("qs.requests");
-    c.inc();
-    c.add(41);
+    let requests = m.counter("requests");
+    requests.inc();
+    requests.add(41);
+    m.counter_with("requests", &LabelSet::from([("status", "500")]))
+        .inc();
 
-    // Gauge usage
-    let g = metrics().gauge("qs.cpu");
-    g.set(42.5);
-    g.add(7.5);
+    m.gauge("queue_depth").set(7.0);
 
-    // Timer usage (RAII)
-    let t = metrics().timer("qs.db");
     {
-        let _guard = t.start();
-        // simulate some work
-        std::thread::sleep(Duration::from_millis(1));
+        // `start_owned` keeps the timer alive for the guard's lifetime.
+        let _guard = m.timer("db_query_seconds").start_owned();
+        std::thread::sleep(Duration::from_millis(2));
     }
+    let rows = m.time("load_rows_seconds", || 3);
 
-    // RateMeter usage
-    let r = metrics().rate("qs.qps");
-    r.tick_n(5);
-
-    // Read back values (sanity)
-    println!(
-        "quick_start: counter={}, gauge={:.2}, rate={:.2}",
-        c.get(),
-        g.get(),
-        r.rate()
-    );
+    println!("requests={} rows={rows}", requests.get());
+    print!("{}", prometheus::render(m.registry()));
 }

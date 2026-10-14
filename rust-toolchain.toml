@@ -1,0 +1,12 @@
+# Toolchain for work inside this repository: formatting, lints and docs run
+# on this pinned stable, so a new compiler release cannot turn CI red on its
+# own. Bump it deliberately. It only affects builds started in this tree,
+# never crates that depend on metrics-lib.
+#
+# The MSRV (1.85, `rust-version` in Cargo.toml) is checked explicitly:
+# CI's MSRV jobs set RUSTUP_TOOLCHAIN=1.85.0, which overrides this file;
+# locally run `cargo +1.85.0 test --all-features`.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -13,34 +13,21 @@
       'timer.start_stop': 0.08,
       'rate.tick': 0.08,
       'rate.tick_n': 0.08,
-      'rate.tick_n.concurrent(4)': 0.10,
+      'registry_lookup.counter_unlabeled_hit': 0.10,
+      'registry_lookup.counter_labeled_hit': 0.10,
       // Sub-ns gauge operations can be noisier; keep looser
       'gauge.set': 0.18,
       'gauge.set_max': 0.18,
-      'gauge.set_min': 0.18,
-      'gauge.access': 0.18
+      'gauge.get': 0.18
     }
   };
   function friendlyName(name){
-    if(name === 'tick_n') return 'rate.tick_n';
-    if(name === 'tick') return 'rate.tick';
-    if(name === 'tick_n_concurrent_4_threads') return 'rate.tick_n.concurrent(4)';
-    if(name === 'increment') return 'counter.inc';
-    if(name === 'add') return 'counter.add';
-    if(name === 'get') return 'get';
-    if(name === 'set') return 'gauge.set';
-    if(name === 'set_max') return 'gauge.set_max';
-    if(name === 'set_min') return 'gauge.set_min';
-    if(name === 'concurrent_add_bursts_4_threads') return 'counter.add.concurrent(4)';
-    if(name === 'concurrent_add_set_4_threads') return 'gauge.add_set.concurrent(4)';
-    if(name === 'counter_access') return 'counter.access';
-    if(name === 'gauge_access') return 'gauge.access';
-    if(name === 'record') return 'timer.record';
-    if(name === 'record_ns') return 'timer.record_ns';
-    if(name === 'start_stop') return 'timer.start_stop';
-    if(name === 'stats') return 'timer.stats';
-    if(['1','2','4','8','16','32','64'].indexOf(String(name))>=0) return 'threads:'+name;
-    return name;
+    // Aggregated names are '<group>/<function>[/<input>]' (Criterion 0.7 layout).
+    var n = String(name).split('/').join('.');
+    if(n.indexOf('rate_meter.')===0) return 'rate.'+n.slice('rate_meter.'.length);
+    var m = /^contended_increments\.(\w+)\.(\d+)$/.exec(n);
+    if(m) return 'threads:'+m[2]+' '+m[1];
+    return n;
   }
   function readCpuMhz(){
     if(window.CPU_MHZ) return window.CPU_MHZ;
@@ -153,9 +140,9 @@
       var datasets = keys.map(function(k, i){ return { label:k, data:history.series[k]||[], borderColor:color(i), backgroundColor:'transparent', tension:0.2 } });
       new Chart(ctx, { type:'line', data:{ labels: history.labels, datasets: datasets }, options:{ responsive:true, scales:{ y:{ title:{ display:true, text:'ns/op' }}, x:{ ticks:{ maxRotation:45, minRotation:0 } } } } });
     }
-    var counterKeys = ['counter.inc','counter.add','get'];
-    var timerKeys = ['timer.record','timer.record_ns','timer.start_stop','timer.stats'];
-    var rateKeys = ['rate.tick','rate.tick_n','rate.tick_n.concurrent(4)'];
+    var counterKeys = ['counter.inc','counter.add','counter.get','counter.sharded_inc'];
+    var timerKeys = ['timer.record','timer.record_ns','timer.start_stop','timer.start_owned_drop'];
+    var rateKeys = ['rate.tick','rate.tick_n','rate.rate'];
     var threadKeys = Object.keys(history.series).filter(function(k){ return k.indexOf('threads:')===0; }).sort(function(a,b){ return parseInt(a.split(':')[1]) - parseInt(b.split(':')[1])});
     counterKeys = counterKeys.filter(function(k){return history.series[k]});
     timerKeys = timerKeys.filter(function(k){return history.series[k]});
@@ -168,7 +155,7 @@
   function renderCards(latest){
     var el = byId('summary-cards'); if(!el) return;
     el.innerHTML='';
-    var pick = ['counter.inc','counter.add','timer.record','timer.record_ns','rate.tick','rate.tick_n','rate.tick_n.concurrent(4)'];
+    var pick = ['counter.inc','counter.add','timer.record','timer.record_ns','rate.tick','rate.tick_n','registry_lookup.counter_unlabeled_hit'];
     var map = {}; latest.forEach(function(e){ map[friendlyName(e.name)] = e; });
     pick.forEach(function(k){ if(map[k]){
       var v = map[k]; var card = document.createElement('div'); card.className='card';

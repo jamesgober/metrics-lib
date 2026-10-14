@@ -1,49 +1,31 @@
-//! Demonstrates pushing the current registry state to a StatsD agent via UDP.
+//! Push the registry to a StatsD / DogStatsD agent over UDP.
 //!
-//! Run with:
-//!   cargo run --example statsd_push --features statsd --release
-//!
-//! By default this points at `127.0.0.1:8125` (the canonical StatsD/DogStatsD
-//! UDP port). Override with `STATSD_ADDR=host:port`. The example *renders*
-//! the body and prints it to stdout even when no agent is listening, so you
-//! can verify the wire format without setting up an agent.
+//! Run with: `cargo run --example statsd_push --features statsd`
+//! The target defaults to `127.0.0.1:8125`; override with `STATSD_ADDR`. UDP
+//! needs no listener, so the example works without an agent.
 
-use metrics_lib::exporters::statsd::StatsdSink;
-use metrics_lib::{init, metrics, LabelSet};
-use std::env;
+use metrics_lib::exporters::statsd::{CounterMode, StatsdSink};
+use metrics_lib::{LabelSet, MetricsCore};
+use std::time::Duration;
 
-fn main() {
-    init();
-    let m = metrics();
+fn main() -> std::io::Result<()> {
+    let core = MetricsCore::new();
+    let requests = core.counter_with("requests", &LabelSet::from([("status", "200")]));
+    requests.add(36);
+    core.gauge("cpu_used").set(73.2);
+    core.gauge("temperature_delta").set(-4.0);
+    core.timer("rpc").record(Duration::from_micros(850));
 
-    m.counter("requests").add(42);
-    m.counter_with(
-        "requests",
-        &LabelSet::from([("status", "200"), ("method", "GET")]),
-    )
-    .add(36);
-    m.gauge("cpu_used").set(73.2);
-    m.gauge_with("cpu_used", &LabelSet::from([("core", "0")]))
-        .set(81.0);
-    {
-        let t = m.timer("rpc_latency");
-        let _g = t.start();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    let addr = std::env::var("STATSD_ADDR").unwrap_or_else(|_| "127.0.0.1:8125".to_owned());
+    let sink = StatsdSink::new(addr.as_str())?
+        .with_prefix("myapp.")
+        .with_counter_mode(CounterMode::Delta);
 
-    let addr = env::var("STATSD_ADDR").unwrap_or_else(|_| "127.0.0.1:8125".to_string());
-    let sink = StatsdSink::new(&*addr)
-        .expect("bind UDP")
-        .with_prefix("demo.");
-
-    // Render so we can show the wire format regardless of whether an agent
-    // is actually listening at `addr`.
-    let body = sink.render(m.registry());
-    println!("===== StatsD wire format (would be sent to {addr}) =====");
-    println!("{body}");
-
-    match sink.send(m.registry()) {
-        Ok(n) => println!("Pushed {n} bytes to {addr}"),
-        Err(e) => eprintln!("StatsD push to {addr} failed: {e}"),
-    }
+    println!("--- first push ---\n{}", sink.render(core.registry()));
+    requests.add(4);
+    println!("--- second push: counters send only the increase ---");
+    print!("{}", sink.render(core.registry()));
+    let bytes = sink.send(core.registry())?;
+    println!("sent {bytes} bytes to {addr}");
+    Ok(())
 }

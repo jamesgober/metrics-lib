@@ -1,0 +1,2 @@
+# Proper nouns used throughout the docs; `..` keeps clippy's default list.
+doc-valid-idents = ["OpenMetrics", "StatsD", "DogStatsD", "OpenTelemetry", "GitHub", "macOS", "FreeBSD", "SipHash", "DDSketch", ".."]
