@@ -20,9 +20,9 @@ pub enum MetricsError {
     /// A metric name failed validation.
     ///
     /// Names must be 1..=[`MAX_NAME_LEN`](crate::MAX_NAME_LEN) bytes of
-    /// `[A-Za-z0-9_:.]`, must not start with a digit and must not start with
-    /// `__` (reserved by Prometheus). The non-`try` registry methods sanitise
-    /// the name instead of returning this error; see
+    /// `[A-Za-z0-9_.]` and start with an ASCII letter (so no `:` and no
+    /// leading `_` or digit). The non-`try` registry methods repair the name
+    /// instead of returning this error; see
     /// [`sanitize_metric_name`](crate::sanitize_metric_name).
     ///
     /// **What to do:** fix the name at the call site. Names built from
@@ -36,7 +36,7 @@ pub enum MetricsError {
     /// A label key or value failed validation.
     ///
     /// Keys must be 1..=[`MAX_LABEL_KEY_LEN`](crate::MAX_LABEL_KEY_LEN) bytes
-    /// of `[A-Za-z0-9_]`, must not start with a digit or with `__`. Values may
+    /// of `[A-Za-z0-9_]` and start with an ASCII letter. Values may
     /// hold any UTF-8 up to [`MAX_LABEL_VALUE_LEN`](crate::MAX_LABEL_VALUE_LEN)
     /// bytes. A set may hold at most [`MAX_LABELS`](crate::MAX_LABELS) pairs.
     ///
