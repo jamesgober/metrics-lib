@@ -118,6 +118,8 @@ impl<S> tower_layer::Layer<S> for RedLayer {
     fn layer(&self, inner: S) -> RedService<S> {
         RedService {
             inner,
+            // Resolved once per service instead of once per request.
+            in_flight: self.config.core.up_down_counter(&self.config.in_flight),
             config: self.config.clone(),
         }
     }
@@ -128,6 +130,7 @@ impl<S> tower_layer::Layer<S> for RedLayer {
 pub struct RedService<S> {
     inner: S,
     config: Config,
+    in_flight: Arc<UpDownCounter>,
 }
 
 impl<S> fmt::Debug for RedService<S> {
@@ -174,16 +177,19 @@ where
         {
             let _ = labels.add("route", route);
         }
-        let in_flight = self.config.core.up_down_counter(&self.config.in_flight);
-        in_flight.inc();
+        // Start the clock and count the request before the inner `call`, so
+        // work it does synchronously is timed, and a panic in it still
+        // decrements the gauge (the guard is dropped while unwinding).
+        self.in_flight.inc();
+        let state = InFlight {
+            config: self.config.clone(),
+            labels,
+            start: Instant::now(),
+            gauge: Arc::clone(&self.in_flight),
+        };
         RedFuture {
             inner: self.inner.call(req),
-            state: Some(InFlight {
-                config: self.config.clone(),
-                labels,
-                start: Instant::now(),
-                gauge: in_flight,
-            }),
+            state: Some(state),
         }
     }
 }
@@ -355,6 +361,40 @@ mod tests {
         assert_eq!(core.up_down_counter("http_requests_in_flight").get(), 1);
         drop(fut);
         assert_eq!(core.up_down_counter("http_requests_in_flight").get(), 0);
+    }
+
+    #[test]
+    fn test_inner_call_is_timed_and_a_panic_releases_the_gauge_ml2_013() {
+        let core = Arc::new(MetricsCore::new());
+        // Work done synchronously inside `call` is part of the duration.
+        let slow = tower::service_fn(|_req: http::Request<()>| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::future::ready(Ok::<_, Infallible>(http::Response::new(())))
+        });
+        let mut svc = RedLayer::new(Arc::clone(&core)).layer(slow);
+        let fut = svc.call(http::Request::new(()));
+        let _ = runtime().block_on(fut).unwrap();
+        let labels = LabelSet::from([("method", "GET"), ("status", "200")]);
+        let h = core.histogram_with("http_request_duration_seconds", &labels);
+        assert!(h.sum() >= 0.015, "{}", h.sum());
+
+        let panicking = tower::service_fn(|_req: http::Request<()>| -> std::future::Ready<
+            Result<http::Response<()>, Infallible>,
+        > { panic!("inner call panicked") });
+        let mut svc = RedLayer::new(Arc::clone(&core)).layer(panicking);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(svc.call(http::Request::new(())));
+        }));
+        assert!(caught.is_err());
+        assert_eq!(core.up_down_counter("http_requests_in_flight").get(), 0);
+        // A prefixed layer does not register the unprefixed gauge.
+        let fresh = Arc::new(MetricsCore::new());
+        let _svc = RedLayer::new(Arc::clone(&fresh))
+            .with_prefix("api_")
+            .layer(tower::service_fn(|_req: http::Request<()>| {
+                std::future::ready(Ok::<_, Infallible>(http::Response::new(())))
+            }));
+        assert_eq!(fresh.registry().kind_of("http_requests_in_flight"), None);
     }
 
     #[test]
