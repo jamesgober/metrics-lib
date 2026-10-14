@@ -1387,12 +1387,14 @@ impl Registry {
     /// and conflict counters are monotonic and are not reset.
     pub fn clear(&self) {
         for shard in &*self.shards {
-            shard
-                .write()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clear();
+            // Release exactly the slots of the families removed under this
+            // lock, so registrations racing with `clear` keep their slots.
+            let mut guard = shard.write().unwrap_or_else(PoisonError::into_inner);
+            let slots: usize = guard.values().map(Family::slots).sum();
+            guard.clear();
+            drop(guard);
+            self.release(slots);
         }
-        self.used.store(0, Ordering::Relaxed);
     }
 
     /// A view that prefixes every name with `prefix`.

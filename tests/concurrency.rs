@@ -75,6 +75,37 @@ fn test_registration_storm_counts_every_series_once() {
 }
 
 #[test]
+fn test_clear_racing_registrations_keeps_the_count_exact_regression_ml2_005() {
+    let registry = Arc::new(Registry::with_cardinality_cap(1_000));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (r, done) = (Arc::clone(&registry), Arc::clone(&stop));
+    // A bounded number of clears that end while registrations go on, so a
+    // drift in the count is not wiped by a final quiet clear.
+    let clearer = thread::spawn(move || {
+        for _ in 0..2_000 {
+            if done.load(Ordering::Acquire) {
+                break;
+            }
+            r.clear();
+        }
+    });
+    let r = Arc::clone(&registry);
+    join(spawn_all(4, move |t| {
+        for i in 0..60_000 {
+            let name = format!("c{t}_{}", i % 97);
+            r.counter(&name).inc();
+        }
+    }));
+    stop.store(true, Ordering::Release);
+    clearer.join().unwrap();
+    // 1.x-style `used.store(0)` let racing registrations drift the count.
+    assert_eq!(registry.cardinality_count(), registry.metric_count());
+    assert!(registry.cardinality_count() <= registry.cardinality_cap());
+    registry.clear();
+    assert_eq!(registry.cardinality_count(), 0);
+}
+
+#[test]
 fn test_cap_is_never_exceeded_under_contention() {
     let registry = Arc::new(Registry::with_cardinality_cap(100));
     let r = Arc::clone(&registry);
