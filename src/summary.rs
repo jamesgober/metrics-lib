@@ -319,12 +319,18 @@ impl Summary {
     /// relative accuracy of an observed value of that rank. Returns `NaN`
     /// when the summary is empty.
     #[must_use]
+    pub fn quantile(&self, q: f64) -> f64 {
+        self.quantiles_of(&[q]).first().copied().unwrap_or(f64::NAN)
+    }
+
+    /// Estimate several quantiles from one consistent read of the sketch:
+    /// the bucket counts are loaded once and walked once for all targets.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )] // rank arithmetic on counts
-    pub fn quantile(&self, q: f64) -> f64 {
+    fn quantiles_of(&self, targets: &[f64]) -> Vec<f64> {
         let zero = self.zero_count.load(Ordering::Relaxed);
         let counts: Vec<u64> = self
             .buckets
@@ -333,32 +339,51 @@ impl Summary {
             .collect();
         let total = counts.iter().fold(zero, |acc, c| acc.saturating_add(*c));
         if total == 0 {
-            return f64::NAN;
+            return vec![f64::NAN; targets.len()];
         }
-        let q = if q.is_nan() { 0.5 } else { q.clamp(0.0, 1.0) };
-        // Rank of the target observation, 0-based.
-        let rank = (q * (total - 1) as f64).floor() as u64;
-        let estimate = if rank < zero {
-            0.0
-        } else {
-            let mut seen = zero;
-            let mut estimate = f64::NAN;
-            for (i, c) in counts.iter().enumerate() {
-                seen = seen.saturating_add(*c);
-                if seen > rank {
-                    estimate = self.bucket_value(i);
+        // 0-based rank of each target, visited in ascending rank order.
+        let ranks: Vec<u64> = targets
+            .iter()
+            .map(|q| {
+                let q = if q.is_nan() { 0.5 } else { q.clamp(0.0, 1.0) };
+                (q * (total - 1) as f64).floor() as u64
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..targets.len()).collect();
+        order.sort_unstable_by_key(|&i| ranks[i]);
+        let mut out = vec![f64::NAN; targets.len()];
+        let mut next = order.iter().peekable();
+        while let Some(&&i) = next.peek() {
+            if ranks[i] >= zero {
+                break;
+            }
+            out[i] = 0.0;
+            let _ = next.next();
+        }
+        let mut seen = zero;
+        for (bucket, c) in counts.iter().enumerate() {
+            if next.peek().is_none() {
+                break;
+            }
+            seen = seen.saturating_add(*c);
+            while let Some(&&i) = next.peek() {
+                if seen <= ranks[i] {
                     break;
                 }
+                out[i] = self.bucket_value(bucket);
+                let _ = next.next();
             }
-            estimate
-        };
+        }
         // Exact extremes beat the bucket midpoint at the edges.
         let (min, max) = (self.min(), self.max());
-        if min.is_nan() || estimate.is_nan() {
-            estimate
-        } else {
-            estimate.clamp(min, max.max(min))
+        if !min.is_nan() {
+            for v in &mut out {
+                if !v.is_nan() {
+                    *v = v.clamp(min, max.max(min));
+                }
+            }
         }
+        out
     }
 
     /// Representative value of bucket `i`: `2 γ^k / (γ + 1)`, which is within
@@ -381,7 +406,8 @@ impl Summary {
             quantiles: self
                 .quantiles
                 .iter()
-                .map(|q| (*q, self.quantile(*q)))
+                .copied()
+                .zip(self.quantiles_of(&self.quantiles))
                 .collect(),
             age: self.age(),
         }
@@ -440,6 +466,30 @@ impl std::fmt::Debug for Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_snapshot_quantiles_match_single_quantiles_regression_ml2_008() {
+        let s = Summary::with_config(
+            SummaryConfig::default().with_quantiles([0.99, 0.0, 0.5, 1.0, 0.9]),
+        )
+        .unwrap();
+        for i in 0..10_000u32 {
+            s.observe(f64::from(i % 997) * 0.37 + 0.001);
+        }
+        s.observe(0.0);
+        let snap = s.snapshot();
+        assert_eq!(snap.quantiles.len(), 5);
+        for (q, v) in &snap.quantiles {
+            assert_eq!(*v, s.quantile(*q), "q={q}");
+        }
+        assert!(
+            Summary::new()
+                .snapshot()
+                .quantiles
+                .iter()
+                .all(|(_, v)| v.is_nan())
+        );
+    }
     use proptest::prelude::*;
     use std::sync::{Arc, Barrier};
 
