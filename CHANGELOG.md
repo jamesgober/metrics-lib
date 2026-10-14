@@ -133,8 +133,16 @@ and its replacement is listed in
   `update_interval()` returns `Duration`.
 - `json::render` returns `serde_json::Result<String>`; schema version 2.
 - Public enums and option/stats structs are `#[non_exhaustive]`.
-- Dependencies: sysinfo 0.29 to 0.36.1 (non-Linux targets only, behind
-  `system`); tokio floor 1.47; `parking_lot` and `num_cpus` removed (std
+- Dependencies: the `system` feature reads the OS directly on Linux
+  (`/proc`), Windows (five kernel32 calls) and macOS (libSystem: `getrusage`,
+  `proc_pidinfo`, Mach host statistics, `sysctl`), so `sysinfo` is no longer
+  compiled there; it remains (0.29 to 0.36.1) only for targets without an
+  in-house backend, such as FreeBSD. On Windows that removes 20 transitive
+  crates and about 15 s of clean build time from the default features, and
+  `sysinfo`'s MSRV no longer constrains Linux, Windows or macOS. The FFI
+  declarations are written by hand (no `windows-sys`/`libc`): 0 crates
+  instead of 2 and 1, with every struct layout checked at compile time.
+  Tokio floor 1.47; `parking_lot` and `num_cpus` removed (std
   `Mutex` and `available_parallelism`); new optional `pin-project-lite`,
   `metrics`, `tower-layer`, `tower-service` and `http`. Dev: criterion
   0.7, proptest 1.11, axum 0.8; `doc-comment`, `tokio-test`, `rand`,
@@ -142,8 +150,9 @@ and its replacement is listed in
 - CI: current action majors with the toolchain action pinned by SHA,
   stable and MSRV on Linux/macOS/Windows, a cargo-hack feature matrix, a
   coverage gate, a docs.rs build and a semver check; `deny.toml` has no
-  advisory ignores. The Miri job is gone because the crate no longer
-  contains `unsafe` code. Warnings are denied in CI instead of with
+  advisory ignores. The Miri job is gone: the only `unsafe` code is the
+  OS calls of the Windows and macOS system backends, which Miri cannot
+  execute. Warnings are denied in CI instead of with
   `#![deny(warnings)]`, so lints added to future compilers cannot break
   downstream or docs.rs builds.
 
@@ -216,7 +225,9 @@ Audit IDs refer to the 2026-10-13 audit.
   sampler is now lock-free, and the docs say which paths take locks
   (registry lookups and registration).
 - ML-033: crate-wide `allow(unsafe_code)` replaced by
-  `forbid(unsafe_code)`; the pin projection uses `pin-project-lite`.
+  `deny(unsafe_code)`, allowed only in `src/system/windows.rs` and
+  `src/system/macos.rs` (OS calls, each block with a `SAFETY` comment and
+  compile-time layout checks); the pin projection uses `pin-project-lite`.
 - ML-034: per-type duplicated code replaced by one generic registry path.
 - ML-035: the memory health threshold is a percentage of total memory.
 - ML-036: labeled lookups allocated on every hit.
@@ -236,9 +247,10 @@ release (ML2 IDs):
   oversized head was answered 200.
 - ML2-003: on Windows each `render_core` sampled the process through a
   full process-table scan (hundreds of milliseconds on a busy host), and
-  the system sampler could take longer than its interval. Off Linux the
-  exporters now serve the system monitor's latest sample, and the monitor
-  backs off so it never samples more than a quarter of the time.
+  the system sampler could take longer than its interval. Windows and
+  macOS now read the current process and the host directly (about 1 µs for
+  a process sample on Windows instead of about 30 ms), and the sampler
+  still backs off so it never samples more than a quarter of the time.
 - ML2-004: exemplars were stored inline in every `HistogramBucket`, which
   made every snapshot several times larger and cloned exemplar labels for
   exporters that drop them.
@@ -291,7 +303,9 @@ release (ML2 IDs):
 - `MetricsServer` cannot be stalled by idle, slow or oversized clients
   (ML2-002), and the Pushgateway client cannot hang past its timeout
   (ML2-006).
-- `#![forbid(unsafe_code)]`.
+- `#![deny(unsafe_code)]`: `unsafe` exists only in the two OS-call modules
+  of the `system` feature, which replace the far larger unsafe surface of
+  `sysinfo` and its Windows/macOS dependency tree on those platforms.
 
 ### Performance
 
@@ -312,10 +326,10 @@ and `tools/compare-1x` reproduces the comparison with 1.0.0.
   exemplar vector); `RateMeter::tick` +13 % and `rate()` +41 % (+5 ns and
   +9 ns: the monotonic clock and the sliding-window estimate that fix
   ML-014).
-- Off Linux, a fresh `process_*` sample costs a `sysinfo` scan of every
-  process (33–39 ms on the reference host, up to 500 ms under heavy
-  load); the exporters serve the system monitor's cached sample instead,
-  so after the first scrape `render_core` costs the same as `render`.
+- System metrics: a `process_*` sample takes 0.66 µs on Windows (the
+  `sysinfo` path took 31 ms on the reference host and up to 500 ms under
+  heavy load); a host-plus-process update 0.14 ms instead of about 32 ms.
+  `render_core` with process metrics costs the same as `render`.
 
 ## [1.0.0] - 2026-05-19
 

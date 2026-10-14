@@ -115,6 +115,27 @@ jobs:
       - name: Unit tests, each feature alone
         run: cargo hack test --locked --lib --each-feature
 
+  # The `sysinfo` system backend serves targets without an in-house one;
+  # FreeBSD has no hosted runner, so lint it by cross-checking.
+  cross:
+    name: Cross-check (x86_64-unknown-freebsd)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+          targets: x86_64-unknown-freebsd
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo clippy --locked --target x86_64-unknown-freebsd --lib --all-features -- -D warnings
+      - run: cargo clippy --locked --target x86_64-unknown-freebsd --lib --no-default-features --features system -- -D warnings
+
   beta:
     name: Test (ubuntu-latest / beta, allowed to fail)
     if: github.event_name != 'schedule'

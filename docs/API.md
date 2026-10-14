@@ -395,8 +395,9 @@ assert!(p.resident_memory_bytes > 0);
 # Ok::<(), std::io::Error>(())
 ```
 
-Values a platform cannot provide (`thread_count` outside Linux,
-`load_avg` on Windows) are `None`. Thresholds live in `HealthConfig`.
+Values a platform cannot provide (`thread_count` and `load_avg` on
+Windows) are `None`. Linux, Windows and macOS are read directly (a process
+sample takes microseconds); other targets use `sysinfo`. Thresholds live in `HealthConfig`.
 
 ## Load shedding
 

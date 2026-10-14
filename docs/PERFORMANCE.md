@@ -178,21 +178,34 @@ the OpenMetrics and JSON exporters ask for exemplars; Prometheus text and
 OTLP take a counts-only snapshot. `Summary::snapshot` (four quantiles from
 one read of the sketch) takes 0.75 µs.
 
-### Process metrics by platform
+### Process and host metrics by platform
 
-| Platform | Cost of one fresh `process_*` sample |
+Criterion medians on the reference host (Windows), `system` group of
+`metrics_bench`; the `sysinfo` column is the path Windows used before
+(sysinfo 0.36, timed in a scratch binary on the same host, median of 20):
+
+| Operation | In-house backend | `sysinfo` 0.36 |
+|---|---|---|
+| `ProcessCollector::collect` (one `process_*` sample) | 0.66 µs | 31 ms |
+| `SystemHealth::update` (host and process) | 0.14 ms | about 32 ms |
+| `render_core`, 400 series plus `process_*` | 0.15 ms | (plus one sample) |
+
+`sysinfo` scans every process on the host to refresh one; the 2.0.0
+re-audit measured 330–500 ms per sample on this host under heavier load.
+The in-house backends read the current process directly:
+
+| Platform | Backend |
 |---|---|
-| Linux | tens of microseconds (`/proc/self/*`) |
-| Windows, macOS, BSDs | a scan of the whole process table through `sysinfo`: 33–39 ms on the reference host with about 1 000 processes; the 2.0.0 re-audit measured 330–500 ms on the same host under heavier load |
+| Linux | `/proc/self/*`, `/proc/stat`, `/proc/meminfo` (tens of microseconds) |
+| Windows | `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessHandleCount`, `GetSystemTimes`, `GlobalMemoryStatusEx` |
+| macOS | `getrusage`, `proc_pidinfo`, `getrlimit`, `host_statistics(64)`, `sysctlbyname("hw.memsize")`, `getloadavg` (verified by CI's macOS runners; not timed here) |
+| FreeBSD and other targets | `sysinfo` (process-table scan) |
 
-Because of that cost, off Linux `render_core` and `MetricsServer` serve the
-latest sample of the background system monitor instead of sampling during
-the scrape: the first scrape starts the monitor and waits for its first
-sample (about 0.2 s here), every later scrape costs what the table above
-shows. The monitor never spends more than a quarter of its time sampling:
-when one sample takes longer than a quarter of the interval, the next one
-is pushed back. `ProcessCollector::collect` still samples on demand and
-pays the full cost.
+On the `sysinfo` targets `render_core` and `MetricsServer` serve the latest
+sample of the background system monitor instead of sampling during the
+scrape. Everywhere, the monitor never spends more than a quarter of its
+time sampling: when one sample takes longer than a quarter of the interval,
+the next one is pushed back.
 
 ## Reproducing
 

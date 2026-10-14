@@ -61,7 +61,7 @@
 - **Process metrics** - the standard `process_*` series on Linux, macOS and Windows.
 
 ### **Reliability and safety**
-- **No unsafe code** - `#![forbid(unsafe_code)]`.
+- **Minimal unsafe code** - `#![deny(unsafe_code)]`; the only `unsafe` blocks are the documented OS calls that read process and host statistics on Windows and macOS.
 - **No panics on input** - invalid numbers and names are rejected by `try_*` methods and ignored or repaired by the others.
 - **Tested** - unit, integration, stress, property and doc tests; every feature is linted and tested on its own in CI.
 
@@ -87,7 +87,7 @@ metrics-lib = { version = "2", features = [
 | `count` | `Counter`, `ShardedCounter`, `UpDownCounter` | yes |
 | `gauge` | `Gauge` | yes |
 | `timer` | `Timer` | yes |
-| `system` | `SystemHealth`, `ProcessCollector` (uses `sysinfo` off Linux) | yes |
+| `system` | `SystemHealth`, `ProcessCollector` (no dependency on Linux, Windows and macOS; `sysinfo` on other targets) | yes |
 | `meter` | `RateMeter` | |
 | `histogram` | `Histogram`, `Summary` | |
 | `sample` | adaptive sampler, circuit breaker, backpressure | |
@@ -257,7 +257,7 @@ Hold handles on hot paths: a lookup costs a shard read lock and a hash of the na
 
 <details>
   <summary><b>Thread count or load average is <code>None</code>?</b></summary>
-    <p>The platform does not report it (thread count outside Linux, load average on Windows). The exporters omit those series.</p>
+    <p>The platform does not report it (thread count and load average on Windows; every value on targets `sysinfo` cannot read). The exporters omit those series.</p>
 </details>
 
 ### **Version Compatibility**

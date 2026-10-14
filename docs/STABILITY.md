@@ -53,7 +53,8 @@ Everything public, in particular:
   hash-based iteration where the docs do not promise one.
 - Performance figures. They are measured and published (see
   `docs/PERFORMANCE.md`), not promised.
-- The exact set of `sysinfo` versions used on non-Linux targets, as long as
+- The exact set of `sysinfo` versions used on targets without an in-house
+  system backend (FreeBSD and the other BSDs, …), as long as
   the MSRV holds.
 - Items hidden from the documentation and anything named `__*`.
 
