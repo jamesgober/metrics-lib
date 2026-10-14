@@ -71,10 +71,22 @@ fn test_process_values_match_sysinfo() {
     }
     if let (Some(open), Some(their_open)) = (ours.open_fds, theirs.open_files()) {
         let their_open = their_open as u64;
-        assert!(
-            open.abs_diff(their_open) <= 32 + their_open / 4,
-            "open handles: ours {open} vs sysinfo {their_open}"
-        );
+        if cfg!(windows) {
+            // Both read the process handle count.
+            assert!(
+                open.abs_diff(their_open) <= 32 + their_open / 4,
+                "open handles: ours {open} vs sysinfo {their_open}"
+            );
+        } else {
+            // sysinfo 0.36 reports the size `proc_pidinfo(PROC_PIDLISTFDS)`
+            // asks for when probed with an empty buffer, which is the
+            // descriptor table's capacity; we list the descriptors and count
+            // them, so ours is the true count and never above it.
+            assert!(
+                (3..=their_open).contains(&open),
+                "open descriptors: ours {open} vs sysinfo's table size {their_open}"
+            );
+        }
     }
     #[cfg(target_os = "macos")]
     {

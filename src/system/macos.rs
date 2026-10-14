@@ -389,6 +389,21 @@ mod tests {
     }
 
     #[test]
+    fn test_open_fd_count_tracks_opened_files() {
+        // Other tests run in parallel and may open descriptors too, so allow
+        // for them: the count must grow by at least the files opened here.
+        let pid = Platform::new().pid;
+        let before = open_fd_count(pid).unwrap();
+        let files: Vec<std::fs::File> = (0..16)
+            .map(|_| std::fs::File::open("Cargo.toml").unwrap())
+            .collect();
+        let during = open_fd_count(pid).unwrap();
+        drop(files);
+        assert!(during >= before + 16, "{before} -> {during}");
+        assert!(during < before + 16 + 64, "{before} -> {during}");
+    }
+
+    #[test]
     fn test_platforms_release_their_host_port() {
         // Creating and dropping many platforms must not exhaust port rights.
         for _ in 0..10_000 {
