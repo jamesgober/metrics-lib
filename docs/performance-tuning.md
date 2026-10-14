@@ -23,7 +23,7 @@ assert_eq!(ok.get(), 1_000);
 ## Pick the right type under contention
 
 - Many threads incrementing one counter: use `ShardedCounter`. On the
-  reference machine eight threads hammering one `Counter` take 7 to 9 times as
+  reference machine eight threads hammering one `Counter` take 5 to 9 times as
   long as with a `ShardedCounter` (see `contended_increments`).
 - Strict rate limits: `TokenBucket` (one compare-and-swap per acquire), not
   `RateMeter::tick_if_under_limit`.

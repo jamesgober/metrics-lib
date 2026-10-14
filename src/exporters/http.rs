@@ -815,7 +815,7 @@ mod tests {
             })
             .min()
             .unwrap();
-        // 1.x polled `accept` every 50 ms.
+        // An earlier accept loop polled every 50 ms.
         assert!(fastest < Duration::from_millis(40), "{fastest:?}");
         server.shutdown();
     }

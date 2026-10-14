@@ -207,15 +207,15 @@ Criterion medians on an AMD Ryzen 9 9950X3D, Windows 11, Rust 1.85, `lto = "fat"
 
 | Operation | Time |
 |---|---|
-| `Counter::inc` on a held handle | 4.5 ns |
-| `Gauge::set` | 0.3 ns |
-| `Timer::record_ns` | 9.3 ns |
-| `Histogram::observe` | 15 ns |
-| `RateMeter::tick` | 48 ns |
-| Unlabeled registry lookup plus `inc` | 38 ns |
-| Labeled registry lookup plus `inc` | 84 ns (two labels) |
-| 8 threads × 100 000 increments, one `Counter` | 7.8 ms |
-| 8 threads × 100 000 increments, `ShardedCounter` | 0.89 ms |
+| `Counter::inc` on a held handle | 4.2 ns |
+| `Gauge::set` | 0.28 ns |
+| `Timer::record_ns` | 8.2 ns |
+| `Histogram::observe` | 13.5 ns |
+| `RateMeter::tick` | 44 ns |
+| Unlabeled registry lookup plus `inc` | 32 ns |
+| Labeled registry lookup plus `inc` | 61 ns (two labels) |
+| 8 threads × 100 000 increments, one `Counter` | 6.1 ms |
+| 8 threads × 100 000 increments, `ShardedCounter` | 1.2 ms |
 
 Hold handles on hot paths: a lookup costs a shard read lock and a hash of the name, about eight times the increment itself.
 
