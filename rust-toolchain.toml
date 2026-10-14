@@ -1,11 +1,12 @@
-# Pinned per REPS (Reproducibility & Build Determinism): local builds use the
-# MSRV toolchain, so anything that compiles here compiles for every supported
-# user. CI does not inherit this pin for its stable/beta legs: each job sets
-# RUSTUP_TOOLCHAIN, which takes precedence over this file, so the "stable"
-# jobs really run current stable and the MSRV job runs 1.85.0.
-# Use `cargo +stable <cmd>` locally to check against newer toolchains
-# (cargo-semver-checks and cargo-llvm-cov need a newer rustc).
+# Toolchain for work inside this repository: formatting, lints and docs run
+# on this pinned stable, so a new compiler release cannot turn CI red on its
+# own. Bump it deliberately. It only affects builds started in this tree,
+# never crates that depend on metrics-lib.
+#
+# The MSRV (1.85, `rust-version` in Cargo.toml) is checked explicitly:
+# CI's MSRV jobs set RUSTUP_TOOLCHAIN=1.85.0, which overrides this file;
+# locally run `cargo +1.85.0 test --all-features`.
 [toolchain]
-channel = "1.85.0"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

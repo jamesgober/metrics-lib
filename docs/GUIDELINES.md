@@ -58,7 +58,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo hack clippy --each-feature --no-dev-deps -- -D warnings
 cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-cargo +1.85 check --all-features
+cargo +1.85.0 test --all-features   # MSRV
 cargo deny check
 cargo audit
 ```

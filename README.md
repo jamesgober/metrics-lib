@@ -274,6 +274,8 @@ cargo clippy --all-targets --all-features -- -D warnings  # lints
 cargo bench --all-features --bench metrics_bench          # benchmarks
 ```
 
+The repository pins the toolchain for lints and docs (`rust-toolchain.toml`, Rust 1.99.0) and commits `Cargo.lock`; neither affects crates that depend on metrics-lib. The MSRV is checked with `cargo +1.85.0 test --all-features`. Details in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## **Contributing**
 
 See the [Contributing Guide](CONTRIBUTING.md) and the [development guidelines](docs/GUIDELINES.md).

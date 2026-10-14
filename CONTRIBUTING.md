@@ -13,15 +13,26 @@ CI runs, and how to measure performance. The design and testing rules are in
 
 ## Getting started
 
-- MSRV: Rust 1.85. `rust-toolchain.toml` pins 1.85.0 for local builds, so
-  `cargo` in this directory uses the MSRV toolchain. Use `cargo +stable`
-  for tools that need a newer compiler (`cargo-semver-checks`,
-  `cargo-llvm-cov`).
-- Install the toolchain and components:
+- Toolchains: `rust-toolchain.toml` pins the stable release used for
+  formatting, lints and docs (currently 1.99.0), so `cargo` in this
+  directory uses it and a new compiler release cannot change lint results
+  on its own. The pin is bumped deliberately. It only affects builds
+  started inside this repository, never crates that depend on
+  metrics-lib.
+- MSRV: Rust 1.85 (`rust-version` in `Cargo.toml`). Check it explicitly:
+  `cargo +1.85.0 test --all-features`. CI's MSRV jobs set
+  `RUSTUP_TOOLCHAIN=1.85.0`, and every CI job prints `rustc --version`.
+- `Cargo.lock` is committed. Builds and CI use it (`--locked`), so CI fails
+  only because of new commits; a library's lockfile does not affect its
+  users, whose own resolution follows `Cargo.toml`. A weekly (and per pull
+  request) "Latest dependencies" job runs `cargo update` to the newest
+  allowed versions and lints, tests and audits that, to catch what fresh
+  consumers will see. Refresh the lock with `cargo update`, which keeps
+  the MSRV (resolver 3), and check it with `cargo +1.85.0 check --locked`.
+- Install the toolchains and components:
 
   ```bash
-  rustup toolchain install 1.85.0 stable
-  rustup component add rustfmt clippy --toolchain 1.85.0
+  rustup toolchain install 1.99.0 1.85.0 --component rustfmt clippy
   ```
 
 ## Checks before a pull request
@@ -46,7 +57,7 @@ cargo hack test --lib --each-feature
 ```
 
 and checks semver against the last release with
-`cargo +stable semver-checks`.
+`cargo semver-checks`.
 
 ## Tests
 
@@ -64,10 +75,10 @@ and checks semver against the last release with
 
 ```bash
 cargo install cargo-llvm-cov
-rustup component add llvm-tools-preview --toolchain stable
-cargo +stable llvm-cov --all-features --lib --tests --summary-only \
+rustup component add llvm-tools-preview
+cargo llvm-cov --all-features --lib --tests --summary-only \
   --ignore-filename-regex '(benches|examples)/'
-cargo +stable llvm-cov --all-features --lib --tests --html \
+cargo llvm-cov --all-features --lib --tests --html \
   --ignore-filename-regex '(benches|examples)/'
 ```
 

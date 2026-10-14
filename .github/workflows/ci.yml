@@ -5,6 +5,10 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  schedule:
+    # Weekly, for the latest-dependencies job (Mondays 06:00 UTC).
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 # Least privilege: every job only needs to read the repository.
 permissions:
@@ -19,9 +23,10 @@ env:
   RUSTFLAGS: "-D warnings"
   RUSTDOCFLAGS: "-D warnings"
 
-# Every job sets RUSTUP_TOOLCHAIN. It takes precedence over the repository's
-# rust-toolchain.toml (which pins the MSRV for local builds), so the "stable"
-# legs really run current stable instead of silently running 1.85.0.
+# Toolchains: rust-toolchain.toml pins the stable used for formatting, lints
+# and docs. It overrides whatever a setup action installs, so every job sets
+# RUSTUP_TOOLCHAIN to the toolchain it claims to test (pinned stable, MSRV,
+# beta or nightly) and prints `rustc --version` first.
 #
 # dtolnay/rust-toolchain selects the toolchain through its input and only
 # moves a `v1`/`master` ref, so it is pinned to a commit SHA. Other actions
@@ -30,25 +35,30 @@ env:
 jobs:
   fmt:
     name: Format
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
           components: rustfmt
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
       - run: cargo fmt --all -- --check
 
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.rust }})
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, "1.85.0"]
+        # The pinned stable and the MSRV.
+        rust: ["1.99.0", "1.85.0"]
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
     steps:
@@ -59,46 +69,53 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Toolchain in use
-        run: rustc --version && cargo --version
+        shell: bash
+        run: |
+          rustc --version && cargo --version
+          rustc --version | grep -q "^rustc ${{ matrix.rust }} "
       - name: Clippy (all features, all targets)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Clippy (no default features)
-        run: cargo clippy --lib --no-default-features -- -D warnings
+        run: cargo clippy --locked --lib --no-default-features -- -D warnings
       # Includes the doctests of README.md and every docs/*.md guide.
       - name: Test (all features)
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
       - name: Test (default features)
-        run: cargo test --lib --tests
+        run: cargo test --locked --lib --tests
       - name: Test (no default features)
-        run: cargo test --lib --no-default-features
+        run: cargo test --locked --lib --no-default-features
       - name: Doc
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features
 
   # Every feature must build, lint and pass its unit tests on its own, with
   # no default features (cargo-hack also runs the no-feature and default
   # builds).
   features:
     name: Feature matrix (cargo-hack)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
       - name: Clippy, each feature alone
-        run: cargo hack clippy --lib --each-feature --no-dev-deps -- -D warnings
+        run: cargo hack clippy --locked --lib --each-feature --no-dev-deps -- -D warnings
       - name: Unit tests, each feature alone
-        run: cargo hack test --lib --each-feature
+        run: cargo hack test --locked --lib --each-feature
 
   beta:
     name: Test (ubuntu-latest / beta, allowed to fail)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
@@ -110,11 +127,42 @@ jobs:
           toolchain: beta
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
 
+  # What a consumer resolving today gets: the newest versions allowed by
+  # Cargo.toml, ignoring the committed lock and the MSRV filter. Runs weekly
+  # and on pull requests.
+  latest-deps:
+    name: Latest dependencies
+    if: github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - name: Update to the latest compatible versions
+        run: cargo update --verbose
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+      - name: Audit the updated lock
+        run: cargo audit --deny warnings
+
   docs-rs:
     name: docs.rs build (nightly, --cfg docsrs)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: nightly
@@ -125,31 +173,36 @@ jobs:
         with:
           toolchain: nightly
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps --all-features
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo doc --locked --no-deps --all-features
 
   coverage:
     name: Coverage (llvm-cov)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
       - name: Line coverage with threshold
         run: >-
-          cargo llvm-cov --all-features --lib --tests --summary-only
+          cargo llvm-cov --locked --all-features --lib --tests --summary-only
           --fail-under-lines 95
           --ignore-filename-regex '(benches|examples)/'
       - name: LCOV report
         run: >-
-          cargo llvm-cov --all-features --lib --tests --lcov
+          cargo llvm-cov --locked --all-features --lib --tests --lcov
           --output-path lcov.info
           --ignore-filename-regex '(benches|examples)/'
       - uses: actions/upload-artifact@v7
@@ -160,48 +213,58 @@ jobs:
 
   examples:
     name: Examples (build and run)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
       - name: Build every example
-        run: cargo build --examples --all-features
+        run: cargo build --locked --examples --all-features
       - name: Run the non-blocking examples
         run: bash tools/run_examples.sh
 
   semver:
     name: SemVer check (vs crates.io)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v7
       - uses: obi1kenobi/cargo-semver-checks-action@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
 
   audit:
     name: Security audit
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
       # Audits the committed Cargo.lock.
       - name: Audit
         run: cargo audit --deny warnings
 
   deny:
     name: Dependency policy (cargo-deny)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -211,6 +274,7 @@ jobs:
 
   udeps:
     name: Unused dependencies (cargo-udeps)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: nightly
@@ -224,17 +288,22 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-udeps
-      - run: cargo udeps --all-targets --all-features
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo udeps --locked --all-targets --all-features
 
   publish-dry-run:
     name: Package (publish dry run)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
       - run: cargo publish --dry-run --locked
