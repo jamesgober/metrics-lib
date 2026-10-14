@@ -27,8 +27,8 @@ covers what is specific to metrics-lib.
 
 1. **The hot path is one atomic operation where possible.** Recording into
    a held handle must not lock, allocate, call the OS or read the clock
-   unless the metric's meaning requires it (timers and rate meters read
-   `Instant`). Anything slower belongs in lookups, exporters or samplers.
+   unless the metric's meaning requires it (timers, rate meters and token
+   buckets read `Instant`; exemplars copy their labels). Anything slower belongs in lookups, exporters or samplers.
 2. **Measure, then claim.** Every performance statement in the docs comes
    from `benches/` with the machine and conditions stated next to it.
 3. **Every input is hostile.** Names, label keys and values come from
@@ -42,7 +42,7 @@ covers what is specific to metrics-lib.
    arbitrary inputs on every public method.
 6. **Exposition is validated, not assumed.** Output of the text exporters is
    parsed by the strict validators in `tests/common` in every test run,
-   including thousands of random registries.
+   including 2,048 random registries per run.
 7. **Features are additive.** Every feature compiles and passes clippy on
    its own and with the defaults (`cargo hack --each-feature` in CI).
 8. **Platform data is honest.** If a platform cannot provide a value, the

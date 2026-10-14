@@ -326,7 +326,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig::with_cases(2_048))]
 
     /// Whatever sequence of registrations happens — invalid names, kind
     /// conflicts, suffix collisions, non-finite values — both expositions

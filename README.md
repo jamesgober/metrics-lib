@@ -26,7 +26,7 @@
 <br>
 
 <p>
-    <strong>metrics-lib</strong> is an in-process metrics library: you record into counters, gauges, timers, rate meters, histograms and summaries, and export to Prometheus, OpenMetrics, OTLP, StatsD or JSON. Recording into a held handle is one atomic operation with no lock, allocation or system call, and the registry that hands out those handles validates names, caps the number of series and keeps one kind per name, so a busy or hostile workload cannot grow memory without bound or produce output a scraper rejects.
+    <strong>metrics-lib</strong> is an in-process metrics library: you record into counters, gauges, timers, rate meters, histograms and summaries, and export to Prometheus, OpenMetrics, OTLP, StatsD or JSON. Recording into a held counter or gauge is a single atomic operation; timers, histograms and summaries use a few atomic operations, and only timers, rate meters and token buckets read the clock. None of them takes a lock or allocates, except <code>observe_with_exemplar</code>, which stores the exemplar's labels. The registry that hands out those handles validates names, caps the number of series and keeps one kind per name, so a busy or hostile workload cannot grow memory without bound or produce output a scraper rejects.
 </p>
 
 <p>
@@ -34,7 +34,7 @@
 </p>
 
 <p>
-    Every exporter's output is parsed by strict Prometheus and OpenMetrics validators in the test suite, including thousands of randomly generated registries, and every performance number on this page comes from the Criterion benches in the repository with the machine stated next to it.
+    Every exporter's output is parsed by strict Prometheus and OpenMetrics validators in the test suite, including 2,048 randomly generated registries per run, and every performance number on this page comes from the Criterion benches in the repository with the machine stated next to it.
 </p>
 
 ---
@@ -261,7 +261,7 @@ Hold handles on hot paths: a lookup costs a shard read lock and a hash of the na
 </details>
 
 ### **Version Compatibility**
-- **Rust**: 1.85+ (edition 2024). MSRV bumps happen only in minor releases and stay within the last 12 stable releases.
+- **Rust**: 1.85+ (edition 2024). Raising the MSRV is a major change (see `docs/STABILITY.md`).
 - **Platforms**: Linux, macOS and Windows are tested in CI.
 - **Feature flags**: additive; every feature builds, lints and passes its unit tests on its own.
 

@@ -57,7 +57,7 @@ let core = MetricsCore::new();
 core.registry()
     .describe_counter("jobs_total", "Jobs processed", Unit::None)?;
 
-// Resolve handles once; the hot path is then one atomic operation.
+// Resolve handles once; the hot path is then a few atomic operations.
 let jobs = core.counter_with("jobs_total", &labels!("queue" => "email"));
 let latency = core.histogram("job_seconds");
 for _ in 0..3 {

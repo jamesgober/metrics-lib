@@ -23,8 +23,9 @@ env:
 # rust-toolchain.toml (which pins the MSRV for local builds), so the "stable"
 # legs really run current stable instead of silently running 1.85.0.
 #
-# dtolnay/rust-toolchain publishes no release tags, so it is pinned to a
-# commit SHA. Other actions are pinned to their current major version.
+# dtolnay/rust-toolchain selects the toolchain through its input and only
+# moves a `v1`/`master` ref, so it is pinned to a commit SHA. Other actions
+# are pinned to their current major version.
 
 jobs:
   fmt:
