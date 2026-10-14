@@ -22,9 +22,8 @@ pub(crate) struct Platform {
 
 impl Platform {
     pub(crate) fn new() -> Self {
-        let (clk_tck, page_size) = fs::read("/proc/self/auxv")
-            .map(|bytes| parse_auxv(&bytes))
-            .unwrap_or((None, None));
+        let (clk_tck, page_size) =
+            fs::read("/proc/self/auxv").map_or((None, None), |bytes| parse_auxv(&bytes));
         let boot_time = fs::read_to_string("/proc/stat")
             .ok()
             .and_then(|s| parse_boot_time(&s));
