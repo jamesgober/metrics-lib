@@ -124,7 +124,16 @@ fn distributions(c: &mut Criterion) {
     group.bench_function("histogram_observe_with_exemplar", |b| {
         b.iter(|| h.observe_with_exemplar(black_box(0.07), &trace));
     });
-    group.bench_function("histogram_snapshot", |b| b.iter(|| black_box(h.snapshot())));
+    let plain = Histogram::default_seconds();
+    for i in 0..1_000u32 {
+        plain.observe(f64::from(i % 100) * 0.005);
+    }
+    group.bench_function("histogram_snapshot", |b| {
+        b.iter(|| black_box(plain.snapshot()));
+    });
+    group.bench_function("histogram_snapshot_with_exemplars", |b| {
+        b.iter(|| black_box(h.snapshot()));
+    });
     let s = Summary::new();
     group.bench_function("summary_observe", |b| {
         b.iter(|| {
