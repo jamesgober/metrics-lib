@@ -393,35 +393,19 @@ fn write_timer(
     let mut summary = String::new();
     let mut min = String::new();
     let mut max = String::new();
+    let (sum_name, count_name) = (format!("{base}_sum"), format!("{base}_count"));
+    let (min_name, max_name) = (format!("{base}_min"), format!("{base}_max"));
     #[cfg(feature = "timer")]
     for s in &family.series {
         if let Handle::Timer(t) = &s.handle {
             #[allow(clippy::cast_precision_loss)] // seconds as f64 is the exposition contract
             let sum = t.total_nanos() as f64 / 1e9;
             let count = t.count();
-            sample_f64(&mut summary, &format!("{base}_sum"), &s.labels, None, sum);
-            sample_int(
-                &mut summary,
-                &format!("{base}_count"),
-                &s.labels,
-                None,
-                count,
-            );
+            sample_f64(&mut summary, &sum_name, &s.labels, None, sum);
+            sample_int(&mut summary, &count_name, &s.labels, None, count);
             if count > 0 {
-                sample_f64(
-                    &mut min,
-                    &format!("{base}_min"),
-                    &s.labels,
-                    None,
-                    t.min().as_secs_f64(),
-                );
-                sample_f64(
-                    &mut max,
-                    &format!("{base}_max"),
-                    &s.labels,
-                    None,
-                    t.max().as_secs_f64(),
-                );
+                sample_f64(&mut min, &min_name, &s.labels, None, t.min().as_secs_f64());
+                sample_f64(&mut max, &max_name, &s.labels, None, t.max().as_secs_f64());
             }
         }
     }
@@ -530,14 +514,27 @@ fn write_histogram(
     registry: &Registry,
 ) {
     let mut body = String::new();
+    let bucket_name = format!("{base}_bucket");
+    let (sum_name, count_name) = (format!("{base}_sum"), format!("{base}_count"));
+    // Series of one family almost always share their bounds: format the
+    // `le` values once and reuse them while the bounds stay the same.
+    let mut le_bounds: Vec<f64> = Vec::new();
+    let mut le_values: Vec<String> = Vec::new();
     #[cfg(feature = "histogram")]
     for s in &family.series {
         if let Handle::Histogram(h) = &s.handle {
             let snap = h.snapshot();
-            let bucket_name = format!("{base}_bucket");
-            for b in &snap.buckets {
-                let le = canonical_float(b.upper_bound);
-                sample(&mut body, &bucket_name, &s.labels, Some(("le", &le)));
+            let same = le_bounds.len() == snap.buckets.len()
+                && le_bounds
+                    .iter()
+                    .zip(&snap.buckets)
+                    .all(|(a, b)| a.to_bits() == b.upper_bound.to_bits());
+            if !same {
+                le_bounds = snap.buckets.iter().map(|b| b.upper_bound).collect();
+                le_values = le_bounds.iter().map(|b| canonical_float(*b)).collect();
+            }
+            for (b, le) in snap.buckets.iter().zip(&le_values) {
+                sample(&mut body, &bucket_name, &s.labels, Some(("le", le)));
                 let _ = write!(body, "{}", b.count);
                 if dialect == Dialect::OpenMetrics {
                     if let Some(ex) = &b.exemplar {
@@ -557,14 +554,8 @@ fn write_histogram(
             // and `_count` may only appear together with `_sum`.
             let negative = h.bounds().first().is_some_and(|b| *b < 0.0) || snap.sum < 0.0;
             if dialect == Dialect::Prometheus || !negative {
-                sample_f64(&mut body, &format!("{base}_sum"), &s.labels, None, snap.sum);
-                sample_int(
-                    &mut body,
-                    &format!("{base}_count"),
-                    &s.labels,
-                    None,
-                    snap.count,
-                );
+                sample_f64(&mut body, &sum_name, &s.labels, None, snap.sum);
+                sample_int(&mut body, &count_name, &s.labels, None, snap.count);
             }
         }
     }
@@ -594,6 +585,7 @@ fn write_summary(
     registry: &Registry,
 ) {
     let mut body = String::new();
+    let (sum_name, count_name) = (format!("{base}_sum"), format!("{base}_count"));
     #[cfg(feature = "histogram")]
     for s in &family.series {
         if let Handle::Summary(q) = &s.handle {
@@ -608,14 +600,8 @@ fn write_summary(
                     *value,
                 );
             }
-            sample_f64(&mut body, &format!("{base}_sum"), &s.labels, None, snap.sum);
-            sample_int(
-                &mut body,
-                &format!("{base}_count"),
-                &s.labels,
-                None,
-                snap.count,
-            );
+            sample_f64(&mut body, &sum_name, &s.labels, None, snap.sum);
+            sample_int(&mut body, &count_name, &s.labels, None, snap.count);
         }
     }
     emit(

@@ -407,6 +407,10 @@ impl serde::Serialize for LabelSet {
 /// `\` as `\\`, `"` as `\"`, line feed as `\n`. The formats have no escape
 /// for a carriage return and forbid it in the output, so it becomes a space.
 pub(crate) fn escape_label_value(out: &mut String, v: &str) {
+    if !v.bytes().any(|b| matches!(b, b'\\' | b'"' | b'\n' | b'\r')) {
+        out.push_str(v);
+        return;
+    }
     for c in v.chars() {
         match c {
             '\\' => out.push_str("\\\\"),

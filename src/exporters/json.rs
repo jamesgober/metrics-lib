@@ -204,7 +204,7 @@ pub fn snapshot(registry: &Registry) -> RegistrySnapshot {
             series.push(JsonSeries {
                 name: family.name.clone(),
                 kind: family.kind,
-                labels: s.labels,
+                labels: std::sync::Arc::unwrap_or_clone(s.labels),
                 help: help.clone(),
                 unit,
                 value: value_of(&s.handle),

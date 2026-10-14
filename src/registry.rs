@@ -62,7 +62,7 @@ use crate::{LabelSet, MetricKind, MetricMetadata, MetricsError, Result, Unit};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, LazyLock, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "gauge")]
@@ -81,8 +81,9 @@ pub const DEFAULT_CARDINALITY_CAP: usize = 10_000;
 
 const SHARDS: usize = 16;
 
-/// Label set of every unlabeled series, as a `'static` reference.
-static EMPTY_LABELS: LabelSet = LabelSet::EMPTY;
+/// Label set of every unlabeled series. Shared, so snapshots of unlabeled
+/// series do not allocate.
+static EMPTY_LABELS: LazyLock<Arc<LabelSet>> = LazyLock::new(|| Arc::new(LabelSet::EMPTY));
 
 /// How a family stores its series. Distinguishes types that share a
 /// [`MetricKind`] (a `Counter` and a `ShardedCounter` are both counters but
@@ -336,7 +337,9 @@ pub(crate) struct Family {
     #[cfg(feature = "histogram")]
     summary: Option<Arc<SummaryConfig>>,
     unlabeled: Option<Series>,
-    labeled: HashMap<LabelSet, Series>,
+    /// Keys are shared with snapshots, so exporting a series clones a
+    /// pointer instead of its labels.
+    labeled: HashMap<Arc<LabelSet>, Series>,
 }
 
 impl Family {
@@ -390,7 +393,7 @@ impl Family {
         if labels.is_empty() {
             self.unlabeled = Some(series);
         } else {
-            let _ = self.labeled.insert(labels, series);
+            let _ = self.labeled.insert(Arc::new(labels), series);
         }
     }
 
@@ -402,10 +405,10 @@ impl Family {
         }
     }
 
-    fn series(&self) -> impl Iterator<Item = (&LabelSet, &Series)> {
+    fn series(&self) -> impl Iterator<Item = (&Arc<LabelSet>, &Series)> {
         self.unlabeled
             .iter()
-            .map(|s| (&EMPTY_LABELS, s))
+            .map(|s| (&*EMPTY_LABELS, s))
             .chain(self.labeled.iter())
     }
 
@@ -426,7 +429,7 @@ pub(crate) struct FamilySnapshot {
 }
 
 pub(crate) struct SeriesSnapshot {
-    pub(crate) labels: LabelSet,
+    pub(crate) labels: Arc<LabelSet>,
     pub(crate) handle: Handle,
     /// Only the OTLP exporter reports series start times.
     #[cfg_attr(not(feature = "otlp"), allow(dead_code))]
@@ -1187,7 +1190,7 @@ impl Registry {
             for (name, family) in shard.iter() {
                 for (labels, series) in family.series() {
                     if let Some(m) = T::unwrap(&series.handle) {
-                        out.push((name.clone(), labels.clone(), Arc::clone(m)));
+                        out.push((name.clone(), LabelSet::clone(labels), Arc::clone(m)));
                     }
                 }
             }
@@ -1224,12 +1227,12 @@ impl Registry {
                 let mut series: Vec<SeriesSnapshot> = family
                     .series()
                     .map(|(labels, s)| SeriesSnapshot {
-                        labels: labels.clone(),
+                        labels: Arc::clone(labels),
                         handle: s.handle.clone(),
                         created_unix_nanos: s.created_unix_nanos,
                     })
                     .collect();
-                series.sort_by(|a, b| a.labels.cmp(&b.labels));
+                series.sort_unstable_by(|a, b| a.labels.cmp(&b.labels));
                 out.push(FamilySnapshot {
                     name: name.clone(),
                     kind: family.kind,
@@ -1239,7 +1242,7 @@ impl Registry {
                 });
             }
         }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         out
     }
 
@@ -1318,7 +1321,7 @@ impl Registry {
         let mut removed = 0;
         for shard in &*self.shards {
             // Pass 1 under the read lock: refresh fingerprints, pick victims.
-            let victims: Vec<(String, LabelSet)> = {
+            let victims: Vec<(String, Arc<LabelSet>)> = {
                 let guard = shard.read().unwrap_or_else(PoisonError::into_inner);
                 guard
                     .iter()
@@ -1328,7 +1331,7 @@ impl Registry {
                             .filter(move |(_, s)| {
                                 s.idle_for(now) >= threshold && s.handle.strong_count() == 1
                             })
-                            .map(move |(labels, _)| (name.clone(), labels.clone()))
+                            .map(move |(labels, _)| (name.clone(), Arc::clone(labels)))
                     })
                     .collect()
             };

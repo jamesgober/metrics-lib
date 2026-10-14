@@ -350,7 +350,7 @@ impl ModelCtx<'_> {
                 let monotonic = family.kind == MetricKind::Counter;
                 let mut points = Vec::with_capacity(family.series.len());
                 for s in &family.series {
-                    let key = (name.clone(), s.labels.clone());
+                    let key = (name.clone(), LabelSet::clone(&s.labels));
                     let point = match &s.handle {
                         #[cfg(feature = "count")]
                         Handle::Counter(c) => {
@@ -372,7 +372,7 @@ impl ModelCtx<'_> {
                     };
                     if let Some((start, value)) = point {
                         points.push(NumberPoint {
-                            attributes: s.labels.clone(),
+                            attributes: LabelSet::clone(&s.labels),
                             start,
                             time: now,
                             value,
@@ -398,7 +398,7 @@ impl ModelCtx<'_> {
                         let v = g.get();
                         if v.is_finite() {
                             points.push(NumberPoint {
-                                attributes: s.labels.clone(),
+                                attributes: LabelSet::clone(&s.labels),
                                 start: s.created_unix_nanos,
                                 time: now,
                                 value: Number::Double(v),
@@ -427,7 +427,7 @@ impl ModelCtx<'_> {
                             Vec::new()
                         };
                         points.push(SummaryPoint {
-                            attributes: s.labels.clone(),
+                            attributes: LabelSet::clone(&s.labels),
                             start: s.created_unix_nanos,
                             time: now,
                             count,
@@ -449,16 +449,16 @@ impl ModelCtx<'_> {
                 #[cfg(feature = "meter")]
                 for s in &family.series {
                     if let Handle::Rate(r) = &s.handle {
-                        let key = (name.clone(), s.labels.clone());
+                        let key = (name.clone(), LabelSet::clone(&s.labels));
                         let (start, v) = self.uint_point(key, s.created_unix_nanos, r.total());
                         totals.push(NumberPoint {
-                            attributes: s.labels.clone(),
+                            attributes: LabelSet::clone(&s.labels),
                             start,
                             time: now,
                             value: Number::Int(saturating_i64(v)),
                         });
                         rates.push(NumberPoint {
-                            attributes: s.labels.clone(),
+                            attributes: LabelSet::clone(&s.labels),
                             start: s.created_unix_nanos,
                             time: now,
                             value: Number::Double(r.rate()),
@@ -512,7 +512,7 @@ impl ModelCtx<'_> {
                     if let Handle::Summary(q) = &s.handle {
                         let snap = q.snapshot();
                         points.push(SummaryPoint {
-                            attributes: s.labels.clone(),
+                            attributes: LabelSet::clone(&s.labels),
                             start: s.created_unix_nanos,
                             time: now,
                             count: snap.count,
