@@ -106,7 +106,7 @@ mod tests {
         let h = crate::Histogram::with_buckets([1.0]);
         observe_with_span_exemplar(&h, 0.5);
         assert_eq!(h.count(), 1);
-        assert!(h.snapshot().buckets[0].exemplar.is_none());
+        assert!(h.snapshot().exemplar(0).is_none());
     }
 
     #[test]

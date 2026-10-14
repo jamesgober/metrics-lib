@@ -149,7 +149,10 @@ current wall-clock second", and `with_window` is honoured.
 `available() -> u64`). Refill keeps working for 584 years of uptime instead
 of 49.7 days. New: `try_new`, `time_until_available`.
 
-**Histogram.** `HistogramBucket` gained `exemplar` and is no longer `Copy`.
+**Histogram.** `HistogramBucket` keeps its 1.x shape (`upper_bound`,
+`count`, still `Copy`) but is `#[non_exhaustive]`. Exemplars are in
+`HistogramSnapshot::exemplars` (parallel to `buckets`, empty when none were
+recorded) and `HistogramSnapshot::exemplar(i)`.
 `with_buckets([])` falls back to one `1.0` bucket instead of panicking in
 debug builds; `try_with_buckets` reports it.
 

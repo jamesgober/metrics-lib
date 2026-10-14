@@ -106,10 +106,36 @@ pub struct HistogramSnapshot {
     pub count: u64,
     /// Time since the histogram was created.
     pub age: Duration,
+    /// The most recent exemplar of each bucket, parallel to `buckets`.
+    ///
+    /// Empty (no allocation) when the histogram has never received an
+    /// exemplar, so histograms without exemplars pay nothing for them.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub exemplars: Vec<Option<Exemplar>>,
+}
+
+impl HistogramSnapshot {
+    /// The exemplar of bucket `index`, if one was recorded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::{Histogram, LabelSet};
+    ///
+    /// let h = Histogram::with_buckets([0.1, 1.0]);
+    /// h.observe_with_exemplar(0.05, &LabelSet::from([("trace_id", "4bf92f35")]));
+    /// let snap = h.snapshot();
+    /// assert_eq!(snap.exemplar(0).map(|e| e.value), Some(0.05));
+    /// assert!(snap.exemplar(1).is_none());
+    /// ```
+    #[must_use]
+    pub fn exemplar(&self, index: usize) -> Option<&Exemplar> {
+        self.exemplars.get(index).and_then(Option::as_ref)
+    }
 }
 
 /// One cumulative bucket of a [`HistogramSnapshot`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct HistogramBucket {
     /// Inclusive upper bound; `f64::INFINITY` for the last bucket. Serialised
@@ -117,8 +143,6 @@ pub struct HistogramBucket {
     pub upper_bound: f64,
     /// Number of observations `<= upper_bound`.
     pub count: u64,
-    /// The most recent exemplar recorded in this bucket, if any.
-    pub exemplar: Option<Exemplar>,
 }
 
 #[cfg(feature = "serde")]
@@ -128,14 +152,13 @@ impl serde::Serialize for HistogramBucket {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("HistogramBucket", 3)?;
+        let mut s = serializer.serialize_struct("HistogramBucket", 2)?;
         if self.upper_bound.is_finite() {
             s.serialize_field("upper_bound", &self.upper_bound)?;
         } else {
             s.serialize_field("upper_bound", "+Inf")?;
         }
         s.serialize_field("count", &self.count)?;
-        s.serialize_field("exemplar", &self.exemplar)?;
         s.end()
     }
 }
@@ -314,7 +337,7 @@ impl Histogram {
     /// let h = Histogram::with_buckets([0.1, 1.0]);
     /// h.observe_with_exemplar(0.05, &LabelSet::from([("trace_id", "4bf92f35")]));
     /// let snap = h.snapshot();
-    /// assert_eq!(snap.buckets[0].exemplar.as_ref().map(|e| e.value), Some(0.05));
+    /// assert_eq!(snap.exemplar(0).map(|e| e.value), Some(0.05));
     /// ```
     pub fn observe_with_exemplar(&self, value: f64, labels: &LabelSet) {
         let _ = self.try_observe_with_exemplar(value, labels);
@@ -430,7 +453,8 @@ impl Histogram {
         }
     }
 
-    /// Capture a cumulative snapshot.
+    /// Capture a cumulative snapshot, including the latest exemplar of each
+    /// bucket when exemplars have been recorded.
     ///
     /// Buckets are read before the total, and `count` is raised to the
     /// cumulative bucket sum if a concurrent writer had bumped a bucket but
@@ -438,38 +462,38 @@ impl Histogram {
     /// `bucket[i] <= bucket[i + 1] <= count`.
     #[must_use]
     pub fn snapshot(&self) -> HistogramSnapshot {
-        let exemplars = self.exemplars.get();
-        let exemplar_at = |i: usize| -> Option<Exemplar> {
-            exemplars
-                .and_then(|slots| slots.get(i))
-                .and_then(|slot| slot.lock().unwrap_or_else(PoisonError::into_inner).clone())
-        };
+        let mut snap = self.snapshot_counts();
+        if let Some(slots) = self.exemplars.get() {
+            snap.exemplars = slots
+                .iter()
+                .map(|slot| slot.lock().unwrap_or_else(PoisonError::into_inner).clone())
+                .collect();
+        }
+        snap
+    }
+
+    /// Snapshot without exemplars, for exporters that cannot carry them.
+    pub(crate) fn snapshot_counts(&self) -> HistogramSnapshot {
         let mut buckets = Vec::with_capacity(self.bucket_bounds.len() + 1);
         let mut cumulative: u64 = 0;
-        for (i, (bound, counter)) in self
-            .bucket_bounds
-            .iter()
-            .zip(self.bucket_counts.iter())
-            .enumerate()
-        {
+        for (bound, counter) in self.bucket_bounds.iter().zip(self.bucket_counts.iter()) {
             cumulative = cumulative.saturating_add(counter.load(Ordering::Relaxed));
             buckets.push(HistogramBucket {
                 upper_bound: *bound,
                 count: cumulative,
-                exemplar: exemplar_at(i),
             });
         }
         let count = self.count().max(cumulative);
         buckets.push(HistogramBucket {
             upper_bound: f64::INFINITY,
             count,
-            exemplar: exemplar_at(self.bucket_bounds.len()),
         });
         HistogramSnapshot {
             buckets,
             sum: self.sum(),
             count,
             age: self.age(),
+            exemplars: Vec::new(),
         }
     }
 
@@ -683,7 +707,7 @@ mod tests {
         h.reset();
         assert_eq!(h.count(), 0);
         assert_eq!(h.sum(), 0.0);
-        assert!(h.snapshot().buckets.iter().all(|b| b.exemplar.is_none()));
+        assert!(h.snapshot().exemplars.iter().all(Option::is_none));
         assert!(format!("{h:?}").contains("Histogram"));
     }
 
@@ -696,12 +720,21 @@ mod tests {
         h.observe_with_exemplar(50.0, &trace);
         let snap = h.snapshot();
         let values: Vec<Option<f64>> = snap
-            .buckets
+            .exemplars
             .iter()
-            .map(|b| b.exemplar.as_ref().map(|e| e.value))
+            .map(|e| e.as_ref().map(|e| e.value))
             .collect();
         assert_eq!(values, vec![Some(0.05), Some(0.5), Some(50.0)]);
-        assert!(snap.buckets[0].exemplar.as_ref().unwrap().timestamp > 0.0);
+        assert!(snap.exemplar(0).unwrap().timestamp > 0.0);
+        // Exporters that drop exemplars never copy them.
+        assert!(h.snapshot_counts().exemplars.is_empty());
+        // A histogram without exemplars allocates none.
+        assert!(
+            Histogram::with_buckets([1.0])
+                .snapshot()
+                .exemplars
+                .is_empty()
+        );
         assert_eq!(h.count(), 3);
     }
 
@@ -721,7 +754,7 @@ mod tests {
         assert!(h.try_observe_with_exemplar(0.5, &bad).is_err());
         // The observations were still recorded.
         assert_eq!(h.count(), 2);
-        assert!(h.snapshot().buckets[0].exemplar.is_none());
+        assert!(h.snapshot().exemplar(0).is_none());
     }
 
     #[test]

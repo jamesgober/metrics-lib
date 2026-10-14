@@ -543,7 +543,7 @@ impl ModelCtx<'_> {
         created: u64,
         h: &crate::Histogram,
     ) -> HistogramPoint {
-        let snap = h.snapshot();
+        let snap = h.snapshot_counts();
         // OTLP bucket counts are per bucket, not cumulative.
         let mut buckets = Vec::with_capacity(snap.buckets.len());
         let mut prev = 0u64;

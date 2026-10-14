@@ -523,7 +523,11 @@ fn write_histogram(
     #[cfg(feature = "histogram")]
     for s in &family.series {
         if let Handle::Histogram(h) = &s.handle {
-            let snap = h.snapshot();
+            // Only OpenMetrics carries exemplars; Prometheus text skips them.
+            let snap = match dialect {
+                Dialect::OpenMetrics => h.snapshot(),
+                Dialect::Prometheus => h.snapshot_counts(),
+            };
             let same = le_bounds.len() == snap.buckets.len()
                 && le_bounds
                     .iter()
@@ -533,20 +537,18 @@ fn write_histogram(
                 le_bounds = snap.buckets.iter().map(|b| b.upper_bound).collect();
                 le_values = le_bounds.iter().map(|b| canonical_float(*b)).collect();
             }
-            for (b, le) in snap.buckets.iter().zip(&le_values) {
+            for (i, (b, le)) in snap.buckets.iter().zip(&le_values).enumerate() {
                 sample(&mut body, &bucket_name, &s.labels, Some(("le", le)));
                 let _ = write!(body, "{}", b.count);
-                if dialect == Dialect::OpenMetrics {
-                    if let Some(ex) = &b.exemplar {
-                        body.push_str(" # ");
-                        let mut labels = String::new();
-                        ex.labels.write_prometheus(&mut labels, None);
-                        body.push_str(if labels.is_empty() { "{}" } else { &labels });
-                        body.push(' ');
-                        fmt_value(&mut body, ex.value);
-                        body.push(' ');
-                        fmt_value(&mut body, ex.timestamp);
-                    }
+                if let Some(ex) = snap.exemplar(i) {
+                    body.push_str(" # ");
+                    let mut labels = String::new();
+                    ex.labels.write_prometheus(&mut labels, None);
+                    body.push_str(if labels.is_empty() { "{}" } else { &labels });
+                    body.push(' ');
+                    fmt_value(&mut body, ex.value);
+                    body.push(' ');
+                    fmt_value(&mut body, ex.timestamp);
                 }
                 body.push('\n');
             }
