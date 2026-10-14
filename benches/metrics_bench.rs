@@ -147,6 +147,8 @@ fn distributions(c: &mut Criterion) {
     group.bench_function("summary_quantile", |b| {
         b.iter(|| black_box(s.quantile(0.99)))
     });
+    // Four default quantiles from one read of the sketch.
+    group.bench_function("summary_snapshot", |b| b.iter(|| black_box(s.snapshot())));
     group.finish();
 }
 
