@@ -1,51 +1,36 @@
-use metrics_lib::metrics;
+//! Host and process CPU usage from `SystemHealth`.
+//!
+//! CPU percentages are deltas between samples, so they read 0 until the
+//! second sample.
+//!
+//! Run with: `cargo run --example cpu_stats`
+
+use metrics_lib::SystemHealth;
+use std::time::{Duration, Instant};
 
 fn main() {
-    // Initialize metrics core if needed by your app
-    metrics_lib::init();
+    let health = SystemHealth::with_interval(Duration::from_millis(200));
 
-    let sys = metrics().system();
-
-    // System CPU usage
-    let used = sys.cpu_used();
-    let free = sys.cpu_free();
-    let load = sys.load_avg();
-    let threads = sys.thread_count();
-    let fds = sys.fd_count();
-
-    // Process CPU usage (instantaneous)
-    let proc_cpu_instant = sys.process_cpu_used();
-
-    // Warm-up sampling window: wait briefly, force update, then sample again
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    sys.update();
-    let proc_cpu_after_sleep = sys.process_cpu_used();
-
-    // Brief CPU activity to demonstrate a non-zero sample
-    let start_spin = std::time::Instant::now();
-    while start_spin.elapsed().as_millis() < 250 {
-        // busy-wait for ~150ms
-        std::hint::spin_loop();
+    // Burn some CPU on this thread so process usage moves.
+    let start = Instant::now();
+    let mut x = 1u64;
+    while start.elapsed() < Duration::from_millis(600) {
+        x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
     }
-    sys.update();
-    let proc_cpu_after_work = sys.process_cpu_used();
+    std::hint::black_box(x);
 
-    println!("=== CPU Overview ===");
-    println!("system.cpu.used      : {:>6.2}%", used);
-    println!("system.cpu.free      : {:>6.2}%", free);
-    println!("system.load.1m       : {:>6.2}", load);
+    let snap = health.snapshot();
+    println!("host CPU:     {:5.1}%", snap.system_cpu_percent);
     println!(
-        "process.cpu.used     : {:>6.2}% (instant)",
-        proc_cpu_instant
+        "process CPU:  {:5.1}% of all cores",
+        snap.process_cpu_percent
     );
+    match snap.load_average {
+        Some(load) => println!("load (1 min): {load:.2}"),
+        None => println!("load (1 min): not available on this platform"),
+    }
     println!(
-        "process.cpu.used     : {:>6.2}% (after 300ms)",
-        proc_cpu_after_sleep
+        "CPU seconds:  {:.3}",
+        health.process_metrics().cpu_seconds_total
     );
-    println!(
-        "process.cpu.used     : {:>6.2}% (after brief work)",
-        proc_cpu_after_work
-    );
-    println!("process.threads      : {}", threads);
-    println!("process.fds          : {}", fds);
 }

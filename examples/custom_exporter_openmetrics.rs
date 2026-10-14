@@ -1,74 +1,43 @@
-//! Minimal custom OpenMetrics-style exporter built on top of the public registry API.
+//! Write a custom exporter on top of the registry's entry accessors.
 //!
-//! Demonstrates how to take a one-shot snapshot of every registered metric and
-//! render it to a Prometheus-compatible text body without allocating leaked
-//! `&'static str`s. As of 0.9.2, `MetricsCore::counter/gauge/timer/rate` accept
-//! `&str`, so runtime-derived names (from `registry().*_names()`) are passed
-//! through directly.
+//! The built-in exporters cover Prometheus, OpenMetrics, StatsD, OTLP and
+//! JSON; this shows the public surface for anything else (here: a CSV
+//! dump). Names and labels in the registry are already validated.
 //!
-//! For a production exporter that handles labels, units, and HELP text out of
-//! the box, the in-crate exporters introduced in 0.9.3 are recommended.
+//! Run with: `cargo run --example custom_exporter_openmetrics`
 
-use metrics_lib::metrics;
-use std::fmt::Write;
+use metrics_lib::{LabelSet, MetricsCore, Registry};
+use std::fmt::Write as _;
 
-fn main() {
-    metrics_lib::init();
-
-    // Prime a few metrics so the snapshot has content.
-    let m = metrics();
-    m.counter("jobs_total").add(12);
-    m.gauge("queue_depth").set(3.0);
-    m.timer("latency_ns").record_ns(42_000);
-    m.rate("ingest_rps").tick_n(5);
-
-    println!("{}", snapshot_openmetrics());
+fn labels(l: &LabelSet) -> String {
+    l.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
-/// Render the global registry as a Prometheus-compatible text body.
-fn snapshot_openmetrics() -> String {
-    let m = metrics();
-    let reg = m.registry();
-    let mut out = String::new();
-
-    // Counters
-    for name in reg.counter_names() {
-        let v = m.counter(&name).get();
-        let _ = writeln!(out, "# HELP {name} Counter total");
-        let _ = writeln!(out, "# TYPE {name} counter");
-        let _ = writeln!(out, "{name} {v}");
-        let _ = writeln!(out);
+fn to_csv(registry: &Registry) -> String {
+    let mut out = String::from("kind,name,labels,value\n");
+    for (name, l, c) in registry.counter_entries() {
+        let _ = writeln!(out, "counter,{name},{},{}", labels(&l), c.get());
     }
-
-    // Gauges
-    for name in reg.gauge_names() {
-        let v = m.gauge(&name).get();
-        let _ = writeln!(out, "# HELP {name} Gauge value");
-        let _ = writeln!(out, "# TYPE {name} gauge");
-        let _ = writeln!(out, "{name} {v}");
-        let _ = writeln!(out);
+    for (name, l, g) in registry.gauge_entries() {
+        let _ = writeln!(out, "gauge,{name},{},{}", labels(&l), g.get());
     }
-
-    // Timers: expose count and average as gauges for demo purposes.
-    for name in reg.timer_names() {
-        let t = m.timer(&name);
-        let _ = writeln!(out, "# HELP {name}_count Timer count");
-        let _ = writeln!(out, "# TYPE {name}_count gauge");
-        let _ = writeln!(out, "{name}_count {}", t.count());
-        let _ = writeln!(out, "# HELP {name}_avg_ns Timer average in ns");
-        let _ = writeln!(out, "# TYPE {name}_avg_ns gauge");
-        let _ = writeln!(out, "{name}_avg_ns {}", t.average().as_nanos());
-        let _ = writeln!(out);
-    }
-
-    // Rate meters: per-second sample.
-    for name in reg.rate_meter_names() {
-        let r = m.rate(&name);
-        let _ = writeln!(out, "# HELP {name}_per_second Rate per second");
-        let _ = writeln!(out, "# TYPE {name}_per_second gauge");
-        let _ = writeln!(out, "{name}_per_second {}", r.rate());
-        let _ = writeln!(out);
-    }
-
     out
+}
+
+fn main() {
+    let core = MetricsCore::new();
+    core.counter("jobs").add(12);
+    core.counter_with("jobs", &LabelSet::from([("queue", "email")]))
+        .add(3);
+    core.gauge("queue_depth").set(3.0);
+    print!("{}", to_csv(core.registry()));
+
+    // The built-in OpenMetrics exporter, for comparison.
+    print!(
+        "{}",
+        metrics_lib::exporters::openmetrics::render(core.registry())
+    );
 }

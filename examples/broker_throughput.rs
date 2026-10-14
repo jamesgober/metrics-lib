@@ -1,56 +1,49 @@
-use metrics_lib::metrics;
-use std::sync::Arc;
+//! Measure producer and consumer throughput of a bounded channel.
+//!
+//! Run with: `cargo run --example broker_throughput --features meter --release`
+
+use metrics_lib::MetricsCore;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 fn main() {
-    metrics_lib::init();
-    let m = metrics();
+    let core = MetricsCore::new();
+    let produced = core.rate("broker_produced");
+    let consumed = core.rate("broker_consumed");
+    let run_for = Duration::from_millis(500);
 
-    let prod_r = Arc::new(m.rate("broker.producer_rps"));
-    let cons_r = Arc::new(m.rate("broker.consumer_rps"));
-
-    // Simulate a bounded channel with producer/consumer threads
-    let (tx, rx) = crossbeam_channel::bounded::<u64>(10_000);
-
-    let prod = {
-        let r = prod_r.clone();
+    let (tx, rx) = mpsc::sync_channel::<u64>(10_000);
+    let producer = {
+        let produced = std::sync::Arc::clone(&produced);
         thread::spawn(move || {
             let start = Instant::now();
-            let mut sent = 0u64;
-            while start.elapsed() < Duration::from_secs(2) {
-                if tx.send(sent).is_ok() {
-                    r.tick();
-                    sent += 1;
+            let mut n = 0u64;
+            while start.elapsed() < run_for {
+                if tx.send(n).is_err() {
+                    break;
                 }
+                produced.tick();
+                n += 1;
             }
-            sent
         })
     };
-
-    let cons = {
-        let r = cons_r.clone();
+    let consumer = {
+        let consumed = std::sync::Arc::clone(&consumed);
         thread::spawn(move || {
-            let start = Instant::now();
-            let mut recv = 0u64;
-            while start.elapsed() < Duration::from_secs(2) {
-                if let Ok(_v) = rx.recv_timeout(Duration::from_millis(1)) {
-                    r.tick();
-                    recv += 1;
-                }
+            while rx.recv_timeout(Duration::from_millis(50)).is_ok() {
+                consumed.tick();
             }
-            recv
         })
     };
-
-    let sent = prod.join().unwrap();
-    let recv = cons.join().unwrap();
+    producer.join().expect("producer panicked");
+    consumer.join().expect("consumer panicked");
 
     println!(
-        "producer: count={} rps~{:.1} | consumer: count={} rps~{:.1}",
-        sent,
-        prod_r.rate(),
-        recv,
-        cons_r.rate()
+        "produced={} ({:.0}/s now) consumed={} ({:.0}/s now)",
+        produced.total(),
+        produced.rate(),
+        consumed.total(),
+        consumed.rate()
     );
 }

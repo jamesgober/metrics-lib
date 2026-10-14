@@ -1,98 +1,64 @@
-//! Axum Registry Integration Example
+//! Serve `/metrics` from an existing axum application.
 //!
-//! Demonstrates integrating metrics-lib with an Axum web service.
-//! Starts a server, exercises a route that updates metrics, then queries an export endpoint
-//! and shuts down. This keeps the example self-contained and CI-friendly.
+//! The route renders the core with `prometheus::render_core`, which includes
+//! the `process_*` families when the `system` feature is on. The example
+//! drives the router in-process, so it exits on its own.
 //!
-//! Run with:
-//!   cargo run --example axum_registry_integration --release
+//! Run with: `cargo run --example axum_registry_integration`
 
-use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
-use axum::{routing::get, Json, Router};
-use serde_json::json;
-use std::time::Duration;
-use tower::util::ServiceExt; // for `oneshot`
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode, header};
+use axum::routing::get;
+use axum::{Router, extract::State};
+use metrics_lib::exporters::prometheus;
+use metrics_lib::{LabelSet, MetricsCore, Unit};
+use std::sync::Arc;
+use tower::ServiceExt;
 
-use metrics_lib::{init, metrics};
-
-async fn health() -> &'static str {
-    "OK"
+async fn work(State(core): State<Arc<MetricsCore>>) -> &'static str {
+    let _timer = core.timer("work_seconds").start_owned();
+    core.counter_with("work_total", &LabelSet::from([("kind", "demo")]))
+        .inc();
+    core.gauge("last_work_size").set(42.0);
+    core.histogram("work_payload_bytes").observe(512.0);
+    "done"
 }
 
-async fn metrics_demo() -> &'static str {
-    let m = metrics();
-    m.counter("web.requests").inc();
-    m.gauge("web.cpu").add(0.5);
-    let t = m.timer("web.latency");
-    let _g = t.start();
-    // simulate tiny work
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    m.rate("web.qps").tick();
-    "demo-updated"
-}
-
-async fn export_metrics() -> Json<serde_json::Value> {
-    let m = metrics();
-    let c = m.counter("web.requests").get();
-    let g = m.gauge("web.cpu").get();
-    let q = m.rate("web.qps").rate();
-    Json(json!({
-        "web.requests": c,
-        "web.cpu": g,
-        "web.qps": q
-    }))
+async fn metrics(State(core): State<Arc<MetricsCore>>) -> impl axum::response::IntoResponse {
+    (
+        [(header::CONTENT_TYPE, prometheus::CONTENT_TYPE)],
+        prometheus::render_core(&core),
+    )
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    init();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let core = Arc::new(MetricsCore::new());
+    core.registry()
+        .describe_counter("work_total", "Units of work done", Unit::None)?;
+    core.registry()
+        .configure_histogram("work_payload_bytes", [128.0, 1024.0, 8192.0])?;
 
     let app = Router::new()
-        .route("/health", get(health))
-        .route("/metrics-demo", get(metrics_demo))
-        .route("/export", get(export_metrics));
+        .route("/work", get(work))
+        .route("/metrics", get(metrics))
+        .with_state(Arc::clone(&core));
 
-    // Exercise routes in-process using tower::ServiceExt::oneshot
-    // Health
+    for _ in 0..3 {
+        let res = app
+            .clone()
+            .oneshot(Request::get("/work").body(Body::empty())?)
+            .await?;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
     let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/health")
-                .body(Body::empty())?,
-        )
+        .oneshot(Request::get("/metrics").body(Body::empty())?)
         .await?;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Update metrics
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/metrics-demo")
-                .body(Body::empty())?,
-        )
-        .await?;
-    assert!(res.status().is_success());
-
-    // Export JSON snapshot
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/export")
-                .body(Body::empty())?,
-        )
-        .await?;
-    assert!(res.status().is_success());
-    // For demonstration, print the body; convert Bytes to JSON (cap at 64KiB)
-    let bytes = to_bytes(res.into_body(), 64 * 1024).await?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-    println!("export snapshot: {v}");
-
+    let body = to_bytes(res.into_body(), 1 << 20).await?;
+    let text = String::from_utf8(body.to_vec())?;
+    for line in text.lines().filter(|l| l.starts_with("work")) {
+        println!("{line}");
+    }
     Ok(())
 }

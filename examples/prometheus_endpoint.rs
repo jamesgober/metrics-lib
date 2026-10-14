@@ -1,81 +1,45 @@
-//! Minimal Axum `/metrics` endpoint backed by the built-in Prometheus
-//! exporter. The handler is allocation-light (one render per request) and
-//! returns the exposition body with the canonical `Content-Type`.
+//! A `/metrics` endpoint with the dependency-free built-in server.
 //!
-//! Run with:
-//!   cargo run --example prometheus_endpoint --features async --release
-//! Then:
-//!   curl http://127.0.0.1:9898/metrics
+//! Run with: `cargo run --example prometheus_endpoint --features http,histogram`
+//! then `curl http://127.0.0.1:9898/metrics`. Set `SERVE_FOR_SECS` to keep it
+//! running longer (default: 2 s, so the example exits by itself).
 
-use axum::{
-    http::{header, StatusCode},
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
-use metrics_lib::{init, metrics, LabelSet, Unit};
+use metrics_lib::exporters::http::MetricsServer;
+use metrics_lib::{LabelSet, MetricsCore, Unit};
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::Arc;
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() {
-    init();
-    let m = metrics();
-
-    // Describe metrics so the exporter emits `# HELP` / `# TYPE` / `# UNIT`.
-    m.registry().describe_counter(
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let core = Arc::new(MetricsCore::new());
+    core.registry().describe_counter(
         "http_requests_total",
-        "Total HTTP requests handled by the demo server",
-        Unit::Custom("1"),
-    );
-    m.registry().describe_histogram(
-        "http_request_duration_seconds",
-        "Per-request handler latency",
-        Unit::Seconds,
-    );
+        "Requests handled by the demo",
+        Unit::None,
+    )?;
+    let labels = LabelSet::from([("method", "GET"), ("status", "200")]);
+    core.counter_with("http_requests_total", &labels).add(7);
+    core.histogram("http_request_duration_seconds")
+        .observe(0.042);
 
-    // Spawn a background task that pretends to handle traffic, so the
-    // endpoint has data to expose immediately.
-    tokio::spawn(async {
-        loop {
-            let labels = LabelSet::from([("method", "GET"), ("status", "200")]);
-            metrics().counter_with("http_requests_total", &labels).inc();
-            let h = metrics().histogram_with("http_request_duration_seconds", &labels);
-            h.observe(0.005 + 0.01 * (rand_f64()));
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
+    let server = MetricsServer::spawn("127.0.0.1:0", Arc::clone(&core))?;
+    println!("serving on http://{}/metrics", server.local_addr());
 
-    let app = Router::new()
-        .route("/metrics", get(metrics_handler))
-        .route("/healthz", get(|| async { "OK" }));
+    // Scrape it once, like Prometheus would.
+    let mut stream = TcpStream::connect(server.local_addr())?;
+    stream.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response)?;
+    for line in response.lines().take(12) {
+        println!("{line}");
+    }
 
-    let addr = "127.0.0.1:9898";
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    println!("Serving Prometheus metrics on http://{addr}/metrics");
-    axum::serve(listener, app).await.unwrap();
-}
-
-async fn metrics_handler() -> impl IntoResponse {
-    let body = metrics_lib::exporters::prometheus::render(metrics().registry());
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        body,
-    )
-}
-
-fn rand_f64() -> f64 {
-    use std::cell::Cell;
-    thread_local! { static S: Cell<u64> = const { Cell::new(0xABCDEF0123456789) }; }
-    S.with(|s| {
-        let mut x = s.get();
-        x = x
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        s.set(x);
-        (x >> 32) as f64 / (u32::MAX as f64)
-    })
+    let secs = std::env::var("SERVE_FOR_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    std::thread::sleep(Duration::from_secs(secs));
+    server.shutdown();
+    Ok(())
 }

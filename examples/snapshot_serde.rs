@@ -1,31 +1,24 @@
-//! Captures the registry as a single JSON snapshot using `exporters::json`.
+//! Capture every series as one JSON document.
 //!
-//! Run with:
-//!   cargo run --example snapshot_serde --features serde --release
+//! Run with: `cargo run --example snapshot_serde --features serde`
 
 use metrics_lib::exporters::json;
-use metrics_lib::{init, metrics, LabelSet, Unit};
+use metrics_lib::{LabelSet, MetricsCore};
 
-fn main() {
-    init();
-    let m = metrics();
+fn main() -> Result<(), serde_json::Error> {
+    let core = MetricsCore::new();
+    core.counter("hits").add(5);
+    core.counter_with("hits", &LabelSet::from([("status", "404")]))
+        .inc();
+    core.gauge("temperature").set(21.5);
+    core.gauge("unknown").set(f64::NAN); // written as "NaN"
 
-    m.registry().describe_counter(
-        "jobs_total",
-        "Background job invocations",
-        Unit::Custom("1"),
+    let snapshot = json::snapshot(core.registry());
+    println!(
+        "{} series, schema v{}",
+        snapshot.series.len(),
+        snapshot.schema_version
     );
-    m.registry()
-        .describe_gauge("queue_depth", "Pending background work", Unit::Custom("1"));
-
-    m.counter("jobs_total").add(120);
-    m.counter_with("jobs_total", &LabelSet::from([("kind", "email")]))
-        .add(34);
-    m.counter_with("jobs_total", &LabelSet::from([("kind", "report")]))
-        .add(86);
-    m.gauge("queue_depth").set(5.0);
-
-    // Render pretty so the output is easy to scan in the terminal.
-    let body = json::render_pretty(m.registry());
-    println!("{body}");
+    println!("{}", json::render_pretty(core.registry())?);
+    Ok(())
 }

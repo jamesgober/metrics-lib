@@ -1,57 +1,50 @@
-//! Demonstrates labeled metrics with the `LabelSet` API + cardinality control.
+//! Labeled series, validation, and the series cap.
 //!
-//! Run with:
-//!   cargo run --example labels_demo --release
+//! Run with: `cargo run --example labels_demo`
 
-use metrics_lib::{init, metrics, LabelSet, Unit};
+use metrics_lib::{LabelSet, MetricsCore, MetricsError, Unit, labels};
 
-fn main() {
-    init();
-    let m = metrics();
+fn main() -> Result<(), MetricsError> {
+    let core = MetricsCore::new();
+    core.registry()
+        .describe_counter("http_requests", "HTTP requests handled", Unit::None)?;
 
-    // Describe the metric once — exporters pick up the help text + unit.
-    m.registry().describe_counter(
-        "http_requests",
-        "Total HTTP requests handled",
-        Unit::Custom("1"),
-    );
+    let ok = labels!("method" => "GET", "status" => "200");
+    let failed = labels!("method" => "POST", "status" => "500");
+    core.counter_with("http_requests", &ok).add(10);
+    core.counter_with("http_requests", &failed).add(3);
 
-    // Build label sets fluently. Repeated lookups of the same `(name, labels)`
-    // return the same `Arc<Counter>`, so cache them in hot paths.
-    let get_200 = LabelSet::from([("method", "GET"), ("status", "200")]);
-    let post_500 = LabelSet::from([("method", "POST"), ("status", "500")]);
-
-    for _ in 0..10 {
-        m.counter_with("http_requests", &get_200).inc();
-    }
-    for _ in 0..3 {
-        m.counter_with("http_requests", &post_500).inc();
-    }
-
-    // Per-tenant runtime-derived labels (no Box::leak required).
+    // Runtime values need no `Box::leak`.
     for tenant in ["acme", "globex", "initech"] {
-        let labels = LabelSet::from([("tenant", tenant.to_string())]);
-        m.counter_with("auth_failures", &labels).add(2);
+        core.counter_with("auth_failures", &labels!("tenant" => tenant.to_owned()))
+            .add(2);
     }
 
-    // Cardinality control: configure a tight cap and watch overflows.
-    m.registry().set_cardinality_cap(8);
+    // Validation: `try_add` refuses bad keys, `try_*` lookups refuse bad names.
+    let mut l = LabelSet::new();
+    assert!(l.try_add("bad key", "v").is_err());
+    assert!(core.try_counter("bad name").is_err());
+
+    // The series cap bounds memory however many label values arrive.
+    core.registry()
+        .set_cardinality_cap(core.registry().cardinality_count() + 5);
     for i in 0..100 {
-        let labels = LabelSet::from([("k", format!("v{i}"))]);
-        m.counter_with("overflow_demo", &labels).inc();
+        core.counter_with("per_user", &labels!("user" => format!("u{i}")))
+            .inc();
     }
-
-    println!("metric_count       = {}", m.registry().metric_count());
-    println!("cardinality_count  = {}", m.registry().cardinality_count());
-    println!("cardinality_cap    = {}", m.registry().cardinality_cap());
     println!(
-        "cardinality_overflows = {}",
-        m.registry().cardinality_overflows()
+        "series={} cap={} overflows={}",
+        core.registry().metric_count(),
+        core.registry().cardinality_cap(),
+        core.registry().cardinality_overflows()
     );
-    println!();
-    println!("===== Prometheus snapshot =====");
-    println!(
+    match core.try_counter_with("per_user", &labels!("user" => "u999")) {
+        Err(MetricsError::CardinalityExceeded) => println!("cap reached, as configured"),
+        other => println!("unexpected: {other:?}"),
+    }
+    print!(
         "{}",
-        metrics_lib::exporters::prometheus::render(m.registry())
+        metrics_lib::exporters::prometheus::render(core.registry())
     );
+    Ok(())
 }
