@@ -108,8 +108,10 @@ jobs:
           tool: cargo-hack
       - name: Toolchain in use
         run: rustc --version && cargo --version
+      # --no-dev-deps edits the manifest temporarily, which changes the lock,
+      # so this step cannot run --locked.
       - name: Clippy, each feature alone
-        run: cargo hack clippy --locked --lib --each-feature --no-dev-deps -- -D warnings
+        run: cargo hack clippy --lib --each-feature --no-dev-deps -- -D warnings
       - name: Unit tests, each feature alone
         run: cargo hack test --locked --lib --each-feature
 
