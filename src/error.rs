@@ -168,6 +168,14 @@ impl fmt::Display for MetricsError {
                 name,
                 existing,
                 requested,
+            } if existing == requested => write!(
+                f,
+                "metric {name:?} is already registered as a different {existing} type (for example a ShardedCounter rather than a Counter)"
+            ),
+            Self::KindMismatch {
+                name,
+                existing,
+                requested,
             } => write!(
                 f,
                 "metric {name:?} is already registered as a {existing}, cannot register it as a {requested}"

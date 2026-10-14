@@ -905,8 +905,9 @@ impl Registry {
     /// Metadata of `name`, when it was described.
     #[must_use]
     pub fn metadata(&self, name: &str) -> Option<MetricMetadata> {
-        let shard = self.read_shard(name);
-        let family = shard.get(name)?;
+        let name = sanitize_metric_name(name);
+        let shard = self.read_shard(&name);
+        let family = shard.get(name.as_ref())?;
         let help = family.help.clone()?;
         Some(MetricMetadata::new(family.kind, help, family.unit))
     }
@@ -914,7 +915,8 @@ impl Registry {
     /// The kind registered (or described) under `name`.
     #[must_use]
     pub fn kind_of(&self, name: &str) -> Option<MetricKind> {
-        self.read_shard(name).get(name).map(|f| f.kind)
+        let name = sanitize_metric_name(name);
+        self.read_shard(&name).get(name.as_ref()).map(|f| f.kind)
     }
 
     /// Set the bucket bounds for histograms created under `name` from now
@@ -1256,7 +1258,8 @@ impl Registry {
     /// `true` when it existed. Handles already given out keep working but
     /// are no longer exported.
     pub fn remove(&self, name: &str) -> bool {
-        let removed = self.write_shard(name).remove(name);
+        let name = sanitize_metric_name(name);
+        let removed = self.write_shard(&name).remove(name.as_ref());
         match removed {
             Some(family) => {
                 self.release(family.slots());
@@ -1270,18 +1273,20 @@ impl Registry {
     /// without series is removed too, unless it carries metadata or
     /// configuration.
     pub fn remove_series(&self, name: &str, labels: &LabelSet) -> bool {
-        let mut shard = self.write_shard(name);
-        let Some(family) = shard.get_mut(name) else {
+        let name = sanitize_metric_name(name);
+        let labels = labels.sanitized();
+        let mut shard = self.write_shard(&name);
+        let Some(family) = shard.get_mut(name.as_ref()) else {
             return false;
         };
         let before = family.slots();
-        if !family.remove(labels) {
+        if !family.remove(&labels) {
             return false;
         }
         let keep = family.series_count() > 0 || family.has_config();
         let after = if keep { family.slots() } else { 0 };
         if !keep {
-            let _ = shard.remove(name);
+            let _ = shard.remove(name.as_ref());
         }
         self.release(before - after);
         true
@@ -1579,6 +1584,21 @@ impl<'a> ScopedRegistry<'a> {
         self.registry.describe_counter(&self.join(name), help, unit)
     }
 
+    /// Prefixed [`Registry::describe_up_down_counter`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Registry::describe`].
+    pub fn describe_up_down_counter(
+        &self,
+        name: &str,
+        help: impl Into<Cow<'static, str>>,
+        unit: Unit,
+    ) -> Result<()> {
+        self.registry
+            .describe_up_down_counter(&self.join(name), help, unit)
+    }
+
     /// Prefixed [`Registry::describe_gauge`].
     ///
     /// # Errors
@@ -1591,6 +1611,44 @@ impl<'a> ScopedRegistry<'a> {
         unit: Unit,
     ) -> Result<()> {
         self.registry.describe_gauge(&self.join(name), help, unit)
+    }
+
+    /// Prefixed [`Registry::describe_summary`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Registry::describe`].
+    pub fn describe_summary(
+        &self,
+        name: &str,
+        help: impl Into<Cow<'static, str>>,
+        unit: Unit,
+    ) -> Result<()> {
+        self.registry.describe_summary(&self.join(name), help, unit)
+    }
+
+    /// Prefixed [`Registry::remove`].
+    #[allow(clippy::must_use_candidate)] // called for its side effect
+    pub fn remove(&self, name: &str) -> bool {
+        self.registry.remove(&self.join(name))
+    }
+
+    /// Prefixed [`Registry::remove_series`].
+    #[allow(clippy::must_use_candidate)] // called for its side effect
+    pub fn remove_series(&self, name: &str, labels: &LabelSet) -> bool {
+        self.registry.remove_series(&self.join(name), labels)
+    }
+
+    /// Prefixed [`Registry::metadata`].
+    #[must_use]
+    pub fn metadata(&self, name: &str) -> Option<MetricMetadata> {
+        self.registry.metadata(&self.join(name))
+    }
+
+    /// Prefixed [`Registry::kind_of`].
+    #[must_use]
+    pub fn kind_of(&self, name: &str) -> Option<MetricKind> {
+        self.registry.kind_of(&self.join(name))
     }
 
     /// Prefixed [`Registry::describe_timer`].
@@ -1674,6 +1732,41 @@ impl<'a> ScopedRegistry<'a> {
 #[cfg(all(feature = "count", feature = "gauge", feature = "timer"))]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "count", feature = "histogram"))]
+    #[test]
+    fn test_name_addressed_methods_repair_names_like_lookups_ml2_014() {
+        let r = Registry::new();
+        r.counter("my-metric").inc();
+        r.counter_with("my-metric", &LabelSet::from([("bad key", "v")]))
+            .inc();
+        assert_eq!(r.kind_of("my-metric"), Some(MetricKind::Counter));
+        assert!(r.remove_series("my-metric", &LabelSet::from([("bad key", "v")])));
+        assert!(r.remove("my-metric"));
+        assert_eq!(r.metric_count(), 0);
+
+        let scoped = r.scoped("app_");
+        scoped
+            .describe_summary("q", "quantiles", Unit::Seconds)
+            .unwrap();
+        scoped
+            .describe_up_down_counter("depth", "queue depth", Unit::None)
+            .unwrap();
+        assert_eq!(scoped.kind_of("q"), Some(MetricKind::Summary));
+        assert_eq!(
+            scoped.metadata("depth").map(|m| m.kind),
+            Some(MetricKind::UpDownCounter)
+        );
+        scoped.up_down_counter("depth").inc();
+        assert!(scoped.remove_series("depth", &LabelSet::EMPTY));
+        assert!(scoped.remove("q"));
+        assert_eq!(r.kind_of("app_q"), None);
+
+        // A clash between two storage types of one kind says so.
+        let _ = r.sharded_counter("hits");
+        let err = r.try_counter("hits").unwrap_err();
+        assert!(err.to_string().contains("different counter type"), "{err}");
+    }
     use std::sync::Barrier;
     use std::thread;
 
