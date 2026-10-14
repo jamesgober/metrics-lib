@@ -1,64 +1,62 @@
 # Performance Tuning
 
-Practical tips to extract the maximum throughput and lowest latency when using `metrics-lib` in production.
+Practical advice for the lowest overhead in production. Measured figures
+are in [`PERFORMANCE.md`](./PERFORMANCE.md).
 
-## CPU Affinity and Scheduling
+## Hold handles on hot paths
 
-- Pin hot workers to physical cores to reduce context switches.
-- Linux (example, taskset):
-```bash
-# pin PID 12345 to cores 2-3
-sudo taskset -cp 2,3 12345
-```
-- Tokio: prefer bounded worker threads and avoid oversubscription.
+A registry lookup (`core.counter("name")`) takes a shard read lock and two
+hash lookups; recording into a held `Arc<Counter>` is one atomic add.
+Resolve handles once, at start-up or per connection:
 
-## NUMA Awareness
+```rust
+use metrics_lib::{LabelSet, MetricsCore};
 
-- Keep producer and consumer threads on the same NUMA node as much as possible.
-- Allocate long-lived metric structures early (during init) to the node that will touch them most.
-- Tools: `numactl`, `hwloc` to inspect and enforce placement.
-
-## Denormals and Frequency Scaling
-
-- Disable CPU frequency scaling (use performance governor) for stable benches.
-- Avoid denormals in gauge math where possible.
-- Linux:
-```bash
-# set performance governor (modern systems)
-echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+let core = MetricsCore::new();
+let ok = core.counter_with("requests", &LabelSet::from([("status", "200")]));
+for _ in 0..1_000 {
+    ok.inc(); // no lookup, no allocation
+}
+assert_eq!(ok.get(), 1_000);
 ```
 
-## Lock Contention
+## Pick the right type under contention
 
-- Prefer batched updates (`add`, `record_batch`, `tick_n`) to amortize costs under bursts.
-- Use `RateMeter` for admission rather than central mutexes.
+- Many threads incrementing one counter: use `ShardedCounter`. On the
+  reference machine eight threads hammering one `Counter` take 7 to 9 times as
+  long as with a `ShardedCounter` (see `contended_increments`).
+- Strict rate limits: `TokenBucket` (one compare-and-swap per acquire), not
+  `RateMeter::tick_if_under_limit`.
+- Percentiles: `Histogram` when you aggregate across instances in
+  Prometheus; `Summary` when you need accurate per-process quantiles.
 
-## Memory and Cache
+## Batch where the data is already batched
 
-- Pre-register metric handles; avoid creating/dropping in hot paths.
-- Avoid high-cardinality metric names; keep names `'static` where possible.
-- All core types are `#[repr(align(64))]` to avoid false sharing; still, avoid placing unrelated hot data in the same cache line.
+`Counter::add(n)`, `RateMeter::tick_n(n)` and `Timer::record_batch(&[..])`
+update each atomic once per batch.
 
-## Async Considerations
+## Keep cardinality bounded
 
-- Use `AsyncMetricBatch` to coalesce updates.
-- Avoid fine-grained awaits around individual metric ops.
+Every distinct label set is a series with its own memory. Use templates
+(`/users/{id}`), not raw values, as labels; cap the registry with
+`MetricsConfig::with_max_series`; and evict stale series with
+`Registry::evict_idle` from a periodic task.
 
-## Criterion Settings for Stable Results
+## Export off the hot path
 
-- Increase warmup/measurement/sample sizes on metal runners:
+Rendering walks every series. Scrape from a separate thread (the
+`http` feature's `MetricsServer` does), reuse a buffer with
+`prometheus::render_into`, and keep the scrape interval reasonable (10–60 s).
+
+## Benchmarking on your machine
+
+- Fix the CPU frequency (Linux: `performance` governor) and close other
+  workloads.
+- Use longer Criterion runs:
+
 ```bash
-cargo bench --bench metrics_bench --features meter -- -w 3.0 -m 5.0 -n 100
+cargo bench --all-features --bench metrics_bench -- --warm-up-time 3 --measurement-time 5
 ```
-- Run multiple times and compare medians.
 
-## Exporting Without Perturbing Hot Paths
-
-- Use a background task to snapshot metrics and ship off-process.
-- Bound queues; drop or sample on overload.
-
-## Checklists
-
-- CPU governor set to `performance` (or equivalent).
-- Fixed rustc, toolchain, and target features.
-- Benches run on quiescent system (no heavy background jobs).
+- Compare medians across several runs; report CPU, OS and `rustc -V` with
+  the numbers.

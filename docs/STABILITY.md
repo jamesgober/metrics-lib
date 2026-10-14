@@ -1,190 +1,92 @@
-# API Stability — metrics-lib 1.0
+# API Stability — metrics-lib 2.x
 
-`metrics-lib 1.0.0` is the API freeze. This document defines exactly what
-the crate commits to and what it does not, so consumers can decide
-confidently how to depend on it.
+This document defines what metrics-lib 2.x commits to, so you can decide how
+to depend on it. It replaces the 1.0 document, whose promise of "additive
+variants in minor releases" could not hold for exhaustive enums.
 
 ## The promise
 
-The crate follows [Semantic Versioning](https://semver.org/) with the
-strict cargo interpretation:
+metrics-lib follows [Semantic Versioning](https://semver.org/) with Cargo's
+interpretation:
 
-- **`1.x.y` releases never break the documented public surface.** Adding
-  new variants, methods, types, modules, or feature flags is always
-  allowed and shipped as a minor (`1.X.0`) bump. Removing, renaming, or
-  changing the signature of anything listed in
-  [§ Frozen surface](#frozen-surface) requires a major (`2.0.0`) bump.
-- **MSRV (Minimum Supported Rust Version) is `1.70`** at 1.0.0. MSRV
-  bumps within `1.x` are treated as minor changes (advertised in the
-  CHANGELOG) but not as breaking — consumers on older toolchains should
-  pin `metrics-lib = "=1.M.P"` if they need a fixed MSRV.
-- **The `[features]` set is part of the public API.** Renaming or
-  removing a feature flag is a `2.0` change. Adding new feature flags
-  is additive (minor).
+- **2.x releases do not break the public API.** Anything reachable from
+  `metrics_lib::*` keeps its signature and documented behaviour until 3.0.
+- **Additive growth is allowed in minor releases.** The public enums and the
+  structs with public fields are `#[non_exhaustive]`, so new variants and
+  fields can be added in a minor release without breaking `match`
+  statements (they need a `_` arm) or construction (use the constructors and
+  `with_*` methods).
+- **MSRV is Rust 1.85.** Raising it is a major change.
+- **Feature flags are API.** Removing or renaming a feature is a major
+  change; adding one is minor. Features are additive: enabling one never
+  disables anything.
+- **Deprecation.** Items are deprecated with `#[deprecated(since, note)]`
+  for at least one minor release and removed only in the next major. The
+  1.x registry names (`get_or_create_*`) are deprecated in 2.0 and will be
+  removed in 3.0.
+- **Yanking.** Only for a critical correctness or security bug, together
+  with a same-day patch release.
 
-## Frozen surface
+## What is covered
 
-Every item below is committed at `1.0.0`. The list is exhaustive — if
-something is not listed here and is reachable from `metrics_lib::*`, it
-is **not** part of the stability promise.
+Everything public, in particular:
 
-### Crate-root globals
+- the metric types (`Counter`, `ShardedCounter`, `UpDownCounter`, `Gauge`,
+  `Timer`, `RateMeter`, `Histogram`, `Summary`, `TokenBucket`) and their
+  stats/snapshot types;
+- `Registry`, `ScopedRegistry`, `MetricsCore`, `MetricsConfig`, the global
+  functions (`init`, `init_with_config`, `metrics`, `try_metrics`) and
+  `METRICS`;
+- `LabelSet`, the validation functions and limits (`MAX_NAME_LEN`, …);
+- `MetricsError` and `Result`;
+- the exporters' functions and types, and the **shape of their output**: the
+  family and sample names, types and units described in each exporter's
+  module documentation (a 2.x release will not rename an exported series);
+- the feature-gated modules (`async_support`, `tracing_ext`, `metrics_rs`,
+  `tower`, `exporters::http`) and the `sample` and `system` types.
 
-- `metrics_lib::METRICS: OnceLock<MetricsCore>`
-- `metrics_lib::init() -> &'static MetricsCore`
-- `metrics_lib::metrics() -> &'static MetricsCore`
-- `metrics_lib::Result<T>` (alias for `std::result::Result<T, MetricsError>`)
-- `metrics_lib::MetricsError` (enum + every variant currently exposed)
-- `metrics_lib::MetricsCore` (struct + every `pub fn` shown by `cargo
-  doc --no-deps`)
+## What is not covered
 
-### Core metric types
+- Exact numeric output of estimates (`RateMeter` sliding estimates,
+  `Summary` quantiles within their stated error bound, histogram
+  interpolation), `Debug` output, error message text, and the order of
+  hash-based iteration where the docs do not promise one.
+- Performance figures. They are measured and published (see
+  `docs/PERFORMANCE.md`), not promised.
+- The exact set of `sysinfo` versions used on non-Linux targets, as long as
+  the MSRV holds.
+- Items hidden from the documentation and anything named `__*`.
 
-- `Counter`, `CounterStats` (gated on `count`)
-- `Gauge`, `GaugeStats`, `gauge_specialized::PercentageGauge`,
-  `gauge_specialized::CpuGauge`, `gauge_specialized::MemoryGauge` (gated
-  on `gauge`)
-- `Timer`, `RunningTimer<'a>`, `TimerStats`, the `time_block!` and
-  `time_fn!` macros, `metrics_lib::utils::*` timing helpers (gated on
-  `timer`)
-- `RateMeter`, `RateStats`, `rate_meter_specialized::ApiRateLimiter`,
-  `rate_meter_specialized::ThroughputMeter` (gated on `meter`)
-- `Histogram`, `HistogramSnapshot`, `HistogramBucket`,
-  `DEFAULT_SECONDS_BUCKETS` (gated on `histogram`)
+## Behavioural contracts
 
-### Labels & metadata
-
-- `Label` (type alias), `LabelSet`
-- `MetricKind`, `MetricMetadata`, `Unit` (including `Unit::Custom`)
-
-### Registry
-
-- `Registry`, `ScopedRegistry<'a>`, `DEFAULT_CARDINALITY_CAP`
-
-### System health
-
-- `SystemHealth`, `SystemSnapshot`, `ProcessStats`, `HealthStatus`,
-  `HealthConfig`, `Step`
-
-### Token bucket (strict admission)
-
-- `TokenBucket`
-
-### Async support (gated on `async`)
-
-- `AsyncTimerExt`, `AsyncTimerGuard<'a>`, `AsyncMetricBatch`,
-  `AsyncMetricsBatcher`
-
-### Adaptive controls (gated on `sample`)
-
-- `AdaptiveSampler`, `SamplingStrategy`, `MetricCircuitBreaker`,
-  `BackpressureController`
-
-### `tracing` integration (gated on `tracing`)
-
-- `metrics_lib::tracing_ext::time_in_span`
-- `metrics_lib::tracing_ext::time_global`
-
-### Exporters
-
-- `metrics_lib::exporters::prometheus::{render, render_into}`
-  (always available)
-- `metrics_lib::exporters::openmetrics::{render, render_into}`
-  (always available)
-- `metrics_lib::exporters::json::{snapshot, render, render_pretty}` +
-  the `RegistrySnapshot` / `CounterSeries` / `GaugeSeries` /
-  `TimerSeries` / `RateSeries` / `HistogramSeries` /
-  `CardinalitySnapshot` value types (gated on `serde`)
-- `metrics_lib::exporters::statsd::StatsdSink` (gated on `statsd`)
-- `metrics_lib::exporters::otlp::{render, render_pretty, build,
-  ExportMetricsServiceRequest, ResourceMetrics, ScopeMetrics, Resource,
-  InstrumentationScope, Metric, MetricData, NumberData, NumberDataPoint,
-  NumberValue, HistogramData, HistogramDataPoint, KeyValue, AnyValue}`
-  (gated on `otlp`)
-
-### Prelude
-
-- `metrics_lib::prelude::*` — see
-  [`docs/API.md#prelude`](./API.md#prelude) for the exact list. The
-  prelude itself is part of the frozen surface; its contents are
-  versioned so that re-exporting new items from it counts as a minor
-  bump.
-
-### Cargo features
-
-The feature set is frozen at 1.0.0:
-
-`count`, `gauge`, `timer`, `meter`, `sample`, `histogram`, `bench-tests`,
-`async`, `serde`, `statsd`, `otlp`, `tracing`, `exporters-all`, `all`,
-`full`, `default`, `minimal`.
-
-## Explicitly NOT part of the promise
-
-- Anything inside a `#[doc(hidden)]` module, item, or method.
-- The `#[cfg(test)]` and `#[cfg(all(test, feature = "bench-tests", …))]`
-  modules.
-- Internal performance characteristics. The Criterion benchmarks track
-  per-version trends, but `Counter::inc` does not commit to a specific
-  ns/op number across hardware. Don't depend on relative ordering
-  between, say, `metrics().counter(name)` and `metrics().counter_with(name, &labels)`
-  beyond "the cached-handle path is at least as fast."
-- The exact text of error display messages (`MetricsError::Display`).
-  The variants and their discriminants are stable; the human-readable
-  format is not.
-- The dependency tree below the top-level dependency declarations in
-  `Cargo.toml`. Patch / minor bumps of transitive dependencies happen
-  as a normal part of `1.x` development.
-- The `MSRV` for newly added feature flags. A new feature introduced in
-  `1.M.0` may require a newer toolchain than the rest of the crate;
-  this is announced in the CHANGELOG.
-
-## Behavioural contracts worth quoting
-
-These are the corner-of-the-spec behaviours that consumers may rely on:
-
-- **`Counter`** is monotonic across `inc` / `add` / `fetch_add` /
-  `add_and_get`. `reset` and `set` exist and are the only ways to
-  decrease the value. `try_inc` / `try_add` / `try_fetch_add` /
-  `try_inc_and_get` return `Err(MetricsError::Overflow)` iff the
-  arithmetic would overflow `u64::MAX`; the counter is unchanged on
-  overflow.
-- **`Gauge` `try_*` methods reject non-finite inputs**
-  (`f64::NAN`, `f64::INFINITY`, `f64::NEG_INFINITY`) with
-  `Err(MetricsError::InvalidValue { reason })` and do not mutate the
-  gauge. The non-`try` methods silently ignore non-finite inputs.
-- **`Timer::record_batch`** saturates internally on overflow (no panic);
-  `try_record_batch` returns `Err(MetricsError::Overflow)`.
-- **`RateMeter::tick_if_under_limit`** has documented TOCTOU semantics
-  — it may briefly overshoot the limit by up to `num_threads − 1`
-  events per window. Use `TokenBucket::try_acquire` when strict
-  admission is required.
-- **`TokenBucket::try_acquire`** never exceeds the configured capacity,
-  proven by an in-tree property test
-  (`tests/proptests.rs::token_bucket_no_overshoot_no_refill`).
-- **`Registry::scoped(prefix)`** is name-rewriting only — the same
-  `Arc<Counter>` (etc.) backs `scoped("p.").counter("x")` and
-  `counter("p.x")`.
-- **`SystemHealth` readers are atomic-load-only** — no mutex, no
-  syscall, no async-runtime stall, regardless of platform. A background
-  sampler thread (or explicit `update()` calls in `manual()` mode) is
-  the only writer.
-- **Cardinality cap** defaults to `DEFAULT_CARDINALITY_CAP = 10_000`
-  unique `(name, labels)` tuples across **all** labeled metric types.
-  `try_*_with` methods return `Err(MetricsError::CardinalityExceeded)`
-  when full; non-`try` `*_with` methods route to a process-global
-  per-type overflow sink (never exported, never panicking).
-
-## What changes in `2.0.0`
-
-The roadmap that follows 1.0 is intentionally undocumented at the
-SemVer level. Plausible breaking changes that would justify a `2.0`:
-
-- Migrating `criterion` to `0.5+` and removing the
-  `RUSTSEC-2024-0375` (`atty` unmaintained) ignore from `deny.toml`.
-- Switching the registry's labeled-lookup composite key to a more
-  efficient encoding (e.g. interned strings) — would affect public
-  storage types if they're exposed.
-- Generalising the histogram percentile path (HDR-histogram, t-digest)
-  in a way that changes return types.
-
-Any of these will be announced via a `2.0-pre` cycle on `main` first.
+- **Names and labels.** Every name and label that reaches an exporter is
+  valid for it. Invalid input is refused by the `try_*` lookups and
+  repaired by the others (`Registry::invalid_inputs` counts repairs).
+- **One name, one kind.** A name registered as one kind is refused for
+  another (`MetricsError::KindMismatch`); the unchecked lookups return a
+  detached metric and count it in `Registry::kind_conflicts`.
+- **Bounded registry.** The number of series plus metadata-only families
+  never exceeds `Registry::cardinality_cap`.
+- **Valid expositions.** Prometheus and OpenMetrics output always parses:
+  one `TYPE` per family, no sample-name clashes (a clashing family is
+  skipped and counted in `Registry::exposition_conflicts`), cumulative
+  histograms with `+Inf` equal to `_count`, `# EOF` terminated
+  OpenMetrics.
+- **`Counter`** is monotonic under `inc`/`add` (wrapping at `u64::MAX`);
+  `reset`, `set` and `compare_and_swap` are the only ways down. The `try_*`
+  methods return `Overflow` and leave the value unchanged.
+- **`Gauge`.** `set` stores any value, including NaN and ±∞. Every other
+  unchecked method ignores non-finite input and never writes a non-finite
+  result; the `try_*` methods report the same cases as errors.
+- **`Timer`** sums in 128 bits and clamps durations above `u64::MAX`
+  nanoseconds; `count` overflows only past `u64::MAX` recordings, which the
+  `try_*` methods report.
+- **`RateMeter::tick_if_under_limit`** may overshoot the limit by up to
+  `threads − 1` events under contention. `TokenBucket::try_acquire` never
+  over-admits.
+- **`SystemHealth` readers** are single atomic loads; only the sampler
+  thread (or `update()` in manual mode) writes. Values a platform cannot
+  provide are `None`.
+- **No panics** in library code for any input, including NaN, infinities,
+  zero rates and empty bucket lists; see the property tests in
+  `tests/proptests.rs`.

@@ -7,198 +7,111 @@
     <b>CONTRIBUTING</b>
   </h1>
 
-Thank you for contributing! This document summarizes local workflows, benchmarking guidance with Criterion, and tips to reduce variance when you care about repeatable performance measurements.
+Thank you for contributing. This page covers the local workflow, the checks
+CI runs, and how to measure performance. The design and testing rules are in
+[`docs/GUIDELINES.md`](./docs/GUIDELINES.md).
 
-## Getting Started
+## Getting started
 
-- MSRV: Rust 1.70.0
-- Install toolchain and components:
+- MSRV: Rust 1.85. `rust-toolchain.toml` pins 1.85.0 for local builds, so
+  `cargo` in this directory uses the MSRV toolchain. Use `cargo +stable`
+  for tools that need a newer compiler (`cargo-semver-checks`,
+  `cargo-llvm-cov`).
+- Install the toolchain and components:
+
   ```bash
-  rustup toolchain install 1.70.0 stable
-  rustup component add rustfmt clippy
-  ```
-- Typical fast checks:
-  ```bash
-  cargo fmt --all -- --check
-  cargo clippy --all-features -- -D warnings
-  cargo test --all-features
+  rustup toolchain install 1.85.0 stable
+  rustup component add rustfmt clippy --toolchain 1.85.0
   ```
 
-## Benchmarks
+## Checks before a pull request
 
-This repository uses Criterion for statistically robust microbenchmarks.
-
-- Run the full suite (default durations):
-  ```bash
-  cargo bench --bench metrics_bench --features meter
-  ```
-- Run quickly (useful on laptops/PRs):
-  ```bash
-  cargo bench --bench metrics_bench --features meter -- -w 0.3 -m 1.0 -n 20
-  # -w warmup time (sec), -m measurement time (sec), -n samples
-  ```
-- Where to find results:
-  - Criterion writes HTML + JSON reports to `target/criterion/`
-  - Per-benchmark stats will look like: `time: [low … mean … high]` with outlier detection
-
-### Interpreting Criterion Output
-
-- Prefer comparing the whole distribution rather than a single mean.
-- Watch outlier percentages. High outliers can indicate background noise.
-- Compare across commits by archiving `target/criterion/` or using CI artifacts.
-
-### CI Behavior for Benchmarks
-
-- Pull Requests: a smoke run executes with short durations to provide quick signal and uploads artifact `criterion-reports` (contents: `target/criterion`).
-- Nightly schedule (05:00 UTC): the `Benchmarks` workflow runs full-duration benches on Linux, macOS, and Windows and uploads `benchmark-results-<os>`.
-
-### Reproducing CI Locally
-
-- Use the same shortened settings as the PR smoke job:
-  ```bash
-  cargo bench --bench metrics_bench --features meter -- -w 0.3 -m 1.0 -n 20
-  ```
-- For parity with nightly, run `cargo bench --bench metrics_bench --features meter` without extra flags.
-
-## Reducing Variance (Linux, self-hosted runners)
-
-When you care about stable, repeatable numbers, system noise and CPU frequency scaling matter. On Linux, consider pinning the CPU governor and minimizing interference. These steps require root and are recommended only on dedicated/self-hosted runners.
-
-1) Check current governor(s):
 ```bash
-for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "$f: $(cat $f)"; done
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --lib --no-default-features -- -D warnings
+cargo test --all-features            # unit, integration and doctests
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo deny check
+cargo audit
 ```
 
-2) Temporarily set to `performance` for all CPUs:
+CI additionally runs every feature on its own with
+[`cargo-hack`](https://github.com/taiki-e/cargo-hack):
+
 ```bash
-# Requires root; applies until reboot or changed back
-for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance | sudo tee $f; done
+cargo install cargo-hack
+cargo hack clippy --lib --each-feature --no-dev-deps -- -D warnings
+cargo hack test --lib --each-feature
 ```
 
-3) Optionally isolate CPUs for the benchmark process:
-- Start the runner with kernel args like `isolcpus=2,3` (requires reboot), then pin the process using `taskset`:
-```bash
-# Example: pin to CPU 2
-sudo taskset -c 2 cargo bench --bench metrics_bench --features meter
-```
+and checks semver against the last release with
+`cargo +stable semver-checks`.
 
-4) After the run, restore to `ondemand` or `powersave` (common defaults):
-```bash
-for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo ondemand | sudo tee $f || echo powersave | sudo tee $f; done
-```
+## Tests
 
-Notes:
-- Do not attempt these on shared hosted runners.
-- Close background apps, disable heavy services, and run on AC power.
-- On macOS, enable “High Power”/“Performance” modes where available. On Windows, choose a High Performance power plan.
-
-## Bench-Gated Tests
-
-This repo also includes benchmark-style tests gated behind the `bench-tests` feature and ignored by default to keep CI stable:
-```bash
-cargo test --features bench-tests -- --ignored
-```
-
-## Docs and Doctests
-
-We compile-check Rust code blocks in `docs/API.md` using `doc-comment` in `tests/api_md_doctest.rs`. Use `no_run` on examples that require async runtimes or external services.
+- Unit tests sit next to the code; integration tests are in `tests/`:
+  `exposition.rs` (every exporter's output through the strict validators
+  in `tests/common`, plus a property test over random registries),
+  `concurrency.rs` (real-thread stress tests) and `proptests.rs` (arbitrary
+  input on public methods).
+- Every Rust block in `README.md` and `docs/*.md` is compiled and run as a
+  doctest with all features (`src/lib.rs`, `doc_tests`). Keep examples
+  self-contained; mark blocks that need a network or a server `no_run`.
+- Time-dependent logic is tested with an injected clock, not `sleep`.
 
 ## Coverage
 
-This project uses `cargo-llvm-cov` for coverage locally and in CI. Line coverage threshold is enforced at 85%.
-
-- Install:
-  ```bash
-  cargo install cargo-llvm-cov
-  rustup component add llvm-tools-preview
-  ```
-
-- Quick summary (workspace):
-  ```bash
-  cargo llvm-cov --summary-only --workspace \
-    --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
-  ```
-
-- Generate LCOV for tooling (e.g., Codecov) at `target/coverage/lcov.info`:
-  ```bash
-  cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info \
-    --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
-  ```
-
-- Generate HTML report for local review:
-  ```bash
-  cargo llvm-cov --workspace --html --output-dir target/coverage/html \
-    --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
-  open target/coverage/html/index.html # macOS
-  ```
-
-### CI Behavior
-
-- CI runs coverage with `cargo-llvm-cov` and enforces `--fail-under-lines 85`.
-- LCOV artifact is uploaded as `coverage-lcov` containing `target/coverage/lcov.info`.
-- Benchmark-gated tests are not required for coverage and remain ignored by default.
-
-## Performance Regression Policy
-
-The project enforces a lightweight performance guardrail in CI to catch large regressions early while remaining tolerant of shared-runner noise.
-
-What runs in CI:
-
-- PRs: a smoke Criterion pass runs with shortened durations (see "CI Behavior for Benchmarks"). Artifacts are uploaded for manual inspection.
-- Pushes to `main`: a short Criterion run is analyzed by `benchmark-action/github-action-benchmark`, which compares results against stored history and creates alerts on detected regressions. Historical data is stored on the `gh-pages` branch under `benchmark-data/`.
-
-Alert/Failure behavior:
-
-- Significant slowdowns trigger an alert comment on PRs and fail the job (`fail-on-alert: true`). The initial alert threshold is relaxed to account for runner variance and can be tightened over time as baselines stabilize.
-
-How to investigate locally:
-
-- Save and compare Criterion baselines (see below). Use `critcmp` to compare two directories or two baselines.
-- Re-run benches with higher durations to reduce variance: `cargo bench --bench metrics_bench --features meter` or increase `-w`/`-m`/`-n`.
-- Ensure a quiet system and stable CPU frequency (see "Reducing Variance").
-
-Notes:
-
-- These checks are advisory for performance hygiene and do not replace disciplined review of algorithmic complexity and constant factors.
-- Benchmark-style tests remain behind the `bench-tests` feature and `#[ignore]` to avoid flakiness in standard CI.
-
-## Comparing Criterion Results
-
-There are two recommended approaches:
-
-1) Criterion baselines (no extra tools)
-
 ```bash
-# Save a baseline (e.g., from main)
-cargo bench --bench metrics_bench --features meter -- --save-baseline main
-
-# Later, compare current working tree to the saved baseline
-cargo bench --bench metrics_bench --features meter -- --baseline main
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview --toolchain stable
+cargo +stable llvm-cov --all-features --lib --tests --summary-only \
+  --ignore-filename-regex '(benches|examples)/'
+cargo +stable llvm-cov --all-features --lib --tests --html \
+  --ignore-filename-regex '(benches|examples)/'
 ```
 
-This produces per-benchmark comparisons (better/same/worse) in the console and in `target/criterion/`.
+CI enforces the line-coverage threshold set in `.github/workflows/ci.yml`
+and uploads `lcov.info` as the `coverage-lcov` artifact.
 
-2) Directory-to-directory with critcmp (best for CI artifacts)
+## Benchmarks
 
 ```bash
-cargo install critcmp
-
-# Compare two result directories (local or extracted from CI artifacts)
-critcmp path/to/criterion-run-A path/to/criterion-run-B
-
-# Example using local paths
-critcmp target/criterion ~/Downloads/criterion-previous
+cargo bench --all-features --bench metrics_bench
+cargo bench --all-features --bench registry_bench
+# Quick run
+cargo bench --all-features --bench metrics_bench -- --warm-up-time 0.3 --measurement-time 1 --sample-size 20
 ```
 
-Tips:
-- Download two CI artifacts (e.g., `benchmark-results-ubuntu-latest` from two runs), extract them, and pass the two extracted directories to `critcmp`.
-- Use consistent features and flags across runs (e.g., both default or both `--all-features`).
-- When possible, run on similar hardware/OS to avoid skew.
+Criterion writes reports to `target/criterion/`. To compare a change with
+`main`, save a baseline (`-- --save-baseline main`) on `main` and run with
+`-- --baseline main` on your branch, or compare two report directories with
+[`critcmp`](https://github.com/BurntSushi/critcmp).
 
-## Commit Hygiene
+Hot-path changes need before/after numbers in the pull request. A
+regression above 5 % on a tracked benchmark needs a justification. Numbers
+in the docs must come from these benches, with the machine and conditions
+stated next to them (see [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md)).
 
-- Format and lint cleanly.
-- Keep `CHANGELOG.md` updated under `[Unreleased]` for user-visible changes.
-- Prefer small, focused PRs with clear descriptions and rationale.
+The `Benchmarks` workflow runs nightly and on pushes to `main`, stores the
+history on `gh-pages` and prints a non-blocking regression report; see
+[`docs/benchmarks/README.md`](./docs/benchmarks/README.md).
 
-Thank you for helping make metrics-lib fast, reliable, and a joy to use!
+### Reducing variance
+
+- Linux: set the CPU governor to `performance`
+  (`echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`)
+  and pin the run to a core (`taskset -c 2 cargo bench ...`). Restore the
+  governor afterwards.
+- Close other workloads and run on AC power; on Windows use a high
+  performance power plan.
+- Compare medians over several runs.
+
+## Commit hygiene
+
+- Small, focused commits with lowercase imperative messages
+  (`fix token bucket refill after long idle`).
+- Format and lint cleanly; never skip hooks.
+- Add user-visible changes to `CHANGELOG.md` under `[Unreleased]`.
+
+Thank you for helping make metrics-lib correct, fast and easy to use.

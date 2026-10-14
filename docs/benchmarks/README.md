@@ -1,95 +1,75 @@
 # Benchmarks and Performance Regression
 
-This document explains how to run and interpret benchmarks for `metrics-lib`, how CI guards against performance regressions, and how to run the heavier chaos/longevity suites.
+How to run the benchmarks, how CI tracks them, and how the dashboard on
+GitHub Pages reads the results. Measured reference figures are in
+[`../PERFORMANCE.md`](../PERFORMANCE.md).
 
-## Running Benchmarks
+## Running benchmarks
 
-- Full run (higher confidence):
-  ```bash
-  cargo bench --bench metrics_bench --features meter
-  ```
-- Quick run (useful on laptops/PRs):
-  ```bash
-  cargo bench --bench metrics_bench --features meter -- -w 0.3 -m 1.0 -n 20
-  # -w warmup (s), -m measurement (s), -n samples
-  ```
-- Results location:
-  - Criterion HTML + JSON reports: `target/criterion/`
-  - Open `target/criterion/report/index.html` for the overview
+Two Criterion targets cover the crate:
 
-### Showing cycles/op in the GitHub Pages dashboard
+- `metrics_bench`: the recording hot paths (counter, sharded counter,
+  up/down counter, gauge, timer, rate meter, histogram, summary, token
+  bucket) and contended increments at 1, 4, 8 and 16 threads.
+- `registry_bench`: registry lookups, concurrent labeled lookups, series
+  registration, idle eviction and exposition rendering.
 
-The benchmarks viewer (`docs/benchmarks/main.js`) can derive and display a cycles-per-operation metric for contention benches if it knows the CPU frequency (in MHz).
+```bash
+# Full run
+cargo bench --all-features --bench metrics_bench
+cargo bench --all-features --bench registry_bench
 
-Provide CPU MHz in any of these ways:
+# Quick run (laptops, pull requests)
+cargo bench --all-features --bench metrics_bench -- --warm-up-time 0.3 --measurement-time 1 --sample-size 20
+```
 
-- Inject a global before loading `data.js`:
-  ```html
-  <script>window.CPU_MHZ = 3800; // 3.8 GHz CPU</script>
-  ```
-- Add a meta tag in the page head:
-  ```html
-  <meta name="cpu-mhz" content="3800">
-  ```
-- Populate `BENCHMARK_DATA.meta.cpu_mhz` in the data payload (advanced; set in CI generation step).
+Criterion writes HTML and JSON reports to `target/criterion/`; open
+`target/criterion/report/index.html` for the overview.
 
-If present, the viewer appends derived rows with the suffix `.cycles` alongside contention benches, computed as `cycles/op = ns/op × cpu_mhz`.
+## Comparing results
 
-### Trend callout on the dashboard
+```bash
+# Save a baseline from main, then compare the working tree against it
+git switch main && cargo bench --all-features --bench metrics_bench -- --save-baseline main
+git switch -   && cargo bench --all-features --bench metrics_bench -- --baseline main
 
-The viewer will display a small callout summarizing the latest trend for `rate.tick` and `rate.tick_n` if sufficient history is available. It looks for an element with `id="trend-note"`; if none exists, it auto-inserts a callout above the summary cards. No configuration is required.
+# Or compare two report directories
+cargo install critcmp
+critcmp target/criterion /path/to/other/criterion
+```
 
-## Comparing Results
+## CI and the dashboard
 
-- Using Criterion baselines:
-  ```bash
-  # Save a baseline from main
-  cargo bench --bench metrics_bench --features meter -- --save-baseline main
-  # Compare current working tree to baseline
-  cargo bench --bench metrics_bench --features meter -- --baseline main
-  ```
+The `Benchmarks` workflow runs nightly and on demand. It aggregates every
+`target/criterion/<group>/<function>/new/estimates.json` into one JSON
+array whose names are `<group>/<function>` (for example `counter/inc`,
+`rate_meter/tick`, `registry_lookup/counter_unlabeled_hit`) and stores the
+history on the `gh-pages` branch under `benchmark-data/`.
 
-### Latest reference run
+The viewer (`docs/benchmarks/main.js`) and the regression script
+(`tools/bench_regression_check.js`) display those names with dots
+(`counter.inc`), shorten `rate_meter.` to `rate.`, and group
+`contended_increments/<kind>/<threads>` as thread-scaling series. Each
+tracked benchmark has a threshold (8 % for the hot paths, 10 % for registry
+lookups, 18 % for the sub-nanosecond gauge operations); the latest run is
+compared against the median of the previous five.
 
-Latest local reference run (Windows x86_64, Rust stable, `cargo bench --bench metrics_bench --features meter`):
+Shared CI runners are noisy, so the regression gate reports but does not
+fail the workflow. Treat a flagged regression as a prompt to re-measure
+locally.
 
-- `counter/increment`: 1.48 ns/op
-- `gauge/set`: 0.40 ns/op
-- `timer/record`: 3.17 ns/op
-- `global_metrics/mixed_operations`: 151.58 ns/op
+### Cycles per operation
 
-- Using `critcmp` (compare two directories or baselines):
-  ```bash
-  cargo install critcmp
-  critcmp target/criterion /path/to/other/criterion
-  ```
+If the viewer knows the CPU frequency it adds a derived `.cycles` row
+(`cycles/op = ns/op × MHz`). Provide the frequency with
+`<script>window.CPU_MHZ = 3800;</script>`, a
+`<meta name="cpu-mhz" content="3800">` tag, or
+`BENCHMARK_DATA.meta.cpu_mhz` in the data payload.
 
-## CI Performance Guardrails
+## Reducing variance
 
-- PRs: a smoke Criterion pass runs with short durations and uploads `criterion-reports`.
-- Pushes to `main`: results are analyzed by `benchmark-action/github-action-benchmark` and stored on `gh-pages` under `benchmark-data/`.
-- Regressions beyond the alert threshold will fail the job and comment on PRs.
-
-Notes:
-- Ensure `gh-pages` exists and GitHub Pages is enabled if you want to keep result history.
-- Thresholds can be tuned after we establish baseline variance.
-
-## Chaos and Longevity Suites
-
-These are heavy tests to validate concurrency correctness and long-term stability. They are gated behind the `bench-tests` feature and ignored by default to keep standard CI stable.
-
-- Chaos tests:
-  ```bash
-  cargo test --features bench-tests -- --ignored --test chaos_tests
-  ```
-
-- Longevity tests (1B+ configurable via env):
-  ```bash
-  OPS=1000000000 cargo test --features bench-tests -- --ignored --test longevity_tests
-  ```
-
-CI-safe defaults automatically reduce operation counts when the `CI` env variable is present.
-
-## Reducing Variance
-
-On Linux self-hosted runners you can stabilize CPU frequency and reduce noise. See `CONTRIBUTING.md` → "Reducing Variance" for details.
+- Linux: set the CPU governor to `performance` and pin the benchmark to a
+  core (`taskset -c 2 cargo bench ...`).
+- Close other workloads; a loaded machine only produces upper bounds.
+- Report CPU model, OS, `rustc -V` and the Criterion flags next to any
+  number you publish.

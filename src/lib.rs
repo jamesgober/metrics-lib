@@ -651,6 +651,8 @@ mod doc_tests {
     struct ZeroOverhead;
     #[doc = include_str!("../docs/performance-tuning.md")]
     struct PerformanceTuning;
+    #[doc = include_str!("../docs/release/v2.0.0.md")]
+    struct ReleaseNotes;
 }
 
 #[cfg(test)]
