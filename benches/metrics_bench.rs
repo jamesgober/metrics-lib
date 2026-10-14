@@ -31,10 +31,10 @@ fn counter(c: &mut Criterion) {
 /// Total time for `threads` threads to perform 100 000 increments each on
 /// one shared counter: the contention case `ShardedCounter` exists for.
 fn contention(c: &mut Criterion) {
+    const PER_THREAD: u64 = 100_000;
     let mut group = c.benchmark_group("contended_increments");
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(5));
-    const PER_THREAD: u64 = 100_000;
     for threads in [1usize, 4, 8, 16] {
         group.throughput(Throughput::Elements(threads as u64 * PER_THREAD));
         group.bench_with_input(
@@ -91,7 +91,7 @@ fn timer(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer");
     let timer = Arc::new(Timer::new());
     group.bench_function("record_ns", |b| {
-        b.iter(|| timer.record_ns(black_box(1_000)))
+        b.iter(|| timer.record_ns(black_box(1_000)));
     });
     group.bench_function("record", |b| {
         b.iter(|| timer.record(black_box(Duration::from_micros(3))));
@@ -145,7 +145,7 @@ fn distributions(c: &mut Criterion) {
         s.observe(0.05);
     }
     group.bench_function("summary_quantile", |b| {
-        b.iter(|| black_box(s.quantile(0.99)))
+        b.iter(|| black_box(s.quantile(0.99)));
     });
     // Four default quantiles from one read of the sketch.
     group.bench_function("summary_snapshot", |b| b.iter(|| black_box(s.snapshot())));
@@ -156,12 +156,12 @@ fn admission(c: &mut Criterion) {
     let mut group = c.benchmark_group("admission");
     let bucket = TokenBucket::new(u64::MAX / 2_000_000, 1e6);
     group.bench_function("token_bucket_acquire", |b| {
-        b.iter(|| bucket.acquire(black_box(1)))
+        b.iter(|| bucket.acquire(black_box(1)));
     });
     let empty = TokenBucket::new(1, 0.0);
     let _ = empty.acquire(1);
     group.bench_function("token_bucket_reject", |b| {
-        b.iter(|| empty.acquire(black_box(1)))
+        b.iter(|| empty.acquire(black_box(1)));
     });
     group.finish();
 }

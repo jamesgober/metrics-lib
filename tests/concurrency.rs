@@ -10,6 +10,12 @@
     feature = "histogram"
 ))]
 #![allow(clippy::unwrap_used)]
+// Test arithmetic on counts far below 2^52.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 
 mod common;
 

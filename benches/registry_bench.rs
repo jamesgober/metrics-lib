@@ -25,7 +25,7 @@ fn lookups(c: &mut Criterion) {
     group.bench_function("counter_labeled_hit", |b| {
         b.iter(|| {
             core.counter_with(black_box("requests"), black_box(&labels))
-                .inc()
+                .inc();
         });
     });
     let held = core.counter("requests");
@@ -39,7 +39,7 @@ fn lookups(c: &mut Criterion) {
     group.bench_function("histogram_labeled_hit", |b| {
         b.iter(|| {
             core.histogram_with(black_box("lat"), black_box(&labels))
-                .observe(0.01)
+                .observe(0.01);
         });
     });
     group.finish();

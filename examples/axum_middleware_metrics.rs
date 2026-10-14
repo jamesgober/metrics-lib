@@ -29,11 +29,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route_layer(red);
 
     for path in ["/users/1", "/users/2", "/fail", "/missing"] {
-        let res = app
+        let response = app
             .clone()
             .oneshot(Request::get(path).body(Body::empty())?)
             .await?;
-        println!("GET {path} -> {}", res.status());
+        println!("GET {path} -> {}", response.status());
     }
 
     for line in prometheus::render(core.registry())

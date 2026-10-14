@@ -10,6 +10,8 @@
 //! omitted with negative buckets, exemplar placement and size, `# EOF`).
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
+// One validator per format, written as a single pass that mirrors the spec.
+#![allow(clippy::too_many_lines, clippy::assigning_clones)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -355,27 +357,26 @@ pub fn validate(text: &str, format: Format) -> Result<Exposition, String> {
                 resolved = Some(c);
             }
         }
-        let i = match resolved {
-            Some(i) => i,
-            None => {
-                if format == Format::OpenMetrics {
-                    // Untyped samples are not allowed to slip in after
-                    // metadata of another family with a clashing name.
-                    if index.contains_key(&sample.name) {
-                        return Err(format!("sample {} does not fit its family", sample.name));
-                    }
+        let i = if let Some(i) = resolved {
+            i
+        } else {
+            if format == Format::OpenMetrics {
+                // Untyped samples are not allowed to slip in after
+                // metadata of another family with a clashing name.
+                if index.contains_key(&sample.name) {
+                    return Err(format!("sample {} does not fit its family", sample.name));
                 }
-                let i = family_slot(&sample.name, &mut families, &mut index);
-                if families[i].ty.is_empty() {
-                    families[i].ty = if format == Format::OpenMetrics {
-                        "unknown"
-                    } else {
-                        "untyped"
-                    }
-                    .to_owned();
-                }
-                i
             }
+            let i = family_slot(&sample.name, &mut families, &mut index);
+            if families[i].ty.is_empty() {
+                families[i].ty = if format == Format::OpenMetrics {
+                    "unknown"
+                } else {
+                    "untyped"
+                }
+                .to_owned();
+            }
+            i
         };
         if finished.contains(&i) {
             return Err(format!("family of {} is interleaved", sample.name));

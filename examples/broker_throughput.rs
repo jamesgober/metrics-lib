@@ -13,14 +13,14 @@ fn main() {
     let consumed = core.rate("broker_consumed");
     let run_for = Duration::from_millis(500);
 
-    let (tx, rx) = mpsc::sync_channel::<u64>(10_000);
-    let producer = {
+    let (sender, receiver) = mpsc::sync_channel::<u64>(10_000);
+    let producer_thread = {
         let produced = std::sync::Arc::clone(&produced);
         thread::spawn(move || {
             let start = Instant::now();
             let mut n = 0u64;
             while start.elapsed() < run_for {
-                if tx.send(n).is_err() {
+                if sender.send(n).is_err() {
                     break;
                 }
                 produced.tick();
@@ -28,16 +28,16 @@ fn main() {
             }
         })
     };
-    let consumer = {
+    let consumer_thread = {
         let consumed = std::sync::Arc::clone(&consumed);
         thread::spawn(move || {
-            while rx.recv_timeout(Duration::from_millis(50)).is_ok() {
+            while receiver.recv_timeout(Duration::from_millis(50)).is_ok() {
                 consumed.tick();
             }
         })
     };
-    producer.join().expect("producer panicked");
-    consumer.join().expect("consumer panicked");
+    producer_thread.join().expect("producer panicked");
+    consumer_thread.join().expect("consumer panicked");
 
     println!(
         "produced={} ({:.0}/s now) consumed={} ({:.0}/s now)",
