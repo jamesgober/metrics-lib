@@ -518,14 +518,29 @@ impl MetricsCore {
         self.process.get_or_init(ProcessCollector::new)
     }
 
-    /// Sample the `process_*` metrics now, when
-    /// [`MetricsConfig::process_metrics`] is enabled and the platform can
-    /// provide them.
+    /// The `process_*` metrics, when [`MetricsConfig::process_metrics`] is
+    /// enabled and the platform can provide them.
+    ///
+    /// On Linux this samples `/proc` now (tens of microseconds). Elsewhere a
+    /// sample needs a scan of the whole process table through `sysinfo`
+    /// (milliseconds, and hundreds of milliseconds on hosts with thousands
+    /// of processes), so the latest sample of the background
+    /// [`MetricsCore::system`] monitor is returned instead; the first call
+    /// starts the monitor and waits for its first sample.
     #[cfg(feature = "system")]
     #[must_use]
     pub fn sample_process_metrics(&self) -> Option<ProcessMetrics> {
         if !self.config.process_metrics {
             return None;
+        }
+        if cfg!(target_os = "linux") {
+            return self.process_collector().collect().ok();
+        }
+        let system = self.system();
+        if system.is_sampling() {
+            let sample = system.process_metrics();
+            // A zero resident size means the platform could not sample it.
+            return (sample.resident_memory_bytes > 0).then_some(sample);
         }
         self.process_collector().collect().ok()
     }

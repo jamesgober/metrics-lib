@@ -128,6 +128,13 @@ fn exposition(c: &mut Criterion) {
             black_box(buf.len())
         });
     });
+    // What `MetricsServer` renders: the registry plus the `process_*`
+    // families. The first call (outside the timing) starts the system
+    // monitor off Linux.
+    let _ = prometheus::render_core(&core);
+    group.bench_function("render_core_400_series_with_process", |b| {
+        b.iter(|| black_box(prometheus::render_core(&core).len()));
+    });
     group.finish();
 }
 

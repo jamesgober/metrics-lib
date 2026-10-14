@@ -381,11 +381,14 @@ struct SamplerState {
     platform: Platform,
     /// `(cpu_seconds_total, when)` of the previous process sample.
     previous_process: Option<(f64, Instant)>,
-    latest_process: ProcessMetrics,
 }
 
 struct HealthInner {
+    /// Held for a whole sample, which can take long off Linux.
     state: Mutex<SamplerState>,
+    /// Latest process sample; locked only to copy it in or out, so readers
+    /// never wait for a sample in progress.
+    latest_process: Mutex<ProcessMetrics>,
     cached: Cached,
     config: HealthConfig,
     cores: f64,
@@ -423,8 +426,8 @@ impl HealthInner {
             state: Mutex::new(SamplerState {
                 platform: Platform::new(),
                 previous_process: None,
-                latest_process: ProcessMetrics::default(),
             }),
+            latest_process: Mutex::new(ProcessMetrics::default()),
             cached,
             config,
             cores: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
@@ -464,7 +467,10 @@ impl HealthInner {
                 .store(process.resident_memory_bytes, Ordering::Relaxed);
             store_opt(&c.threads, process.threads);
             store_opt(&c.fds, process.open_fds);
-            state.latest_process = process;
+            *self
+                .latest_process
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = process;
         }
         store_f64(&c.health, self.score());
         c.last_update_ns.store(
@@ -513,14 +519,25 @@ impl Drop for SamplerThread {
     }
 }
 
+/// The sampler spends at most `1 / SAMPLER_DUTY_FACTOR` of its time
+/// sampling: when one update takes longer than `interval / 4` (a full
+/// process-table scan on a busy Windows host can take hundreds of
+/// milliseconds), the next one is pushed back accordingly.
+const SAMPLER_DUTY_FACTOR: u32 = 4;
+
+fn next_wait(interval: Duration, update_took: Duration) -> Duration {
+    interval.max(update_took.saturating_mul(SAMPLER_DUTY_FACTOR))
+}
+
 fn spawn_sampler(inner: Arc<HealthInner>, interval: Duration) -> io::Result<SamplerThread> {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     let thread = thread::Builder::new()
         .name("metrics-lib-system-sampler".into())
         .spawn(move || {
+            let mut wait = interval;
             while !flag.load(Ordering::Acquire) {
-                let deadline = Instant::now() + interval;
+                let deadline = Instant::now() + wait;
                 while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                     if flag.load(Ordering::Acquire) || left.is_zero() {
                         break;
@@ -530,7 +547,9 @@ fn spawn_sampler(inner: Arc<HealthInner>, interval: Duration) -> io::Result<Samp
                 if flag.load(Ordering::Acquire) {
                     return;
                 }
+                let started = Instant::now();
                 inner.update();
+                wait = next_wait(interval, started.elapsed());
             }
         })?;
     Ok(SamplerThread {
@@ -769,10 +788,9 @@ impl SystemHealth {
     #[must_use]
     pub fn process_metrics(&self) -> ProcessMetrics {
         self.inner
-            .state
+            .latest_process
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .latest_process
             .clone()
     }
 
@@ -849,6 +867,17 @@ impl std::fmt::Debug for SystemHealth {
 #[cfg(test)]
 #[allow(clippy::float_cmp)] // exact comparisons of exactly representable values
 mod tests {
+    #[test]
+    fn test_sampler_backs_off_when_sampling_is_slow_regression_ml2_003() {
+        let second = Duration::from_secs(1);
+        assert_eq!(super::next_wait(second, Duration::from_millis(10)), second);
+        assert_eq!(
+            super::next_wait(second, Duration::from_millis(400)),
+            Duration::from_millis(1600)
+        );
+        assert_eq!(super::next_wait(second, Duration::MAX), Duration::MAX);
+    }
+
     use super::*;
 
     #[test]
