@@ -1,7 +1,7 @@
 //! [`tracing`](https://docs.rs/tracing) integration (feature `tracing`).
 //!
 //! - [`time_in_span`] runs a closure inside an `info_span!` and records its
-//!   duration into a [`Timer`](crate::Timer), so one call site feeds both the
+//!   duration into a [`Timer`], so one call site feeds both the
 //!   metric and the trace.
 //! - [`span_exemplar`] turns the current span into exemplar labels, and
 //!   [`observe_with_span_exemplar`] records a histogram observation with it,

@@ -16,8 +16,8 @@
 //! | `describe_*!` | [`Registry::describe`](crate::Registry::describe) |
 //!
 //! Facade names and label keys are free-form; they are repaired with
-//! [`sanitize_metric_name`](crate::sanitize_metric_name) /
-//! [`sanitize_label_key`](crate::sanitize_label_key) (so `http.server.requests`
+//! [`sanitize_metric_name`] /
+//! [`sanitize_label_key`] (so `http.server.requests`
 //! stays, `my-metric` becomes `my_metric`), and every registry limit (series
 //! cap, kind conflicts) applies as usual.
 //!

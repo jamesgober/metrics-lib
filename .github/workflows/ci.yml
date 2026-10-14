@@ -144,7 +144,7 @@ jobs:
       - name: Line coverage with threshold
         run: >-
           cargo llvm-cov --all-features --lib --tests --summary-only
-          --fail-under-lines 90
+          --fail-under-lines 95
           --ignore-filename-regex '(benches|examples)/'
       - name: LCOV report
         run: >-

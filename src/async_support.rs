@@ -1,6 +1,6 @@
 //! Tokio helpers (feature `async`).
 //!
-//! - [`AsyncTimerExt`] times a future with a [`Timer`](crate::Timer):
+//! - [`AsyncTimerExt`] times a future with a [`Timer`]:
 //!   `timer.time_async(|| fetch()).await` records how long the future took
 //!   to complete.
 //! - [`AsyncMetricBatch`] collects updates and applies them to a

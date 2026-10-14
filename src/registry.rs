@@ -446,7 +446,8 @@ enum Policy {
 
 /// Thread-safe, sharded, bounded registry of metric families.
 ///
-/// See the [module documentation](self) for the model and the limits.
+/// See the [crate documentation](crate) and `docs/API.md` for the model and
+/// the limits.
 pub struct Registry {
     shards: Box<[RwLock<HashMap<String, Family>>]>,
     cap: AtomicUsize,

@@ -81,7 +81,9 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
-#![deny(warnings)]
+// Warnings are denied in CI (`RUSTFLAGS="-D warnings"`, clippy `-D warnings`)
+// rather than here, so a lint added to a future compiler cannot break the
+// build for users or on docs.rs.
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(unused_must_use)]
@@ -544,9 +546,9 @@ impl std::fmt::Debug for MetricsCore {
     }
 }
 
-/// The global instance used by [`metrics`].
+/// The global instance used by [`metrics()`](fn@metrics).
 ///
-/// Prefer [`init`], [`init_with_config`], [`metrics`] and [`try_metrics`]
+/// Prefer [`init`], [`init_with_config`], [`metrics()`](fn@metrics) and [`try_metrics`]
 /// over touching this directly.
 pub static METRICS: OnceLock<MetricsCore> = OnceLock::new();
 
@@ -558,13 +560,13 @@ pub fn init() -> &'static MetricsCore {
 
 /// Initialise the global instance with `config`.
 ///
-/// Call it once at start-up, before anything uses [`metrics`].
+/// Call it once at start-up, before anything uses [`metrics()`](fn@metrics).
 ///
 /// # Errors
 ///
 /// - The error of [`MetricsConfig::validate`].
 /// - [`MetricsError::AlreadyInitialized`] when the global instance already
-///   exists (for example because [`metrics`] was called first); the
+///   exists (for example because [`metrics()`](fn@metrics) was called first); the
 ///   configuration is not applied.
 ///
 /// # Examples
@@ -623,8 +625,8 @@ pub mod prelude {
     #[cfg(feature = "histogram")]
     pub use crate::{Histogram, Summary};
     pub use crate::{
-        LabelSet, MetricKind, MetricsConfig, MetricsCore, MetricsError, Registry, Result, Unit,
-        init, init_with_config, metrics, try_metrics,
+        LabelSet, METRICS, MetricKind, MetricsConfig, MetricsCore, MetricsError, Registry, Result,
+        Unit, init, init_with_config, metrics, try_metrics,
     };
 }
 

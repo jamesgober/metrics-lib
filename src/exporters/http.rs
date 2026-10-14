@@ -3,7 +3,7 @@
 //!
 //! These are for services that do not already run an HTTP stack. If yours
 //! does (axum, actix, hyper, …), serve
-//! [`prometheus::render_core`](super::prometheus::render_core) from a route
+//! [`prometheus::render_core`] from a route
 //! instead; see `examples/axum_registry_integration.rs`.
 //!
 //! Neither helper speaks TLS. Put the endpoint behind your ingress or bind it

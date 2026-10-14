@@ -125,8 +125,10 @@ assert_eq!(core.timer("db_seconds").count(), 1);
 ```
 
 `RunningTimer::stop` returns the elapsed `Duration`; guards are
-`#[must_use]` and have `discard()`. `timer::utils::benchmark` (which printed
-to stdout) is removed. The sum no longer wraps.
+`#[must_use]` and have `discard()`. The timing helpers moved from
+`metrics_lib::utils` to `metrics_lib::timer_utils`, and
+`utils::benchmark` (which printed to stdout) is removed. The sum no longer
+wraps.
 
 **Counter.** `CounterStats::total` (a copy of `value`) is removed. New
 `set_max`.
@@ -196,6 +198,10 @@ Dashboards may need small query changes:
 - `StatsdSink` sends counters as deltas (`|c`) by default
   (`with_counter_mode(CounterMode::Gauge)` restores totals); negative gauges
   are sent as `0` then the value.
+- The per-kind JSON series structs (`CounterSeries`, `GaugeSeries`,
+  `TimerSeries`, `RateSeries`, `HistogramSeries`) are replaced by
+  `JsonSeries` with a tagged `JsonValue`; the OTLP `NumberData` and
+  `HistogramData` structs by the `MetricData` enum.
 - OTLP: use `OtlpExporter` (`render`/`render_protobuf` remain as one-shot
   helpers returning `Result`/`Vec<u8>`). Timers export as `Summary` named as
   registered (no `_seconds` suffix); start times are stable per series.

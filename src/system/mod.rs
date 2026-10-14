@@ -58,7 +58,7 @@ const MAX_SLEEP_CHUNK: Duration = Duration::from_secs(1);
 ///
 /// Field names follow the series they export as
 /// (`process_cpu_seconds_total`, …). `None` means the platform does not
-/// provide the value; see the [module documentation](self).
+/// provide the value; see [`SystemHealth`].
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
