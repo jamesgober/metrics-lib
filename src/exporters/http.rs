@@ -737,18 +737,32 @@ mod tests {
         let core = Arc::new(MetricsCore::new());
         let server = MetricsServer::spawn_with("127.0.0.1:0", core, fast_limits()).unwrap();
         let mut drip = TcpStream::connect(server.local_addr()).unwrap();
-        drip.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        drip.set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
         let start = Instant::now();
-        // Send a byte more often than any per-read timeout would allow.
-        for b in b"GET /metrics HTTP/1.1\r\nX: aaaaaaaaaaaaaaaaaaaa" {
-            if drip.write_all(&[*b]).is_err() || start.elapsed() > Duration::from_millis(350) {
-                break;
+        // Send a byte more often than any per-read timeout would allow,
+        // until the server answers; stop sending then, so closing the
+        // connection cannot reset it before the answer is read.
+        let mut response = Vec::new();
+        let mut buf = [0u8; 256];
+        let mut sending = true;
+        while start.elapsed() < Duration::from_secs(5) {
+            if sending && drip.write_all(b"a").is_err() {
+                sending = false;
             }
-            thread::sleep(Duration::from_millis(40));
+            match drip.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    response.extend_from_slice(&buf[..n]);
+                    sending = false;
+                }
+                Err(_) => {}
+            }
         }
-        let mut response = String::new();
-        let _ = drip.read_to_string(&mut response);
+        let response = String::from_utf8_lossy(&response);
         assert!(response.starts_with("HTTP/1.1 408"), "{response:?}");
+        // The deadline is 300 ms from accept; per-read timeouts would never
+        // have fired while bytes kept arriving.
         assert!(start.elapsed() < Duration::from_secs(3));
         server.shutdown();
     }
