@@ -38,28 +38,55 @@
 use super::{openmetrics, prometheus};
 use crate::{LabelSet, MetricsCore, MetricsError, Registry, validate_label_key};
 use std::fmt::Write as _;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::io::{self, Read, Write};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// Largest request head (request line plus headers) the server reads.
-const MAX_REQUEST_HEAD: usize = 8 * 1024;
-/// How long the server waits for a client to send its request.
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// How often the accept loop re-checks for shutdown.
-const ACCEPT_POLL: Duration = Duration::from_millis(50);
+/// Largest request head (request line plus headers) the server accepts.
+/// Longer heads are answered `431`.
+pub const MAX_REQUEST_HEAD: usize = 8 * 1024;
+/// Time a client has, from the moment its connection is accepted, to send
+/// the complete request head. Slower clients are answered `408`.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Time the server spends writing one response before giving up on a
+/// client that does not read it.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections served at the same time. Further connections are answered
+/// `503` and closed.
+pub const MAX_CONNECTIONS: usize = 16;
 
-/// A blocking HTTP server for `GET /metrics` and `GET /health`, running on
-/// its own thread.
+/// Limits of one server; the public constants are the defaults.
+#[derive(Clone, Copy)]
+struct Limits {
+    request_timeout: Duration,
+    response_timeout: Duration,
+    max_connections: usize,
+}
+
+const DEFAULT_LIMITS: Limits = Limits {
+    request_timeout: REQUEST_TIMEOUT,
+    response_timeout: RESPONSE_TIMEOUT,
+    max_connections: MAX_CONNECTIONS,
+};
+
+/// A blocking HTTP server for `GET /metrics` and `GET /health`.
 ///
 /// `/metrics` answers with the OpenMetrics format when the `Accept` header
 /// asks for `application/openmetrics-text`, and with the Prometheus format
 /// otherwise; it includes the `process_*` families when the core has them
 /// enabled. `/health` answers `ok`. Other paths get 404, other methods 405.
-/// Requests are served one at a time, which is ample for scrapers.
+///
+/// One thread accepts connections and hands each to a short-lived worker
+/// thread, at most [`MAX_CONNECTIONS`] at a time, so a slow or idle client
+/// cannot delay other scrapes. Each client gets [`REQUEST_TIMEOUT`] from
+/// accept to send its request head (at most [`MAX_REQUEST_HEAD`] bytes) and
+/// [`RESPONSE_TIMEOUT`] to read the response; both are total deadlines, not
+/// per-read timeouts, so a client dripping bytes is cut off too.
 pub struct MetricsServer {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -67,21 +94,28 @@ pub struct MetricsServer {
 }
 
 impl MetricsServer {
-    /// Bind `addr` and serve `core` on a background thread.
+    /// Bind `addr` and serve `core` on background threads.
     ///
     /// # Errors
     ///
     /// Returns the bind error, or the error from configuring the listener or
-    /// spawning the thread.
+    /// spawning the accept thread.
     pub fn spawn(addr: impl ToSocketAddrs, core: Arc<MetricsCore>) -> io::Result<Self> {
+        Self::spawn_with(addr, core, DEFAULT_LIMITS)
+    }
+
+    fn spawn_with(
+        addr: impl ToSocketAddrs,
+        core: Arc<MetricsCore>,
+        limits: Limits,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        listener.set_nonblocking(true)?;
         let local_addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let thread = thread::Builder::new()
             .name("metrics-lib-http".into())
-            .spawn(move || accept_loop(&listener, &core, &flag))?;
+            .spawn(move || accept_loop(&listener, &core, &flag, limits))?;
         Ok(Self {
             local_addr,
             stop,
@@ -95,7 +129,9 @@ impl MetricsServer {
         self.local_addr
     }
 
-    /// Stop accepting connections and wait for the server thread to exit.
+    /// Stop accepting connections and wait for the accept thread to exit.
+    /// Requests already being served finish on their own threads within
+    /// their deadlines.
     pub fn shutdown(mut self) {
         self.stop_and_join();
     }
@@ -103,10 +139,25 @@ impl MetricsServer {
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            // Wake the blocking `accept` with a connection of our own. If
+            // that fails the listener is already broken and the thread has
+            // left its loop.
+            let _ = TcpStream::connect_timeout(&wake_addr(self.local_addr), Duration::from_secs(1));
             // A panic in the server thread has nothing left to clean up.
             let _ = thread.join();
         }
     }
+}
+
+/// Where to connect to reach a listener bound to `addr` (an unspecified
+/// address is reachable through loopback).
+fn wake_addr(addr: SocketAddr) -> SocketAddr {
+    let ip = match addr.ip() {
+        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, addr.port())
 }
 
 impl Drop for MetricsServer {
@@ -123,15 +174,93 @@ impl std::fmt::Debug for MetricsServer {
     }
 }
 
-fn accept_loop(listener: &TcpListener, core: &MetricsCore, stop: &AtomicBool) {
-    while !stop.load(Ordering::Acquire) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                // A failed exchange only affects that client; keep serving.
-                let _ = serve_connection(stream, core);
+/// Decrements the active-connection count when a worker ends.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let _ = self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBool, limits: Limits) {
+    let active = Arc::new(AtomicUsize::new(0));
+    let refusing = Arc::new(AtomicUsize::new(0));
+    loop {
+        let accepted = listener.accept();
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok((stream, _)) = accepted else {
+            // Accept errors (for example a reset during the handshake or a
+            // full descriptor table) only affect that connection; back off
+            // briefly so a persistent error cannot spin the thread.
+            thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        let accepted_at = Instant::now();
+        if active.fetch_add(1, Ordering::AcqRel) >= limits.max_connections {
+            let _ = active.fetch_sub(1, Ordering::AcqRel);
+            // Answer 503 off the accept thread, with its own bound; past it
+            // the connection is just closed.
+            if refusing.fetch_add(1, Ordering::AcqRel) < limits.max_connections {
+                let slot = Slot(Arc::clone(&refusing));
+                let _ = thread::Builder::new()
+                    .name("metrics-lib-http-busy".into())
+                    .spawn(move || {
+                        let _slot = slot;
+                        refuse(stream, "503 Service Unavailable");
+                    });
+            } else {
+                let _ = refusing.fetch_sub(1, Ordering::AcqRel);
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(ACCEPT_POLL),
-            Err(_) => thread::sleep(ACCEPT_POLL),
+            continue;
+        }
+        let slot = Slot(Arc::clone(&active));
+        let core = Arc::clone(core);
+        let spawned = thread::Builder::new()
+            .name("metrics-lib-http-conn".into())
+            .spawn(move || {
+                let _slot = slot;
+                // A failed exchange only affects that client.
+                let _ = serve_connection(stream, &core, accepted_at, limits);
+            });
+        if spawned.is_err() {
+            // The closure (and with it the stream and the slot) was dropped.
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Answer `status` with an empty body and close.
+fn refuse(mut stream: TcpStream, status: &str) {
+    let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    if write_all_by(&mut stream, response.as_bytes(), Instant::now() + LINGER).is_ok() {
+        close_gracefully(&mut stream);
+    }
+}
+
+/// How long a closing connection is drained.
+const LINGER: Duration = Duration::from_millis(250);
+
+/// Half-close, then discard what the client still sends (at most 64 KiB or
+/// [`LINGER`]). Closing a socket with unread input resets the connection,
+/// which can destroy the response before the client has read it.
+fn close_gracefully(stream: &mut TcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+    let deadline = Instant::now() + LINGER;
+    let mut buf = [0u8; 4096];
+    let mut drained = 0;
+    while drained < 64 * 1024 {
+        let Some(left) = remaining(deadline) else {
+            break;
+        };
+        if stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained += n,
         }
     }
 }
@@ -142,40 +271,126 @@ struct Request {
     accepts_openmetrics: bool,
 }
 
-fn read_request(stream: &TcpStream) -> io::Result<Request> {
-    let mut reader = BufReader::new(stream.take(MAX_REQUEST_HEAD as u64));
-    let mut line = String::new();
-    let _ = reader.read_line(&mut line)?;
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_owned();
-    let target = parts.next().unwrap_or_default();
-    let path = target.split('?').next().unwrap_or_default().to_owned();
-    let mut accepts_openmetrics = false;
+/// Why a request head could not be read.
+enum HeadError {
+    TooLarge,
+    TimedOut,
+    Io,
+}
+
+/// Time left until `deadline`, or `None` when it has passed.
+fn remaining(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+}
+
+/// Read until the blank line that ends the head, within `deadline`.
+fn read_head(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, HeadError> {
+    let mut head = Vec::with_capacity(512);
+    let mut buf = [0u8; 1024];
     loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 || line == "\r\n" || line == "\n" {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("accept")
-                && value.contains("application/openmetrics-text")
+        let Some(left) = remaining(deadline) else {
+            return Err(HeadError::TimedOut);
+        };
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(|_| HeadError::Io)?;
+        let n = match stream.read(&mut buf) {
+            Ok(0) => return Err(HeadError::Io),
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
             {
-                accepts_openmetrics = true;
+                return Err(HeadError::TimedOut);
             }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(HeadError::Io),
+        };
+        let scan_from = head.len().saturating_sub(3);
+        head.extend_from_slice(&buf[..n]);
+        if let Some(end) = find_head_end(&head[scan_from..]) {
+            head.truncate(scan_from + end);
+            return Ok(head);
+        }
+        if head.len() > MAX_REQUEST_HEAD {
+            return Err(HeadError::TooLarge);
         }
     }
-    Ok(Request {
-        method,
-        path,
-        accepts_openmetrics,
+}
+
+/// Offset just past the first `\r\n\r\n` or `\n\n` in `bytes`.
+fn find_head_end(bytes: &[u8]) -> Option<usize> {
+    (0..bytes.len()).find_map(|i| {
+        if bytes[i..].starts_with(b"\r\n\r\n") {
+            Some(i + 4)
+        } else if bytes[i..].starts_with(b"\n\n") {
+            Some(i + 2)
+        } else {
+            None
+        }
     })
 }
 
-fn serve_connection(mut stream: TcpStream, core: &MetricsCore) -> io::Result<()> {
+fn parse_head(head: &[u8]) -> Request {
+    let text = String::from_utf8_lossy(head);
+    let mut lines = text.lines();
+    let mut parts = lines.next().unwrap_or_default().split_whitespace();
+    let method = parts.next().unwrap_or_default().to_owned();
+    let target = parts.next().unwrap_or_default();
+    let path = target.split('?').next().unwrap_or_default().to_owned();
+    let accepts_openmetrics = lines.any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("accept")
+                && value.contains("application/openmetrics-text")
+        })
+    });
+    Request {
+        method,
+        path,
+        accepts_openmetrics,
+    }
+}
+
+/// Write all of `bytes` before `deadline`.
+fn write_all_by(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+    while !bytes.is_empty() {
+        let left = remaining(deadline)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "response deadline passed"))?;
+        stream.set_write_timeout(Some(left))?;
+        match stream.write(bytes) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "client closed")),
+            Ok(n) => bytes = &bytes[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn serve_connection(
+    mut stream: TcpStream,
+    core: &MetricsCore,
+    accepted_at: Instant,
+    limits: Limits,
+) -> io::Result<()> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(READ_TIMEOUT))?;
-    stream.set_write_timeout(Some(READ_TIMEOUT))?;
-    let request = read_request(&stream)?;
+    let head = match read_head(&mut stream, accepted_at + limits.request_timeout) {
+        Ok(head) => head,
+        Err(HeadError::TooLarge) => {
+            refuse(stream, "431 Request Header Fields Too Large");
+            return Ok(());
+        }
+        Err(HeadError::TimedOut) => {
+            refuse(stream, "408 Request Timeout");
+            return Ok(());
+        }
+        Err(HeadError::Io) => return Ok(()),
+    };
+    let request = parse_head(&head);
     let (status, content_type, body) = match (request.method.as_str(), request.path.as_str()) {
         ("GET" | "HEAD", "/metrics") => {
             if request.accepts_openmetrics {
@@ -204,23 +419,25 @@ fn serve_connection(mut stream: TcpStream, core: &MetricsCore) -> io::Result<()>
             "method not allowed\n".to_owned(),
         ),
     };
-    let mut head = String::with_capacity(160);
+    let mut response = String::with_capacity(160 + body.len());
     let _ = write!(
-        head,
+        response,
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     if status.starts_with("405") {
-        head.push_str("Allow: GET, HEAD\r\n");
+        response.push_str("Allow: GET, HEAD\r\n");
     }
-    head.push_str("\r\n");
-    stream.write_all(head.as_bytes())?;
+    response.push_str("\r\n");
     if request.method != "HEAD" {
-        stream.write_all(body.as_bytes())?;
+        response.push_str(&body);
     }
-    stream.flush()?;
-    // The client may already be gone; nothing to do about it.
-    let _ = stream.shutdown(Shutdown::Both);
+    write_all_by(
+        &mut stream,
+        response.as_bytes(),
+        Instant::now() + limits.response_timeout,
+    )?;
+    close_gracefully(&mut stream);
     Ok(())
 }
 
@@ -290,7 +507,9 @@ impl Pushgateway {
         })
     }
 
-    /// Set the connect/read/write timeout.
+    /// Set the timeout of one request: connecting (to every resolved
+    /// address in turn), sending and reading the answer must all finish
+    /// within it. Name resolution is not covered.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -302,7 +521,8 @@ impl Pushgateway {
     ///
     /// # Errors
     ///
-    /// Returns an `InvalidInput` error for an invalid grouping-label key, the
+    /// Returns an `InvalidInput` error for an invalid grouping-label key,
+    /// `TimedOut` when the request did not finish within the timeout, the
     /// I/O error of the exchange, or an `Other` error carrying the status
     /// line and the start of the body when the gateway does not answer 2xx.
     pub fn push(&self, job: &str, grouping: &LabelSet, registry: &Registry) -> io::Result<()> {
@@ -350,21 +570,16 @@ impl Pushgateway {
 
     fn send(&self, method: &str, job: &str, grouping: &LabelSet, body: &str) -> io::Result<()> {
         let path = self.group_path(job, grouping)?;
-        let addr = (
+        let deadline = Instant::now() + self.timeout;
+        // Name resolution uses the system resolver and is not bounded by the
+        // timeout.
+        let addrs: Vec<SocketAddr> = (
             self.host.trim_start_matches('[').trim_end_matches(']'),
             self.port,
         )
             .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "pushgateway host resolved to nothing",
-                )
-            })?;
-        let mut stream = TcpStream::connect_timeout(&addr, self.timeout)?;
-        stream.set_read_timeout(Some(self.timeout))?;
-        stream.set_write_timeout(Some(self.timeout))?;
+            .collect();
+        let mut stream = connect_any(&addrs, deadline)?;
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             self.host,
@@ -372,11 +587,9 @@ impl Pushgateway {
             prometheus::CONTENT_TYPE,
             body.len()
         );
-        stream.write_all(request.as_bytes())?;
-        stream.write_all(body.as_bytes())?;
-        stream.flush()?;
-        let mut response = Vec::new();
-        let _ = stream.take(64 * 1024).read_to_end(&mut response)?;
+        write_all_by(&mut stream, request.as_bytes(), deadline)?;
+        write_all_by(&mut stream, body.as_bytes(), deadline)?;
+        let response = read_response_by(&mut stream, deadline, 64 * 1024)?;
         let text = String::from_utf8_lossy(&response);
         let status_line = text.lines().next().unwrap_or_default();
         let code = status_line.split_whitespace().nth(1).unwrap_or_default();
@@ -390,6 +603,61 @@ impl Pushgateway {
             )))
         }
     }
+}
+
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "pushgateway request timed out")
+}
+
+/// Connect to the first of `addrs` that accepts before `deadline`, trying
+/// them in order.
+fn connect_any(addrs: &[SocketAddr], deadline: Instant) -> io::Result<TcpStream> {
+    let mut last = io::Error::new(
+        io::ErrorKind::NotFound,
+        "pushgateway host resolved to nothing",
+    );
+    for addr in addrs {
+        let Some(left) = remaining(deadline) else {
+            return Err(timed_out());
+        };
+        match TcpStream::connect_timeout(addr, left) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = e,
+        }
+    }
+    if last.kind() == io::ErrorKind::WouldBlock {
+        return Err(timed_out());
+    }
+    Err(last)
+}
+
+/// Read until the peer closes, at most `limit` bytes, before `deadline`.
+fn read_response_by(
+    stream: &mut TcpStream,
+    deadline: Instant,
+    limit: usize,
+) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    while out.len() < limit {
+        let left = remaining(deadline).ok_or_else(timed_out)?;
+        stream.set_read_timeout(Some(left))?;
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n.min(limit - out.len())]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(timed_out());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
 }
 
 /// Append `/<value>` or `@base64/<encoded>` for a grouping-key value.
@@ -433,7 +701,200 @@ fn base64url(out: &mut String, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+
+    fn fast_limits() -> Limits {
+        Limits {
+            request_timeout: Duration::from_millis(300),
+            response_timeout: Duration::from_millis(300),
+            max_connections: 4,
+        }
+    }
+
+    #[test]
+    fn test_idle_and_dripping_clients_do_not_delay_scrapes_regression_ml2_002() {
+        let core = Arc::new(MetricsCore::new());
+        let server = MetricsServer::spawn("127.0.0.1:0", Arc::clone(&core)).unwrap();
+        let addr = server.local_addr();
+        // An idle connection and a client dripping its head byte by byte.
+        let _idle = TcpStream::connect(addr).unwrap();
+        let mut drip = TcpStream::connect(addr).unwrap();
+        drip.write_all(b"GET /met").unwrap();
+        let start = Instant::now();
+        let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
+        assert!(response.ends_with("ok\n"), "{response}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+        server.shutdown();
+    }
+
+    #[test]
+    fn test_slow_clients_get_408_at_the_total_deadline() {
+        let core = Arc::new(MetricsCore::new());
+        let server = MetricsServer::spawn_with("127.0.0.1:0", core, fast_limits()).unwrap();
+        let mut drip = TcpStream::connect(server.local_addr()).unwrap();
+        drip.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let start = Instant::now();
+        // Send a byte more often than any per-read timeout would allow.
+        for b in b"GET /metrics HTTP/1.1\r\nX: aaaaaaaaaaaaaaaaaaaa" {
+            if drip.write_all(&[*b]).is_err() || start.elapsed() > Duration::from_millis(350) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        let mut response = String::new();
+        let _ = drip.read_to_string(&mut response);
+        assert!(response.starts_with("HTTP/1.1 408"), "{response:?}");
+        assert!(start.elapsed() < Duration::from_secs(3));
+        server.shutdown();
+    }
+
+    #[test]
+    fn test_oversized_heads_get_431() {
+        let core = Arc::new(MetricsCore::new());
+        let server = MetricsServer::spawn("127.0.0.1:0", core).unwrap();
+        let mut stream = TcpStream::connect(server.local_addr()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let junk = vec![b'a'; MAX_REQUEST_HEAD + 1024];
+        let _ = stream.write_all(b"GET /metrics HTTP/1.1\r\nX: ");
+        let _ = stream.write_all(&junk);
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 431"), "{text:?}");
+        server.shutdown();
+    }
+
+    #[test]
+    fn test_connections_beyond_the_limit_get_503() {
+        let core = Arc::new(MetricsCore::new());
+        let limits = Limits {
+            request_timeout: Duration::from_secs(5),
+            ..fast_limits()
+        };
+        let server = MetricsServer::spawn_with("127.0.0.1:0", core, limits).unwrap();
+        let addr = server.local_addr();
+        let idle: Vec<TcpStream> = (0..limits.max_connections)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
+        // Let the accept thread hand the idle connections to workers.
+        thread::sleep(Duration::from_millis(200));
+        let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        drop(idle);
+        // Workers see the closed connections and free their slots.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
+            if response.ends_with("ok\n") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "slots never freed: {response}");
+            thread::sleep(Duration::from_millis(20));
+        }
+        server.shutdown();
+    }
+
+    #[test]
+    fn test_scrape_latency_has_no_accept_polling() {
+        let core = Arc::new(MetricsCore::new());
+        let server = MetricsServer::spawn("127.0.0.1:0", core).unwrap();
+        let addr = server.local_addr();
+        let _ = get(addr, "GET /health HTTP/1.1\r\n\r\n");
+        let fastest = (0..5)
+            .map(|_| {
+                let start = Instant::now();
+                let _ = get(addr, "GET /health HTTP/1.1\r\n\r\n");
+                start.elapsed()
+            })
+            .min()
+            .unwrap();
+        // 1.x polled `accept` every 50 ms.
+        assert!(fastest < Duration::from_millis(40), "{fastest:?}");
+        server.shutdown();
+    }
+
+    #[test]
+    fn test_shutdown_of_a_server_bound_to_all_interfaces() {
+        let server = MetricsServer::spawn("0.0.0.0:0", Arc::new(MetricsCore::new())).unwrap();
+        assert!(server.local_addr().ip().is_unspecified());
+        assert_eq!(
+            wake_addr(server.local_addr()).ip(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        let start = Instant::now();
+        server.shutdown();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 9);
+        assert_eq!(wake_addr(v6).ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn test_head_parsing_helpers() {
+        assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n\r\nrest"), Some(18));
+        assert_eq!(find_head_end(b"GET /\n\n"), Some(7));
+        assert_eq!(find_head_end(b"GET /\r\n"), None);
+        let r =
+            parse_head(b"GET /metrics?x=1 HTTP/1.1\r\nACCEPT: application/openmetrics-text\r\n");
+        assert_eq!((r.method.as_str(), r.path.as_str()), ("GET", "/metrics"));
+        assert!(r.accepts_openmetrics);
+        let past = Instant::now().checked_sub(Duration::from_secs(1));
+        assert!(past.is_none_or(|p| remaining(p).is_none()));
+    }
+
+    #[test]
+    fn test_pushgateway_enforces_a_total_deadline_regression_ml2_006() {
+        // A gateway that reads the request, then drips its answer.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            for _ in 0..40 {
+                if stream.write_all(b"H").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let gw = Pushgateway::new(&format!("http://{addr}"))
+            .unwrap()
+            .with_timeout(Duration::from_millis(300));
+        let start = Instant::now();
+        let err = gw.delete("job", &LabelSet::EMPTY).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            start.elapsed()
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_pushgateway_tries_every_resolved_address() {
+        // The first address refuses connections; the second accepts.
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let refused = closed.local_addr().unwrap();
+        drop(closed);
+        let open = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = open.local_addr().unwrap();
+        let stream = connect_any(&[refused, addr], Instant::now() + Duration::from_secs(5));
+        assert_eq!(stream.unwrap().peer_addr().unwrap(), addr);
+        assert_eq!(
+            connect_any(&[], Instant::now() + Duration::from_secs(1))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 
     fn get(addr: SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).unwrap();
