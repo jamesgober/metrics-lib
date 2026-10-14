@@ -25,7 +25,10 @@
 //! With [`Temporality::Cumulative`] (the default) every point's
 //! `start_time_unix_nano` is the wall-clock time its series was created, so
 //! it is stable across exports as the specification requires (1.x reset it
-//! on every export). With [`Temporality::Delta`] the exporter remembers the
+//! on every export). When a counter, histogram, timer or summary is reset
+//! between two exports (its count goes down), the exporter starts a new
+//! series: the start time becomes the previous export time, so consumers
+//! see a reset instead of a negative rate. With [`Temporality::Delta`] the exporter remembers the
 //! previous export: sums and histograms report the change since then, with
 //! the previous export time as the start. Gauges and summaries have no
 //! temporality and always report the current value.
@@ -102,6 +105,11 @@ pub struct OtlpExporter {
 enum PreviousValue {
     Int(i64),
     UInt(u64),
+    /// Cumulative mode: the last exported total and the start time in use.
+    Cumulative {
+        total: u64,
+        start: u64,
+    },
     Histogram {
         count: u64,
         sum: f64,
@@ -310,13 +318,18 @@ impl ModelCtx<'_> {
     /// temporality; records the new baseline.
     fn uint_point(&mut self, key: (String, LabelSet), created: u64, total: u64) -> (u64, u64) {
         if self.temporality == Temporality::Cumulative {
-            return (created, total);
+            return (self.cumulative_start(key, created, total), total);
         }
         let (start, value) = match self.previous.get(&key) {
             Some(Previous {
                 time,
                 value: PreviousValue::UInt(prev),
             }) if *prev <= total => (*time, total - prev),
+            // Reset since the last export: everything counted since then.
+            Some(Previous {
+                time,
+                value: PreviousValue::UInt(_),
+            }) => (*time, total),
             _ => (created, total),
         };
         let _ = self.next.insert(
@@ -327,6 +340,33 @@ impl ModelCtx<'_> {
             },
         );
         (start, value)
+    }
+
+    /// Start time of a cumulative series. A total lower than at the last
+    /// export means the metric was reset in between; OTLP signals that with
+    /// a new start time, so the last export time becomes the start.
+    fn cumulative_start(&mut self, key: (String, LabelSet), created: u64, total: u64) -> u64 {
+        let start = match self.previous.get(&key) {
+            Some(Previous {
+                time,
+                value: PreviousValue::Cumulative { total: prev, start },
+            }) => {
+                if total < *prev {
+                    *time
+                } else {
+                    *start
+                }
+            }
+            _ => created,
+        };
+        let _ = self.next.insert(
+            key,
+            Previous {
+                time: self.now,
+                value: PreviousValue::Cumulative { total, start },
+            },
+        );
+        start
     }
 
     fn int_point(&mut self, key: (String, LabelSet), created: u64, value: i64) -> (u64, i64) {
@@ -438,9 +478,11 @@ impl ModelCtx<'_> {
                         } else {
                             Vec::new()
                         };
+                        let key = (name.clone(), LabelSet::clone(&s.labels));
+                        let start = self.cumulative_start(key, s.created_unix_nanos, count);
                         points.push(SummaryPoint {
                             attributes: LabelSet::clone(&s.labels),
-                            start: s.created_unix_nanos,
+                            start,
                             time: now,
                             count,
                             sum,
@@ -523,9 +565,11 @@ impl ModelCtx<'_> {
                 for s in &family.series {
                     if let Handle::Summary(q) = &s.handle {
                         let snap = q.snapshot();
+                        let key = (name.clone(), LabelSet::clone(&s.labels));
+                        let start = self.cumulative_start(key, s.created_unix_nanos, snap.count);
                         points.push(SummaryPoint {
                             attributes: LabelSet::clone(&s.labels),
-                            start: s.created_unix_nanos,
+                            start,
                             time: now,
                             count: snap.count,
                             sum: snap.sum,
@@ -565,7 +609,9 @@ impl ModelCtx<'_> {
         }
         let bounds: Vec<f64> = h.bounds().to_vec();
         let (start, count, sum, buckets) = if self.temporality == Temporality::Cumulative {
-            (created, snap.count, snap.sum, buckets)
+            let key = (name.to_owned(), labels.clone());
+            let start = self.cumulative_start(key, created, snap.count);
+            (start, snap.count, snap.sum, buckets)
         } else {
             let key = (name.to_owned(), labels.clone());
             let delta = match self.previous.get(&key) {
@@ -587,6 +633,8 @@ impl ModelCtx<'_> {
                         .map(|(now, before)| now.saturating_sub(*before))
                         .collect(),
                 )),
+                // Reset (or reconfigured) since the last export.
+                Some(Previous { time, .. }) => Some((*time, snap.count, snap.sum, buckets.clone())),
                 _ => None,
             };
             let _ = self.next.insert(
@@ -992,6 +1040,32 @@ mod tests {
             MetricData::Gauge { .. }
         ));
         assert_eq!(r.exposition_conflicts(), 1);
+    }
+
+    #[test]
+    fn test_reset_starts_a_new_cumulative_series_regression_ml2_010() {
+        let r = Registry::new();
+        let c = r.counter("c");
+        c.add(5);
+        let exporter = OtlpExporter::new("svc");
+        let start = |req: &ExportMetricsServiceRequest| match &metric_by_name(req, "c").data {
+            MetricData::Sum { data_points, .. } => data_points[0].start_time_unix_nano.clone(),
+            _ => panic!("expected a sum"),
+        };
+        let first = exporter.build(&r);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        c.add(1);
+        let second = exporter.build(&r);
+        assert_eq!(start(&first), start(&second));
+        c.reset();
+        c.add(1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let third = exporter.build(&r);
+        let parse = |s: String| s.parse::<u64>().unwrap();
+        assert!(parse(start(&third)) > parse(start(&second)));
+        // The new start sticks while the counter grows again.
+        c.add(1);
+        assert_eq!(start(&third), start(&exporter.build(&r)));
     }
 
     #[test]
