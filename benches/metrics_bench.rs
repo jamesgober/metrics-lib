@@ -179,6 +179,22 @@ fn global(c: &mut Criterion) {
     group.finish();
 }
 
+/// One `process_*` sample and one host sample from the platform backend.
+#[cfg(feature = "system")]
+fn system(c: &mut Criterion) {
+    let mut group = c.benchmark_group("system");
+    let collector = metrics_lib::ProcessCollector::new();
+    group.bench_function("process_sample", |b| {
+        b.iter(|| black_box(collector.collect().ok()));
+    });
+    let health = metrics_lib::SystemHealth::manual();
+    group.bench_function("host_and_process_update", |b| b.iter(|| health.update()));
+    group.finish();
+}
+
+#[cfg(not(feature = "system"))]
+fn system(_: &mut Criterion) {}
+
 criterion_group!(
     benches,
     counter,
@@ -188,6 +204,7 @@ criterion_group!(
     rate_meter,
     distributions,
     admission,
-    global
+    global,
+    system
 );
 criterion_main!(benches);

@@ -49,9 +49,9 @@ include = [
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-# `sysinfo` is only linked on non-Linux targets (Linux reads `/proc`
-# directly), so on Linux CI runners cargo-udeps reports it as unused. That is
-# a false positive.
+# `sysinfo` is only compiled for targets without an in-house backend (the
+# BSDs and others), so on Linux, macOS and Windows runners cargo-udeps reports
+# it as unused. That is a false positive.
 [package.metadata.cargo-udeps.ignore]
 normal = ["sysinfo"]
 
@@ -76,8 +76,9 @@ histogram = []
 sample = []
 
 # Process and host metrics (`SystemHealth`, standard `process_*` series).
-# Reads `/proc` on Linux and uses `sysinfo` elsewhere. Nothing is sampled and
-# no thread is started until the first call to `MetricsCore::system()`.
+# Reads `/proc` on Linux and the OS directly on Windows and macOS; `sysinfo`
+# is used only on other targets. Nothing is sampled and no thread is started
+# until the first call to `MetricsCore::system()`.
 system = ["dep:sysinfo"]
 
 # Tokio helpers: async timer guards, `TimedFuture`, `AsyncMetricBatch`,
@@ -143,12 +144,13 @@ tower-layer = { version = "0.3.3", optional = true }
 tower-service = { version = "0.3.3", optional = true }
 http = { version = "1.1", optional = true }
 
-# Optional (feature `system`), non-Linux only: the process and memory backend
-# for Windows, macOS and the BSDs. 0.36 is the newest line whose MSRV (1.75)
+# Optional (feature `system`), and only for targets without an in-house
+# backend (FreeBSD and the other BSDs, …): Linux, Windows and macOS read the
+# OS directly and never compile it. 0.36 is the newest line whose MSRV (1.75)
 # fits ours; 0.37+ needs Rust 1.88. Only sysinfo's `system` component is
 # compiled. The soundness fixes shipped in 0.37-0.39 are in components that
 # are either not compiled here (users, groups) or never called (motherboard).
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(not(any(target_os = "linux", target_os = "macos", windows)))'.dependencies]
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"], optional = true }
 
 
@@ -170,6 +172,11 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 http = "1.1"
 # Tests and example for the `metrics-rs` bridge.
 metrics = "0.24"
+
+# Parity tests only: the in-house Windows and macOS samplers are compared
+# with sysinfo's readings (tests/system_parity.rs). Never shipped.
+[target.'cfg(any(windows, target_os = "macos"))'.dev-dependencies]
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }

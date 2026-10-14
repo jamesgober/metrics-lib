@@ -80,7 +80,11 @@
 //! they were measured on.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![forbid(unsafe_code)]
+// `unsafe` is denied everywhere except the two FFI modules that read process
+// and host statistics from the OS (`src/system/windows.rs`,
+// `src/system/macos.rs`). Every block there has a `SAFETY` comment and the
+// FFI struct layouts are checked at compile time.
+#![deny(unsafe_code)]
 // Warnings are denied in CI (`RUSTFLAGS="-D warnings"`, clippy `-D warnings`)
 // rather than here, so a lint added to a future compiler cannot break the
 // build for users or on docs.rs.
@@ -521,10 +525,9 @@ impl MetricsCore {
     /// The `process_*` metrics, when [`MetricsConfig::process_metrics`] is
     /// enabled and the platform can provide them.
     ///
-    /// On Linux this samples `/proc` now (tens of microseconds). Elsewhere a
-    /// sample needs a scan of the whole process table through `sysinfo`
-    /// (milliseconds, and hundreds of milliseconds on hosts with thousands
-    /// of processes), so the latest sample of the background
+    /// On Linux, Windows and macOS this samples now (microseconds). On the
+    /// targets served by `sysinfo` a sample scans the whole process table
+    /// (milliseconds or more), so the latest sample of the background
     /// [`MetricsCore::system`] monitor is returned instead; the first call
     /// starts the monitor and waits for its first sample.
     #[cfg(feature = "system")]
@@ -533,7 +536,7 @@ impl MetricsCore {
         if !self.config.process_metrics {
             return None;
         }
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
             return self.process_collector().collect().ok();
         }
         let system = self.system();

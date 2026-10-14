@@ -1,4 +1,5 @@
-//! Non-Linux sampler (Windows, macOS, BSDs): backed by `sysinfo`.
+//! Sampler for targets without an in-house backend (FreeBSD and the other
+//! BSDs, …): backed by `sysinfo`, which is compiled only for these targets.
 //!
 //! All sizes from `sysinfo` 0.26+ are in **bytes**; the 1.x crate divided by
 //! 1024 once and reported KiB as MiB (ML-002).

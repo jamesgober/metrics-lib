@@ -13,32 +13,46 @@
 //!
 //! # Platform support
 //!
-//! | Data | Linux | macOS / BSD | Windows |
-//! |---|---|---|---|
-//! | host CPU % (delta between samples) | `/proc/stat` | sysinfo | sysinfo |
-//! | host memory | `/proc/meminfo` | sysinfo | sysinfo |
-//! | load average | `/proc/loadavg` | sysinfo | not available (`None`) |
-//! | process CPU time, RSS | `/proc/self/stat` | sysinfo | sysinfo |
-//! | virtual memory | `/proc/self/stat` | sysinfo | sysinfo |
-//! | open file descriptors | `/proc/self/fd` | sysinfo | handle count |
-//! | max file descriptors | `/proc/self/limits` | sysinfo | sysinfo |
-//! | thread count | `/proc/self/stat` | not available (`None`) | not available (`None`) |
-//! | process start time | `/proc/self/stat` + `btime` | sysinfo | sysinfo |
+//! Linux, Windows and macOS are read directly, with no dependency: `/proc`
+//! on Linux, five kernel32 calls on Windows, and libSystem (`getrusage`,
+//! `proc_pidinfo`, Mach host statistics, `sysctl`) on macOS. A process
+//! sample takes microseconds there. Other targets (FreeBSD and the other
+//! BSDs, …) use the `sysinfo` crate, which is compiled only for them.
+//!
+//! | Data | Linux | macOS | Windows | other (sysinfo) |
+//! |---|---|---|---|---|
+//! | host CPU % (delta between samples) | `/proc/stat` | `host_statistics` | `GetSystemTimes` | yes |
+//! | host memory | `/proc/meminfo` | `hw.memsize`, `host_statistics64` | `GlobalMemoryStatusEx` | yes |
+//! | load average | `/proc/loadavg` | `getloadavg` | not available (`None`) | yes |
+//! | process CPU time | `/proc/self/stat` | `getrusage` | `GetProcessTimes` | yes |
+//! | resident and virtual memory | `/proc/self/stat` | `proc_pidinfo` | `GetProcessMemoryInfo` (working set, private bytes) | yes |
+//! | open file descriptors | `/proc/self/fd` | `proc_pidinfo` | handle count | where supported |
+//! | max file descriptors | `/proc/self/limits` | `getrlimit` | not available (`None`) | where supported |
+//! | thread count | `/proc/self/stat` | `proc_pidinfo` | not available (`None`) | where supported |
+//! | process start time | `/proc/self/stat` + `btime` | `proc_pidinfo` | `GetProcessTimes` | yes |
 //!
 //! Values that a platform cannot provide are `None`, never a made-up
 //! constant, and the exporters omit the corresponding series.
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(not(target_os = "linux"))]
-mod other;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) mod procfs;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+mod sysinfo_backend;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(target_os = "linux")]
 use linux::Platform;
-#[cfg(not(target_os = "linux"))]
-use other::Platform;
+#[cfg(target_os = "macos")]
+use macos::Platform;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+use sysinfo_backend::Platform;
+#[cfg(windows)]
+use windows::Platform;
 
 use crate::{MetricsError, Result};
 use std::io;
@@ -91,8 +105,9 @@ pub(crate) struct HostSample {
 
 /// On-demand sampler for [`ProcessMetrics`].
 ///
-/// Cheap to keep around: on Linux a collection reads three small `/proc`
-/// files; elsewhere it refreshes one process through `sysinfo`.
+/// Cheap to keep around: a collection reads a few small `/proc` files on
+/// Linux and makes a few system calls on Windows and macOS (microseconds).
+/// On targets served by `sysinfo` it refreshes the process table.
 ///
 /// # Examples
 ///
@@ -932,11 +947,13 @@ mod tests {
                 .as_secs_f64();
             assert!(start <= now + 1.0 && start > now - 86_400.0 * 365.0);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert!(m.threads.unwrap() >= 1);
             assert!(m.open_fds.unwrap() >= 3);
         }
+        #[cfg(windows)]
+        assert!(m.open_fds.unwrap() >= 1);
         assert!(format!("{collector:?}").contains("ProcessCollector"));
     }
 
@@ -957,9 +974,9 @@ mod tests {
     #[test]
     fn test_unavailable_values_are_none_not_constants_regression_ml025() {
         let health = SystemHealth::manual();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
         assert_eq!(health.thread_count(), None);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(health.thread_count().unwrap() >= 1);
         #[cfg(windows)]
         assert_eq!(health.load_avg(), None);
