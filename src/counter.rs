@@ -1,57 +1,73 @@
-//! # Ultra-Fast Atomic Counter
+//! Monotonic `u64` counter.
 //!
-//! The fastest counter implementation possible - sub-3ns increments.
+//! [`Counter::inc`] and [`Counter::add`] compile to one atomic
+//! read-modify-write (`lock xadd` on x86-64) with `Relaxed` ordering. On the
+//! reference machine (see `docs/PERFORMANCE.md`) an uncontended `inc` costs
+//! about 4.5 ns; under heavy multi-thread contention on one counter, prefer
+//! [`ShardedCounter`](crate::ShardedCounter).
 //!
-//! ## Features
+//! # Overflow
 //!
-//! - **Sub-3ns increments** - Single atomic instruction
-//! - **Zero allocations** - Pure stack operations
-//! - **Lock-free** - Never blocks, never waits
-//! - **Cache optimized** - Aligned to prevent false sharing
-//! - **Overflow safe** - Handles u64::MAX gracefully
+//! The unchecked operations wrap at `u64::MAX`, exactly like
+//! [`AtomicU64::fetch_add`]. At one billion increments per second that takes
+//! more than 580 years. Use the `try_*` methods for an explicit
+//! [`MetricsError::Overflow`], or [`Counter::saturating_add`] to clamp.
+//!
+//! # Memory ordering
+//!
+//! A counter is a statistic, not a synchronisation primitive: every
+//! operation uses `Relaxed` ordering and does not order any other memory
+//! access.
 
+use crate::util::per_second;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Ultra-fast atomic counter
+/// Lock-free monotonic counter.
 ///
-/// Optimized for maximum throughput with minimal memory overhead.
-/// Cache-line aligned to prevent false sharing.
+/// Cache-line aligned so two counters never share a line (no false sharing).
+///
+/// # Examples
+///
+/// ```
+/// use metrics_lib::Counter;
+///
+/// let requests = Counter::new();
+/// requests.inc();
+/// requests.add(4);
+/// assert_eq!(requests.get(), 5);
+/// ```
 #[repr(align(64))]
 pub struct Counter {
-    /// Main counter value
     value: AtomicU64,
-    /// Creation timestamp for rate calculations
     created_at: Instant,
 }
 
-/// Counter statistics
+/// Point-in-time statistics for a [`Counter`].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct CounterStats {
-    /// Current counter value
+    /// Current value.
     pub value: u64,
-    /// Time since counter creation
+    /// Time since the counter was created.
     pub age: Duration,
-    /// Average increments per second since creation
+    /// Average increments per second since creation.
     pub rate_per_second: f64,
-    /// Total increments (same as value for basic counter)
-    pub total: u64,
 }
 
 impl Counter {
-    /// Create new counter starting at zero
+    /// Create a counter starting at zero.
     #[inline]
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            value: AtomicU64::new(0),
-            created_at: Instant::now(),
-        }
+        Self::with_value(0)
     }
 
-    /// Create counter with initial value
+    /// Create a counter starting at `initial`.
     #[inline]
+    #[must_use]
     pub fn with_value(initial: u64) -> Self {
         Self {
             value: AtomicU64::new(initial),
@@ -59,309 +75,250 @@ impl Counter {
         }
     }
 
-    /// Increment by 1 - THE FASTEST PATH
-    ///
-    /// This is optimized to be as fast as physically possible:
-    /// - Single atomic fetch_add instruction
-    /// - Relaxed memory ordering for maximum speed
-    /// - Inlined for zero function call overhead
-    #[inline(always)]
+    /// Increment by one. Wraps at `u64::MAX`.
+    #[inline]
     pub fn inc(&self) {
-        self.value.fetch_add(1, Ordering::Relaxed);
+        let _ = self.value.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Try to increment by 1 with overflow check
+    /// Add `amount`. Wraps at `u64::MAX`.
+    #[inline]
+    pub fn add(&self, amount: u64) {
+        let _ = self.value.fetch_add(amount, Ordering::Relaxed);
+    }
+
+    /// Increment by one unless that would overflow.
     ///
-    /// Returns `Ok(())` on success, or `Err(MetricsError::Overflow)` if the
-    /// increment would overflow `u64::MAX`.
+    /// # Errors
     ///
-    /// Example
+    /// Returns [`MetricsError::Overflow`] when the counter is at `u64::MAX`;
+    /// the value is unchanged.
+    ///
+    /// # Examples
+    ///
     /// ```
     /// use metrics_lib::{Counter, MetricsError};
+    ///
     /// let c = Counter::with_value(u64::MAX - 1);
     /// c.try_inc().unwrap();
     /// assert_eq!(c.get(), u64::MAX);
-    /// assert!(matches!(c.try_inc(), Err(MetricsError::Overflow)));
+    /// assert_eq!(c.try_inc(), Err(MetricsError::Overflow));
     /// ```
-    #[inline(always)]
+    #[inline]
     pub fn try_inc(&self) -> Result<()> {
-        // CAS loop: the overflow check and the increment are together atomic,
-        // so this is safe under concurrent access (no TOCTOU race).
-        loop {
-            let current = self.value.load(Ordering::Relaxed);
-            if current == u64::MAX {
-                return Err(MetricsError::Overflow);
-            }
-            match self.value.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok(()),
-                Err(_) => continue,
-            }
-        }
+        self.try_add(1)
     }
 
-    /// Add arbitrary amount - also blazingly fast
+    /// Add `amount` unless that would overflow.
     ///
-    /// Zero branch optimization - if amount is 0, still does the atomic
-    /// operation to maintain consistent performance characteristics
-    #[inline(always)]
-    pub fn add(&self, amount: u64) {
-        self.value.fetch_add(amount, Ordering::Relaxed);
-    }
-
-    /// Try to add an arbitrary amount with overflow check
+    /// The overflow check and the addition form one atomic step (a CAS loop),
+    /// so concurrent callers can never push the value past `u64::MAX`.
     ///
-    /// Returns `Ok(())` on success, or `Err(MetricsError::Overflow)` if the
-    /// addition would overflow `u64::MAX`.
+    /// # Errors
     ///
-    /// Example
+    /// Returns [`MetricsError::Overflow`] when `value + amount` would exceed
+    /// `u64::MAX`; the value is unchanged.
+    ///
+    /// # Examples
+    ///
     /// ```
     /// use metrics_lib::{Counter, MetricsError};
+    ///
     /// let c = Counter::with_value(u64::MAX - 5);
     /// assert!(c.try_add(4).is_ok());
-    /// assert!(matches!(c.try_add(2), Err(MetricsError::Overflow)));
+    /// assert_eq!(c.try_add(2), Err(MetricsError::Overflow));
     /// ```
-    #[inline(always)]
+    #[inline]
     pub fn try_add(&self, amount: u64) -> Result<()> {
-        if amount == 0 {
-            return Ok(());
-        }
-        // CAS loop: overflow check and addition are together atomic.
-        loop {
-            let current = self.value.load(Ordering::Relaxed);
-            let new_val = current.checked_add(amount).ok_or(MetricsError::Overflow)?;
-            match self.value.compare_exchange_weak(
-                current,
-                new_val,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok(()),
-                Err(_) => continue,
-            }
-        }
+        self.try_fetch_add(amount).map(|_| ())
     }
 
-    /// Get current value - single atomic load
+    /// Add `amount` and return the previous value, unless that would
+    /// overflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetricsError::Overflow`] when `value + amount` would exceed
+    /// `u64::MAX`; the value is unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::{Counter, MetricsError};
+    ///
+    /// let c = Counter::with_value(u64::MAX - 1);
+    /// assert_eq!(c.try_fetch_add(1), Ok(u64::MAX - 1));
+    /// assert_eq!(c.try_fetch_add(1), Err(MetricsError::Overflow));
+    /// ```
+    #[inline]
+    pub fn try_fetch_add(&self, amount: u64) -> Result<u64> {
+        self.value
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(amount)
+            })
+            .map_err(|_| MetricsError::Overflow)
+    }
+
+    /// Increment by one and return the new value, unless that would
+    /// overflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetricsError::Overflow`] when the counter is at `u64::MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::{Counter, MetricsError};
+    ///
+    /// let c = Counter::with_value(u64::MAX - 1);
+    /// assert_eq!(c.try_inc_and_get(), Ok(u64::MAX));
+    /// assert_eq!(c.try_inc_and_get(), Err(MetricsError::Overflow));
+    /// ```
+    #[inline]
+    pub fn try_inc_and_get(&self) -> Result<u64> {
+        self.try_fetch_add(1).map(|prev| prev + 1)
+    }
+
+    /// Current value.
+    #[inline]
     #[must_use]
-    #[inline(always)]
     pub fn get(&self) -> u64 {
         self.value.load(Ordering::Relaxed)
     }
 
-    /// Reset to zero - use sparingly
-    ///
-    /// Note: This uses SeqCst ordering to ensure all threads see the reset
+    /// Reset to zero.
     #[inline]
     pub fn reset(&self) {
-        self.value.store(0, Ordering::SeqCst);
+        self.value.store(0, Ordering::Relaxed);
     }
 
-    /// Set to specific value - use sparingly
+    /// Overwrite the value.
     ///
-    /// Note: This uses SeqCst ordering for consistency
+    /// A counter that moves backwards looks like a reset to Prometheus and
+    /// OTLP consumers; use a [`Gauge`](crate::Gauge) or an
+    /// [`UpDownCounter`](crate::UpDownCounter) for values that go down.
     #[inline]
     pub fn set(&self, value: u64) {
-        self.value.store(value, Ordering::SeqCst);
+        self.value.store(value, Ordering::Relaxed);
     }
 
-    /// Try to set to a specific value (always succeeds for `u64`)
+    /// Raise the value to `value` if it is currently lower; never lowers it.
     ///
-    /// This method never fails and always returns `Ok(())`.
+    /// Useful for mirroring an external monotonic counter from several
+    /// threads that may observe it out of order.
     #[inline]
-    pub fn try_set(&self, value: u64) -> Result<()> {
-        self.set(value);
-        Ok(())
+    pub fn set_max(&self, value: u64) {
+        let _ = self.value.fetch_max(value, Ordering::Relaxed);
     }
 
-    /// Atomic compare-and-swap
+    /// Replace the value with `new` if it currently equals `expected`.
     ///
-    /// Returns Ok(previous_value) if successful, Err(current_value) if failed
+    /// # Errors
+    ///
+    /// Returns `Err(current)` with the actual value when it did not equal
+    /// `expected`.
     #[inline]
     pub fn compare_and_swap(&self, expected: u64, new: u64) -> core::result::Result<u64, u64> {
-        match self
-            .value
-            .compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst)
-        {
-            Ok(prev) => Ok(prev),
-            Err(current) => Err(current),
-        }
+        self.value
+            .compare_exchange(expected, new, Ordering::Relaxed, Ordering::Relaxed)
     }
 
-    /// Add amount and return previous value
-    #[must_use]
+    /// Add `amount` and return the previous value. Wraps at `u64::MAX`.
     #[inline]
+    #[must_use = "use `add` when the previous value is not needed"]
     pub fn fetch_add(&self, amount: u64) -> u64 {
         self.value.fetch_add(amount, Ordering::Relaxed)
     }
 
-    /// Checked fetch_add that returns the previous value or error on overflow
-    ///
-    /// Returns the previous value on success, or `Err(MetricsError::Overflow)`
-    /// if adding `amount` would overflow `u64::MAX`.
-    ///
-    /// Example
-    /// ```
-    /// use metrics_lib::{Counter, MetricsError};
-    /// let c = Counter::with_value(u64::MAX - 1);
-    /// assert_eq!(c.try_fetch_add(1).unwrap(), u64::MAX - 1);
-    /// assert!(matches!(c.try_fetch_add(1), Err(MetricsError::Overflow)));
-    /// ```
+    /// Add `amount` and return the new value. Wraps at `u64::MAX`.
     #[inline]
-    pub fn try_fetch_add(&self, amount: u64) -> Result<u64> {
-        if amount == 0 {
-            return Ok(self.get());
-        }
-        // CAS loop: overflow check and fetch_add are together atomic.
-        loop {
-            let current = self.value.load(Ordering::Relaxed);
-            let new_val = current.checked_add(amount).ok_or(MetricsError::Overflow)?;
-            match self.value.compare_exchange_weak(
-                current,
-                new_val,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(prev) => return Ok(prev),
-                Err(_) => continue,
-            }
-        }
-    }
-
-    /// Add amount and return new value
-    ///
-    /// On overflow the returned value wraps modulo `u64::MAX + 1`, matching
-    /// the underlying [`AtomicU64::fetch_add`] semantics (no panic in debug or
-    /// release builds). Use [`Counter::try_fetch_add`] for an explicit
-    /// `MetricsError::Overflow` instead.
-    #[must_use]
-    #[inline]
+    #[must_use = "use `add` when the new value is not needed"]
     pub fn add_and_get(&self, amount: u64) -> u64 {
         self.value
             .fetch_add(amount, Ordering::Relaxed)
             .wrapping_add(amount)
     }
 
-    /// Increment and return new value
-    ///
-    /// On overflow the returned value wraps to `0`, matching the underlying
-    /// [`AtomicU64::fetch_add`] semantics (no panic in debug or release
-    /// builds). Use [`Counter::try_inc_and_get`] for an explicit
-    /// `MetricsError::Overflow` instead.
-    #[must_use]
+    /// Increment by one and return the new value. Wraps at `u64::MAX`.
     #[inline]
+    #[must_use = "use `inc` when the new value is not needed"]
     pub fn inc_and_get(&self) -> u64 {
         self.value.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
     }
 
-    /// Checked increment that returns new value or error on overflow
-    ///
-    /// Returns the new value, or `Err(MetricsError::Overflow)` if the
-    /// increment would overflow `u64::MAX`.
-    ///
-    /// Example
-    /// ```
-    /// use metrics_lib::{Counter, MetricsError};
-    /// let c = Counter::with_value(u64::MAX - 1);
-    /// assert_eq!(c.try_inc_and_get().unwrap(), u64::MAX);
-    /// assert!(matches!(c.try_inc_and_get(), Err(MetricsError::Overflow)));
-    /// ```
+    /// Add `amount`, clamping at `u64::MAX` instead of wrapping.
     #[inline]
-    pub fn try_inc_and_get(&self) -> Result<u64> {
-        // CAS loop: the returned value is the exact new value after the atomic
-        // increment — correct under concurrent access, unlike a load+store pattern.
-        loop {
-            let current = self.value.load(Ordering::Relaxed);
-            let new_val = current.checked_add(1).ok_or(MetricsError::Overflow)?;
-            match self.value.compare_exchange_weak(
-                current,
-                new_val,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok(new_val),
-                Err(_) => continue,
-            }
+    pub fn saturating_add(&self, amount: u64) {
+        let _ = self
+            .value
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let next = current.saturating_add(amount);
+                (next != current).then_some(next)
+            });
+    }
+
+    /// Add `count` events (a `usize`, as returned by `len()`). Wraps at
+    /// `u64::MAX`.
+    #[inline]
+    pub fn batch_inc(&self, count: usize) {
+        if count > 0 {
+            self.add(u64::try_from(count).unwrap_or(u64::MAX));
         }
     }
 
-    /// Get comprehensive statistics
+    /// Increment by one when `condition` is `true`.
+    #[inline]
+    pub fn inc_if(&self, condition: bool) {
+        if condition {
+            self.inc();
+        }
+    }
+
+    /// Increment by one only while the value is below `max_value`.
+    ///
+    /// Returns `true` when the increment was applied. The check and the
+    /// increment are one atomic step.
+    #[inline]
+    pub fn inc_max(&self, max_value: u64) -> bool {
+        self.value
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current < max_value).then(|| current + 1)
+            })
+            .is_ok()
+    }
+
+    /// Point-in-time statistics.
     #[must_use]
     pub fn stats(&self) -> CounterStats {
         let value = self.get();
-        let age = self.created_at.elapsed();
-        let age_seconds = age.as_secs_f64();
-
-        let rate_per_second = if age_seconds > 0.0 {
-            value as f64 / age_seconds
-        } else {
-            0.0
-        };
-
+        let age = self.age();
         CounterStats {
             value,
             age,
-            rate_per_second,
-            total: value,
+            rate_per_second: per_second(value, age),
         }
     }
 
-    /// Get age since creation
-    #[must_use]
+    /// Time since the counter was created.
     #[inline]
+    #[must_use]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
-    /// Check if counter is zero
-    #[must_use]
+    /// `true` when the value is zero.
     #[inline]
+    #[must_use]
     pub fn is_zero(&self) -> bool {
         self.get() == 0
     }
 
-    /// Get rate per second since creation
+    /// Average increments per second since creation.
+    #[inline]
     #[must_use]
-    #[inline]
     pub fn rate_per_second(&self) -> f64 {
-        let age_seconds = self.age().as_secs_f64();
-        if age_seconds > 0.0 {
-            self.get() as f64 / age_seconds
-        } else {
-            0.0
-        }
-    }
-
-    /// Saturating add - won't overflow past u64::MAX
-    ///
-    /// Uses a `Relaxed` CAS loop on the hot path; no `SeqCst` cost. The loop
-    /// terminates either when the value is already at `u64::MAX` or when a CAS
-    /// succeeds.
-    #[inline]
-    pub fn saturating_add(&self, amount: u64) {
-        loop {
-            let current = self.value.load(Ordering::Relaxed);
-            let new_value = current.saturating_add(amount);
-
-            // If no change needed (already at max), break
-            if new_value == current {
-                break;
-            }
-
-            match self.value.compare_exchange_weak(
-                current,
-                new_value,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(_) => continue,
-            }
-        }
+        per_second(self.get(), self.age())
     }
 }
 
@@ -383,358 +340,200 @@ impl std::fmt::Debug for Counter {
         f.debug_struct("Counter")
             .field("value", &self.get())
             .field("age", &self.age())
-            .field("rate_per_second", &self.rate_per_second())
             .finish()
-    }
-}
-
-// Counter is composed solely of `AtomicU64` (Send + Sync) and `Instant`
-// (Send + Sync). The compiler derives Send + Sync automatically; no
-// explicit unsafe impl is needed.
-
-/// Batch counter operations for even better performance
-impl Counter {
-    /// Batch increment - for very high throughput scenarios
-    ///
-    /// When you have many increments to do, batch them for better performance
-    #[inline]
-    pub fn batch_inc(&self, count: usize) {
-        if count > 0 {
-            self.add(count as u64);
-        }
-    }
-
-    /// Conditional increment - only increment if condition is true
-    #[inline]
-    pub fn inc_if(&self, condition: bool) {
-        if condition {
-            self.inc();
-        }
-    }
-
-    /// Increment with maximum value
-    ///
-    /// Uses a `Relaxed` CAS loop on the hot path; no `SeqCst` cost. Returns
-    /// `true` if the increment was applied (counter was below `max_value`),
-    /// `false` if the counter was already at or above the limit.
-    #[inline]
-    pub fn inc_max(&self, max_value: u64) -> bool {
-        loop {
-            let current = self.value.load(Ordering::Relaxed);
-            if current >= max_value {
-                return false;
-            }
-            // Safe: current < max_value <= u64::MAX implies current < u64::MAX.
-            let new_value = current + 1;
-
-            match self.value.compare_exchange_weak(
-                current,
-                new_value,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(_) => continue,
-            }
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use proptest::prelude::*;
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     #[test]
-    fn test_basic_operations() {
+    fn test_counter_basic_operations() {
         let counter = Counter::new();
-
         assert_eq!(counter.get(), 0);
         assert!(counter.is_zero());
-
         counter.inc();
-        assert_eq!(counter.get(), 1);
-        assert!(!counter.is_zero());
-
         counter.add(5);
         assert_eq!(counter.get(), 6);
-
         counter.reset();
         assert_eq!(counter.get(), 0);
-
         counter.set(42);
         assert_eq!(counter.get(), 42);
+        assert!(!counter.is_zero());
     }
 
     #[test]
-    fn test_fetch_operations() {
+    fn test_counter_fetch_variants_return_previous_and_new() {
         let counter = Counter::new();
-
         assert_eq!(counter.fetch_add(10), 0);
-        assert_eq!(counter.get(), 10);
-
         assert_eq!(counter.inc_and_get(), 11);
         assert_eq!(counter.add_and_get(5), 16);
     }
 
     #[test]
-    fn test_compare_and_swap() {
-        let counter = Counter::new();
-        counter.set(10);
+    fn test_counter_set_max_only_raises() {
+        let counter = Counter::with_value(10);
+        counter.set_max(5);
+        assert_eq!(counter.get(), 10);
+        counter.set_max(15);
+        assert_eq!(counter.get(), 15);
+    }
 
-        // Successful swap
+    #[test]
+    fn test_counter_compare_and_swap() {
+        let counter = Counter::with_value(10);
         assert_eq!(counter.compare_and_swap(10, 20), Ok(10));
-        assert_eq!(counter.get(), 20);
-
-        // Failed swap
         assert_eq!(counter.compare_and_swap(10, 30), Err(20));
         assert_eq!(counter.get(), 20);
     }
 
     #[test]
-    fn test_saturating_add() {
-        let counter = Counter::new();
-        counter.set(u64::MAX - 5);
-
+    fn test_counter_saturating_add_clamps_at_max() {
+        let counter = Counter::with_value(u64::MAX - 5);
         counter.saturating_add(10);
         assert_eq!(counter.get(), u64::MAX);
-
-        // Should not overflow
         counter.saturating_add(100);
+        assert_eq!(counter.get(), u64::MAX);
+        counter.saturating_add(0);
         assert_eq!(counter.get(), u64::MAX);
     }
 
     #[test]
-    fn test_conditional_operations() {
+    fn test_counter_unchecked_ops_wrap_at_max() {
+        let counter = Counter::with_value(u64::MAX);
+        assert_eq!(counter.inc_and_get(), 0);
+        let counter = Counter::with_value(u64::MAX - 2);
+        assert_eq!(counter.add_and_get(5), 2);
+    }
+
+    #[test]
+    fn test_counter_conditional_operations() {
         let counter = Counter::new();
-
         counter.inc_if(true);
-        assert_eq!(counter.get(), 1);
-
         counter.inc_if(false);
         assert_eq!(counter.get(), 1);
-
-        // Test inc_max
         assert!(counter.inc_max(5));
         assert_eq!(counter.get(), 2);
-
         counter.set(5);
         assert!(!counter.inc_max(5));
         assert_eq!(counter.get(), 5);
+        counter.set(u64::MAX);
+        assert!(!counter.inc_max(u64::MAX));
     }
 
     #[test]
-    fn test_statistics() {
+    fn test_counter_batch_inc() {
+        let counter = Counter::new();
+        counter.batch_inc(1000);
+        counter.batch_inc(0);
+        assert_eq!(counter.get(), 1000);
+    }
+
+    #[test]
+    fn test_counter_checked_operations_and_overflow_paths() {
+        let counter = Counter::new();
+        counter.try_inc().unwrap();
+        counter.try_add(0).unwrap();
+        assert_eq!(counter.try_fetch_add(2), Ok(1));
+        assert_eq!(counter.try_inc_and_get(), Ok(4));
+
+        let full = Counter::with_value(u64::MAX);
+        assert_eq!(full.try_inc(), Err(MetricsError::Overflow));
+        assert_eq!(full.try_add(1), Err(MetricsError::Overflow));
+        assert_eq!(full.try_fetch_add(1), Err(MetricsError::Overflow));
+        assert_eq!(full.try_inc_and_get(), Err(MetricsError::Overflow));
+        assert_eq!(full.try_add(0), Ok(()));
+        assert_eq!(full.get(), u64::MAX);
+    }
+
+    #[test]
+    fn test_counter_stats_and_formatting() {
         let counter = Counter::new();
         counter.add(100);
-
         let stats = counter.stats();
         assert_eq!(stats.value, 100);
-        assert_eq!(stats.total, 100);
-        assert!(stats.age > Duration::from_nanos(0));
-        // Rate might be 0 if test runs too fast
         assert!(stats.rate_per_second >= 0.0);
+        assert!(counter.rate_per_second() >= 0.0);
+        assert!(format!("{counter}").contains("100"));
+        assert!(format!("{counter:?}").contains("Counter"));
+        assert_eq!(Counter::default().get(), 0);
     }
 
     #[test]
-    fn test_high_concurrency() {
+    fn test_counter_concurrent_increments_are_exact() {
         let counter = Arc::new(Counter::new());
-        let num_threads = 100;
-        let increments_per_thread = 1000;
-
-        let handles: Vec<_> = (0..num_threads)
+        let threads = 8;
+        let per_thread = 50_000u64;
+        let barrier = Arc::new(Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
             .map(|_| {
                 let counter = Arc::clone(&counter);
+                let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
-                    for _ in 0..increments_per_thread {
+                    let _ = barrier.wait();
+                    for _ in 0..per_thread {
                         counter.inc();
                     }
                 })
             })
             .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
-
-        assert_eq!(counter.get(), num_threads * increments_per_thread);
-
-        let stats = counter.stats();
-        assert!(stats.rate_per_second > 0.0);
+        assert_eq!(counter.get(), threads as u64 * per_thread);
     }
 
     #[test]
-    fn test_batch_operations() {
-        let counter = Counter::new();
-
-        counter.batch_inc(1000);
-        assert_eq!(counter.get(), 1000);
-
-        counter.batch_inc(0); // Should be no-op
-        assert_eq!(counter.get(), 1000);
-    }
-
-    #[test]
-    fn test_display_and_debug() {
-        let counter = Counter::new();
-        counter.set(42);
-
-        let display_str = format!("{counter}");
-        assert!(display_str.contains("42"));
-
-        let debug_str = format!("{counter:?}");
-        assert!(debug_str.contains("Counter"));
-        assert!(debug_str.contains("42"));
-    }
-
-    #[test]
-    fn test_add_and_get_wraps_on_overflow_without_panic() {
-        // 0.9.2 regression: add_and_get and inc_and_get used `+` which would
-        // panic in debug builds when crossing u64::MAX. They now wrap, matching
-        // the underlying fetch_add semantics.
-        let counter = Counter::with_value(u64::MAX);
-        let next = counter.inc_and_get();
-        assert_eq!(next, 0, "inc_and_get should wrap to 0 past u64::MAX");
-        // Subsequent inc lands on 1
-        assert_eq!(counter.inc_and_get(), 1);
-
-        let counter = Counter::with_value(u64::MAX - 2);
-        let next = counter.add_and_get(5);
-        assert_eq!(
-            next, 2,
-            "add_and_get should wrap: (u64::MAX-2) + 5 == 2 mod 2^64"
-        );
-    }
-
-    #[test]
-    fn test_saturating_add_terminates_at_max() {
-        // 0.9.2 regression: saturating_add previously used SeqCst CAS in a
-        // tight loop. Now uses Relaxed compare_exchange_weak. Behavior must
-        // remain identical.
-        let counter = Counter::with_value(u64::MAX - 3);
-        counter.saturating_add(100);
-        assert_eq!(counter.get(), u64::MAX);
-
-        // Already-at-max no-op short-circuit
-        counter.saturating_add(1);
+    fn test_counter_concurrent_try_add_never_passes_max() {
+        let counter = Arc::new(Counter::with_value(u64::MAX - 1000));
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let _ = barrier.wait();
+                    (0..500).filter(|_| counter.try_add(1).is_ok()).count()
+                })
+            })
+            .collect();
+        let applied: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(applied, 1000);
         assert_eq!(counter.get(), u64::MAX);
     }
 
-    #[test]
-    fn test_inc_max_relaxed_cas_still_correct() {
-        // 0.9.2 regression: inc_max switched from SeqCst CAS to Relaxed.
-        // Single-threaded behavior must remain identical.
-        let counter = Counter::with_value(5);
-        assert!(counter.inc_max(7));
-        assert_eq!(counter.get(), 6);
-        assert!(counter.inc_max(7));
-        assert_eq!(counter.get(), 7);
-        assert!(!counter.inc_max(7));
-        assert_eq!(counter.get(), 7);
-    }
-
-    #[test]
-    fn test_checked_operations_and_overflow_paths() {
-        let counter = Counter::new();
-
-        counter.try_set(3).unwrap();
-        assert_eq!(counter.get(), 3);
-
-        counter.try_inc().unwrap();
-        assert_eq!(counter.get(), 4);
-
-        counter.try_add(0).unwrap();
-        assert_eq!(counter.get(), 4);
-
-        assert_eq!(counter.try_fetch_add(2).unwrap(), 4);
-        assert_eq!(counter.get(), 6);
-
-        assert_eq!(counter.try_fetch_add(0).unwrap(), 6);
-        assert_eq!(counter.try_inc_and_get().unwrap(), 7);
-
-        let overflow = Counter::with_value(u64::MAX);
-        assert!(matches!(overflow.try_inc(), Err(MetricsError::Overflow)));
-        assert!(matches!(overflow.try_add(1), Err(MetricsError::Overflow)));
-        assert!(matches!(
-            overflow.try_fetch_add(1),
-            Err(MetricsError::Overflow)
-        ));
-        assert!(matches!(
-            overflow.try_inc_and_get(),
-            Err(MetricsError::Overflow)
-        ));
-    }
-}
-
-#[cfg(all(test, feature = "bench-tests", not(tarpaulin), not(coverage)))]
-#[allow(unused_imports)]
-mod benchmarks {
-    use super::*;
-    use std::time::Instant;
-
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_counter_increment() {
-        let counter = Counter::new();
-        let iterations = 10_000_000;
-
-        let start = Instant::now();
-        for _ in 0..iterations {
-            counter.inc();
+    proptest! {
+        #[test]
+        fn prop_try_add_matches_checked_add(start in any::<u64>(), amount in any::<u64>()) {
+            let counter = Counter::with_value(start);
+            match start.checked_add(amount) {
+                Some(sum) => {
+                    prop_assert_eq!(counter.try_add(amount), Ok(()));
+                    prop_assert_eq!(counter.get(), sum);
+                }
+                None => {
+                    prop_assert_eq!(counter.try_add(amount), Err(MetricsError::Overflow));
+                    prop_assert_eq!(counter.get(), start);
+                }
+            }
         }
-        let elapsed = start.elapsed();
 
-        println!(
-            "Counter increment: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check. Criterion's `metrics_bench` is the
-        // authoritative regression detector — see CONTRIBUTING.md.
-        assert_eq!(counter.get(), iterations as u64);
-    }
-
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_counter_add() {
-        let counter = Counter::new();
-        let iterations = 1_000_000;
-
-        let start = Instant::now();
-        for i in 0..iterations {
-            counter.add(i + 1);
+        #[test]
+        fn prop_saturating_add_matches_std(start in any::<u64>(), amount in any::<u64>()) {
+            let counter = Counter::with_value(start);
+            counter.saturating_add(amount);
+            prop_assert_eq!(counter.get(), start.saturating_add(amount));
         }
-        let elapsed = start.elapsed();
 
-        println!(
-            "Counter add: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check. Criterion catches regressions.
-    }
-
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_counter_get() {
-        let counter = Counter::new();
-        counter.set(42);
-        let iterations = 100_000_000;
-
-        let start = Instant::now();
-        let mut sum = 0;
-        for _ in 0..iterations {
-            sum += counter.get();
+        #[test]
+        fn prop_add_wraps_like_std(start in any::<u64>(), amount in any::<u64>()) {
+            let counter = Counter::with_value(start);
+            counter.add(amount);
+            prop_assert_eq!(counter.get(), start.wrapping_add(amount));
         }
-        let elapsed = start.elapsed();
-
-        println!(
-            "Counter get: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Prevent optimization elision; Criterion is the regression detector.
-        assert_eq!(sum, 42 * iterations);
     }
 }

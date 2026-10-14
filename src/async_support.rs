@@ -1,170 +1,237 @@
-//! Async support for metrics
+//! Tokio helpers (feature `async`).
 //!
-//! Provides async-aware metric recording with zero-cost abstractions
+//! - [`AsyncTimerExt`] times a future with a [`Timer`](crate::Timer):
+//!   `timer.time_async(|| fetch()).await` records how long the future took
+//!   to complete.
+//! - [`AsyncMetricBatch`] collects updates and applies them to a
+//!   [`MetricsCore`] in one go.
+//! - [`AsyncMetricsBatcher`] does that for concurrent tasks, flushing when
+//!   the batch is full and on a timer driven by a cancellable background task.
+//! - [`record_runtime_metrics`] copies Tokio's stable runtime metrics into
+//!   gauges.
+//!
+//! Nothing here blocks the executor: flushing a batch only performs atomic
+//! updates and registry lookups.
 
-use crate::Timer;
+use crate::{MetricsCore, Registry};
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// Async timer guard that records on drop
+#[cfg(feature = "timer")]
+use crate::Timer;
+
+/// Guard that records the elapsed time into a timer when dropped or
+/// stopped. Same as [`RunningTimer`](crate::RunningTimer); kept for code
+/// that wants an async-specific name.
+#[cfg(feature = "timer")]
+#[must_use = "dropping the guard immediately records a near-zero duration"]
 pub struct AsyncTimerGuard<'a> {
     timer: &'a Timer,
     start: Instant,
-    recorded: bool,
+    armed: bool,
 }
 
+#[cfg(feature = "timer")]
 impl<'a> AsyncTimerGuard<'a> {
-    /// Creates a new `AsyncTimerGuard` for the given timer, starting timing immediately.
-    #[inline]
+    /// Start timing into `timer`.
     pub fn new(timer: &'a Timer) -> Self {
         Self {
             timer,
             start: Instant::now(),
-            recorded: false,
+            armed: true,
         }
     }
 
-    /// Returns the elapsed time since the guard was created.
-    #[inline]
-    pub fn elapsed(&self) -> std::time::Duration {
+    /// Time elapsed so far.
+    #[must_use]
+    pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
 
-    /// Stops the timer and records the elapsed time if not already recorded.
-    #[inline]
-    pub fn stop(mut self) {
-        if !self.recorded {
-            self.timer.record(self.start.elapsed());
-            self.recorded = true;
-        }
+    /// Record now and return the elapsed time.
+    #[allow(clippy::must_use_candidate)] // the duration is optional information
+    pub fn stop(mut self) -> Duration {
+        let elapsed = self.start.elapsed();
+        self.timer.record(elapsed);
+        self.armed = false;
+        elapsed
     }
 }
 
-impl<'a> Drop for AsyncTimerGuard<'a> {
-    #[inline]
+#[cfg(feature = "timer")]
+impl Drop for AsyncTimerGuard<'_> {
     fn drop(&mut self) {
-        if !self.recorded {
+        if self.armed {
             self.timer.record(self.start.elapsed());
         }
     }
 }
 
-/// Extension trait for async timer operations
+#[cfg(feature = "timer")]
+impl std::fmt::Debug for AsyncTimerGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncTimerGuard")
+            .field("elapsed", &self.elapsed())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Timing helpers for futures, implemented for `Timer` (the future borrows
+/// the timer) and `Arc<Timer>` (the future owns a clone, so it can be
+/// `'static` and spawned).
+#[cfg(feature = "timer")]
 pub trait AsyncTimerExt {
-    /// Start an async-aware timer
+    /// The handle the returned future keeps (`&Timer` or `Arc<Timer>`).
+    type Handle<'a>: std::ops::Deref<Target = Timer>
+    where
+        Self: 'a;
+
+    /// Start a guard that records on drop.
     fn start_async(&self) -> AsyncTimerGuard<'_>;
 
-    /// Time an async function
-    fn time_async<F, Fut, T>(&self, f: F) -> TimedFuture<'_, Fut>
+    /// Wrap the future returned by `f`; its run time is recorded when it
+    /// completes. A future dropped before completion records nothing.
+    fn time_async<F, Fut>(&self, f: F) -> TimedFuture<Self::Handle<'_>, Fut>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = T>;
+        Fut: Future;
 }
 
+#[cfg(feature = "timer")]
 impl AsyncTimerExt for Timer {
-    #[inline]
+    type Handle<'a> = &'a Timer;
+
     fn start_async(&self) -> AsyncTimerGuard<'_> {
         AsyncTimerGuard::new(self)
     }
 
-    #[inline]
-    fn time_async<F, Fut, T>(&self, f: F) -> TimedFuture<'_, Fut>
+    fn time_async<F, Fut>(&self, f: F) -> TimedFuture<&Timer, Fut>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = T>,
+        Fut: Future,
     {
-        TimedFuture {
-            timer: self,
-            future: f(),
-            start: Some(Instant::now()),
+        TimedFuture::new(self, f())
+    }
+}
+
+#[cfg(feature = "timer")]
+impl AsyncTimerExt for Arc<Timer> {
+    type Handle<'a> = Arc<Timer>;
+
+    fn start_async(&self) -> AsyncTimerGuard<'_> {
+        AsyncTimerGuard::new(self)
+    }
+
+    fn time_async<F, Fut>(&self, f: F) -> TimedFuture<Arc<Timer>, Fut>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future,
+    {
+        TimedFuture::new(Arc::clone(self), f())
+    }
+}
+
+#[cfg(feature = "timer")]
+pin_project_lite::pin_project! {
+    /// Future returned by [`AsyncTimerExt::time_async`].
+    ///
+    /// The clock starts on the first poll and the elapsed time is recorded
+    /// when the inner future completes.
+    #[must_use = "futures do nothing unless awaited"]
+    pub struct TimedFuture<T, F> {
+        timer: T,
+        start: Option<Instant>,
+        #[pin]
+        future: F,
+    }
+}
+
+#[cfg(feature = "timer")]
+impl<T, F> TimedFuture<T, F> {
+    fn new(timer: T, future: F) -> Self {
+        Self {
+            timer,
+            start: None,
+            future,
         }
     }
 }
 
-/// Future wrapper that times execution
-pub struct TimedFuture<'a, F> {
-    timer: &'a Timer,
-    future: F,
-    start: Option<Instant>,
-}
-
-impl<'a, F, T> Future for TimedFuture<'a, F>
+#[cfg(feature = "timer")]
+impl<T, F> Future for TimedFuture<T, F>
 where
-    F: Future<Output = T>,
+    T: std::ops::Deref<Target = Timer>,
+    F: Future,
 {
-    type Output = T;
+    type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: `TimedFuture` is `!Unpin`. We project through the outer
-        // `Pin<&mut TimedFuture>` to access its fields. The `future` field is
-        // structurally pinned — once `TimedFuture` is pinned, `future` is
-        // guaranteed to stay at the same memory address.
-        let this = unsafe { self.get_unchecked_mut() };
-        // SAFETY: `this.future` is structurally pinned (see above). Projecting
-        // to `Pin<&mut F>` is sound because we never move `future` out of `this`.
-        let future = unsafe { Pin::new_unchecked(&mut this.future) };
-
-        match future.poll(cx) {
-            Poll::Ready(result) => {
-                if let Some(start) = this.start.take() {
-                    this.timer.record(start.elapsed());
-                }
-                Poll::Ready(result)
+        let this = self.project();
+        let start = *this.start.get_or_insert_with(Instant::now);
+        match this.future.poll(cx) {
+            Poll::Ready(output) => {
+                this.timer.record(start.elapsed());
+                Poll::Ready(output)
             }
             Poll::Pending => Poll::Pending,
         }
     }
 }
 
-/// Batched metric updates for async contexts
+#[cfg(feature = "timer")]
+impl<T, F> std::fmt::Debug for TimedFuture<T, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimedFuture")
+            .field("started", &self.start.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum MetricUpdate {
+    #[cfg(feature = "count")]
+    CounterAdd { name: Cow<'static, str>, value: u64 },
+    #[cfg(feature = "gauge")]
+    GaugeSet { name: Cow<'static, str>, value: f64 },
+    #[cfg(feature = "timer")]
+    TimerRecord { name: Cow<'static, str>, nanos: u64 },
+    #[cfg(feature = "meter")]
+    RateTick { name: Cow<'static, str>, count: u64 },
+}
+
+/// A list of metric updates applied together with
+/// [`AsyncMetricBatch::flush`].
+///
+/// Each method is available when its metric feature is enabled.
+#[derive(Debug, Clone, Default)]
 pub struct AsyncMetricBatch {
     updates: Vec<MetricUpdate>,
 }
 
-enum MetricUpdate {
-    CounterInc { name: Cow<'static, str>, value: u64 },
-    GaugeSet { name: Cow<'static, str>, value: f64 },
-    TimerRecord { name: Cow<'static, str>, nanos: u64 },
-    RateTick { name: Cow<'static, str> },
-}
-
 impl AsyncMetricBatch {
-    /// Create new batch
+    /// An empty batch.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             updates: Vec::with_capacity(64),
         }
     }
-}
 
-impl Default for AsyncMetricBatch {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AsyncMetricBatch {
-    /// Add counter increment
-    ///
-    /// `name` accepts both `&'static str` (string literals) and owned
-    /// `String`s via `impl Into<Cow<'static, str>>` — runtime-derived names
-    /// no longer require `Box::leak`.
-    #[inline]
+    /// Queue `counter(name).add(value)`.
+    #[cfg(feature = "count")]
     pub fn counter_inc(&mut self, name: impl Into<Cow<'static, str>>, value: u64) {
-        self.updates.push(MetricUpdate::CounterInc {
+        self.updates.push(MetricUpdate::CounterAdd {
             name: name.into(),
             value,
         });
     }
 
-    /// Add gauge set
-    ///
-    /// `name` accepts both `&'static str` and owned `String`s — see
-    /// [`Self::counter_inc`] for details.
-    #[inline]
+    /// Queue `gauge(name).set(value)`.
+    #[cfg(feature = "gauge")]
     pub fn gauge_set(&mut self, name: impl Into<Cow<'static, str>>, value: f64) {
         self.updates.push(MetricUpdate::GaugeSet {
             name: name.into(),
@@ -172,11 +239,8 @@ impl AsyncMetricBatch {
         });
     }
 
-    /// Add timer recording
-    ///
-    /// `name` accepts both `&'static str` and owned `String`s — see
-    /// [`Self::counter_inc`] for details.
-    #[inline]
+    /// Queue `timer(name).record_ns(nanos)`.
+    #[cfg(feature = "timer")]
     pub fn timer_record(&mut self, name: impl Into<Cow<'static, str>>, nanos: u64) {
         self.updates.push(MetricUpdate::TimerRecord {
             name: name.into(),
@@ -184,217 +248,336 @@ impl AsyncMetricBatch {
         });
     }
 
-    /// Add rate tick
-    ///
-    /// `name` accepts both `&'static str` and owned `String`s — see
-    /// [`Self::counter_inc`] for details.
-    #[inline]
-    pub fn rate_tick(&mut self, name: impl Into<Cow<'static, str>>) {
-        self.updates
-            .push(MetricUpdate::RateTick { name: name.into() });
+    /// Queue `rate(name).tick_n(count)`.
+    #[cfg(feature = "meter")]
+    pub fn rate_tick(&mut self, name: impl Into<Cow<'static, str>>, count: u64) {
+        self.updates.push(MetricUpdate::RateTick {
+            name: name.into(),
+            count,
+        });
     }
 
-    /// Flush all updates to metrics
-    pub fn flush(self, metrics: &crate::MetricsCore) {
-        for update in self.updates {
+    /// Apply every queued update to `core`, in order, and empty the batch.
+    #[allow(unused_variables)]
+    pub fn flush(&mut self, core: &MetricsCore) {
+        for update in self.updates.drain(..) {
             match update {
-                MetricUpdate::CounterInc { name, value } => {
-                    metrics.counter(&name).add(value);
-                }
-                MetricUpdate::GaugeSet { name, value } => {
-                    metrics.gauge(&name).set(value);
-                }
-                MetricUpdate::TimerRecord { name, nanos } => {
-                    metrics.timer(&name).record_ns(nanos);
-                }
-                MetricUpdate::RateTick { name } => {
-                    metrics.rate(&name).tick();
-                }
+                #[cfg(feature = "count")]
+                MetricUpdate::CounterAdd { name, value } => core.counter(&name).add(value),
+                #[cfg(feature = "gauge")]
+                MetricUpdate::GaugeSet { name, value } => core.gauge(&name).set(value),
+                #[cfg(feature = "timer")]
+                MetricUpdate::TimerRecord { name, nanos } => core.timer(&name).record_ns(nanos),
+                #[cfg(feature = "meter")]
+                MetricUpdate::RateTick { name, count } => core.rate(&name).tick_n(count),
             }
         }
     }
 
-    /// Check if batch is empty
-    #[inline]
+    /// `true` when nothing is queued.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.updates.is_empty()
     }
 
-    /// Get number of pending updates
-    #[inline]
+    /// Number of queued updates.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.updates.len()
     }
 }
 
-/// Async-aware metrics batcher with automatic background flushing.
+/// Shared batch for many tasks, flushed into an explicit [`MetricsCore`].
 ///
-/// Accumulates metric updates and flushes them in batches, either when
-/// `max_batch_size` is reached or on the configured `flush_interval`.
-/// Requires the `async` feature.
-#[cfg(feature = "async")]
+/// [`AsyncMetricsBatcher::record`] flushes inline once the batch reaches
+/// `max_batch_size`; [`AsyncMetricsBatcher::start_flusher`] adds periodic
+/// flushing on a background task you can stop.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "count")]
+/// # {
+/// use metrics_lib::async_support::AsyncMetricsBatcher;
+/// use metrics_lib::MetricsCore;
+/// use std::sync::Arc;
+/// use std::time::Duration;
+///
+/// # let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+/// # rt.block_on(async {
+/// let core = Arc::new(MetricsCore::new());
+/// let batcher = Arc::new(AsyncMetricsBatcher::new(Arc::clone(&core), Duration::from_millis(50), 100));
+/// let flusher = Arc::clone(&batcher).start_flusher();
+/// batcher.record(|b| b.counter_inc("jobs", 1)).await;
+/// flusher.shutdown().await;
+/// assert_eq!(core.counter("jobs").get(), 1);
+/// # });
+/// # }
+/// ```
 pub struct AsyncMetricsBatcher {
+    core: Arc<MetricsCore>,
     batch: tokio::sync::Mutex<AsyncMetricBatch>,
-    flush_interval: std::time::Duration,
+    flush_interval: Duration,
     max_batch_size: usize,
 }
 
-#[cfg(feature = "async")]
 impl AsyncMetricsBatcher {
-    /// Create a new batcher with the given flush interval and maximum batch size.
-    pub fn new(flush_interval: std::time::Duration, max_batch_size: usize) -> Self {
+    /// Batch into `core`, flushing every `flush_interval` (once the flusher
+    /// runs) or when `max_batch_size` updates are queued (at least 1).
+    #[must_use]
+    pub fn new(core: Arc<MetricsCore>, flush_interval: Duration, max_batch_size: usize) -> Self {
         Self {
+            core,
             batch: tokio::sync::Mutex::new(AsyncMetricBatch::new()),
             flush_interval,
-            max_batch_size,
+            max_batch_size: max_batch_size.max(1),
         }
     }
 
-    /// Enqueue a metric update; flushes the batch in the background if
-    /// `max_batch_size` is reached.
+    /// Queue updates with `update`; flushes inline when the batch is full.
     pub async fn record(&self, update: impl FnOnce(&mut AsyncMetricBatch)) {
         let mut batch = self.batch.lock().await;
         update(&mut batch);
-
         if batch.len() >= self.max_batch_size {
-            let batch = std::mem::take(&mut *batch);
-
-            // Flush in background
-            tokio::spawn(async move {
-                batch.flush(crate::metrics());
-            });
+            batch.flush(&self.core);
         }
     }
 
-    /// Spawn a Tokio task that flushes the batch on the configured interval.
-    ///
-    /// The caller must hold an `Arc<Self>` for the task to keep the batcher alive.
-    pub fn start_flusher(self: std::sync::Arc<Self>) {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(self.flush_interval);
+    /// Apply everything queued now.
+    pub async fn flush(&self) {
+        self.batch.lock().await.flush(&self.core);
+    }
 
+    /// Start a task that flushes every `flush_interval`. Requires a Tokio
+    /// runtime with the timer enabled.
+    #[must_use = "dropping the handle detaches the flusher; call shutdown() to stop it"]
+    pub fn start_flusher(self: Arc<Self>) -> FlusherHandle {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&stop);
+        let task = tokio::spawn(async move {
             loop {
-                interval.tick().await;
-
-                let batch = {
-                    let mut guard = self.batch.lock().await;
-                    if guard.is_empty() {
-                        continue;
-                    }
-                    std::mem::take(&mut *guard)
-                };
-
-                batch.flush(crate::metrics());
+                let stopped = tokio::time::timeout(self.flush_interval, signal.notified())
+                    .await
+                    .is_ok();
+                self.flush().await;
+                if stopped {
+                    break;
+                }
             }
         });
+        FlusherHandle { stop, task }
     }
+}
+
+impl std::fmt::Debug for AsyncMetricsBatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncMetricsBatcher")
+            .field("flush_interval", &self.flush_interval)
+            .field("max_batch_size", &self.max_batch_size)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Handle to the task started by [`AsyncMetricsBatcher::start_flusher`].
+#[derive(Debug)]
+pub struct FlusherHandle {
+    stop: Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FlusherHandle {
+    /// Stop the flusher after one final flush, and wait for it.
+    pub async fn shutdown(self) {
+        self.stop.notify_one();
+        // The task only ends by our signal; a join error means it panicked,
+        // and there is nothing left to flush in that case.
+        let _ = self.task.await;
+    }
+}
+
+/// Copy Tokio's stable runtime metrics into gauges of `registry`:
+/// `<prefix>tokio_workers`, `<prefix>tokio_alive_tasks` and
+/// `<prefix>tokio_global_queue_depth`. Call it periodically (for example
+/// right before rendering).
+///
+/// Requires the `gauge` feature.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "gauge")]
+/// # {
+/// use metrics_lib::async_support::record_runtime_metrics;
+/// use metrics_lib::Registry;
+///
+/// let registry = Registry::new();
+/// let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).build().unwrap();
+/// record_runtime_metrics(rt.handle(), &registry, "app_");
+/// assert_eq!(registry.gauge("app_tokio_workers").get(), 2.0);
+/// # }
+/// ```
+#[cfg(feature = "gauge")]
+#[allow(clippy::cast_precision_loss)] // counts far below 2^53
+pub fn record_runtime_metrics(handle: &tokio::runtime::Handle, registry: &Registry, prefix: &str) {
+    let m = handle.metrics();
+    registry
+        .gauge(&format!("{prefix}tokio_workers"))
+        .set(m.num_workers() as f64);
+    registry
+        .gauge(&format!("{prefix}tokio_alive_tasks"))
+        .set(m.num_alive_tasks() as f64);
+    registry
+        .gauge(&format!("{prefix}tokio_global_queue_depth"))
+        .set(m.global_queue_depth() as f64);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(feature = "timer")]
     #[test]
     fn test_async_timer_guard() {
         let timer = Timer::new();
-
         {
-            let _guard = timer.start_async();
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            let guard = timer.start_async();
+            assert!(guard.elapsed() < Duration::from_secs(5));
+            assert!(format!("{guard:?}").contains("AsyncTimerGuard"));
         }
-
-        assert_eq!(timer.count(), 1);
-        assert!(timer.average() >= std::time::Duration::from_millis(9));
+        let _ = AsyncTimerGuard::new(&timer).stop();
+        assert_eq!(timer.count(), 2);
     }
 
+    #[cfg(feature = "timer")]
     #[test]
-    fn test_metric_batch() {
+    fn test_timed_future_records_on_completion() {
+        let rt = runtime();
+        let timer = Arc::new(Timer::new());
+        let value = rt.block_on(async {
+            timer
+                .time_async(|| async {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    42
+                })
+                .await
+        });
+        assert_eq!(value, 42);
+        assert_eq!(timer.count(), 1);
+        assert!(timer.average() >= Duration::from_millis(9));
+        let _ = Arc::clone(&timer).start_async();
+        assert_eq!(timer.count(), 2);
+        let owned = Timer::new();
+        let v = rt.block_on(owned.time_async(|| async { 7 }));
+        assert_eq!(owned.count(), 1);
+        assert_eq!(v, 7);
+    }
+
+    #[cfg(feature = "timer")]
+    #[test]
+    fn test_timed_future_is_spawnable_and_cancel_records_nothing() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let timer = Arc::new(Timer::new());
+        let fut = timer.time_async(|| async { 1 });
+        assert!(format!("{fut:?}").contains("TimedFuture"));
+        assert_eq!(rt.block_on(rt.spawn(fut)).unwrap(), 1);
+        assert_eq!(timer.count(), 1);
+        let dropped = timer.time_async(std::future::pending::<()>);
+        drop(dropped);
+        assert_eq!(timer.count(), 1);
+    }
+
+    #[cfg(all(
+        feature = "count",
+        feature = "gauge",
+        feature = "timer",
+        feature = "meter"
+    ))]
+    #[test]
+    fn test_metric_batch_flushes_every_kind() {
         let mut batch = AsyncMetricBatch::new();
-
-        batch.counter_inc("test", 5);
-        batch.gauge_set("test", 42.5);
-        batch.timer_record("test", 1000);
-        batch.rate_tick("test");
-
+        batch.counter_inc("c", 5);
+        batch.gauge_set("g", 42.5);
+        batch.timer_record("t", 1000);
+        batch.rate_tick("r", 3);
         assert_eq!(batch.len(), 4);
         assert!(!batch.is_empty());
-
-        let metrics = crate::MetricsCore::new();
-        batch.flush(&metrics);
-
-        assert_eq!(metrics.counter("test").get(), 5);
-        assert_eq!(metrics.gauge("test").get(), 42.5);
-        assert_eq!(metrics.timer("test").count(), 1);
-        metrics.rate("test").tick_n(1); // Simulate a tick
+        let core = MetricsCore::new();
+        batch.flush(&core);
+        assert!(batch.is_empty());
+        assert_eq!(core.counter("c").get(), 5);
+        assert!((core.gauge("g").get() - 42.5).abs() < f64::EPSILON);
+        assert_eq!(core.timer("t").count(), 1);
+        assert_eq!(core.rate("r").total(), 3);
     }
 
+    #[cfg(feature = "count")]
     #[test]
-    fn test_async_timer_guard_elapsed_and_stop() {
-        let timer = Timer::new();
-
-        let guard = timer.start_async();
-        // Exercise elapsed path
-        let _elapsed = guard.elapsed();
-        // Exercise explicit stop path
-        guard.stop();
-
-        assert_eq!(timer.count(), 1);
+    fn test_batcher_flushes_when_full_and_on_shutdown() {
+        let rt = runtime();
+        rt.block_on(async {
+            let core = Arc::new(MetricsCore::new());
+            let batcher = Arc::new(AsyncMetricsBatcher::new(
+                Arc::clone(&core),
+                Duration::from_secs(3600),
+                2,
+            ));
+            assert!(format!("{batcher:?}").contains("AsyncMetricsBatcher"));
+            batcher.record(|b| b.counter_inc("jobs", 1)).await;
+            assert_eq!(core.counter("jobs").get(), 0);
+            batcher.record(|b| b.counter_inc("jobs", 1)).await;
+            assert_eq!(core.counter("jobs").get(), 2, "flushed when full");
+            let flusher = Arc::clone(&batcher).start_flusher();
+            batcher.record(|b| b.counter_inc("jobs", 1)).await;
+            flusher.shutdown().await;
+            assert_eq!(core.counter("jobs").get(), 3, "flushed on shutdown");
+        });
     }
 
-    // Manually poll a TimedFuture that is immediately ready to cover the Ready branch
+    #[cfg(feature = "count")]
     #[test]
-    fn test_timed_future_manual_poll_ready() {
-        let timer = Timer::new();
-
-        // Create a future that is immediately ready without needing an async runtime
-        let mut timed = timer.time_async(|| async { 7 });
-
-        // Build a no-op waker/context to poll manually
-        fn dummy_raw_waker() -> std::task::RawWaker {
-            fn clone(_: *const ()) -> std::task::RawWaker {
-                dummy_raw_waker()
+    fn test_batcher_flushes_on_interval() {
+        let rt = runtime();
+        rt.block_on(async {
+            let core = Arc::new(MetricsCore::new());
+            let batcher = Arc::new(AsyncMetricsBatcher::new(
+                Arc::clone(&core),
+                Duration::from_millis(20),
+                1000,
+            ));
+            let flusher = Arc::clone(&batcher).start_flusher();
+            batcher.record(|b| b.counter_inc("tick", 1)).await;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while core.counter("tick").get() == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            fn wake(_: *const ()) {}
-            fn wake_by_ref(_: *const ()) {}
-            fn drop(_: *const ()) {}
-            const VTABLE: std::task::RawWakerVTable =
-                std::task::RawWakerVTable::new(clone, wake, wake_by_ref, drop);
-            std::task::RawWaker::new(std::ptr::null(), &VTABLE)
-        }
-
-        // SAFETY: `dummy_raw_waker` builds a no-op `RawWaker` whose vtable
-        // functions are all no-ops and the data pointer is always null. The
-        // waker is only used within this test to drive a single synchronous poll.
-        let waker = unsafe { std::task::Waker::from_raw(dummy_raw_waker()) };
-        let mut cx = std::task::Context::from_waker(&waker);
-
-        // SAFETY: `timed` is a local variable that is not moved for the
-        // remainder of this test function. Pinning it here satisfies the
-        // `Future::poll` contract.
-        let mut pinned = unsafe { std::pin::Pin::new_unchecked(&mut timed) };
-        match std::future::Future::poll(pinned.as_mut(), &mut cx) {
-            std::task::Poll::Ready(v) => assert_eq!(v, 7),
-            std::task::Poll::Pending => panic!("future should be immediately ready"),
-        }
-
-        // Ensure the timer recorded the elapsed time on Ready
-        assert_eq!(timer.count(), 1);
+            assert_eq!(core.counter("tick").get(), 1);
+            batcher.flush().await;
+            flusher.shutdown().await;
+        });
     }
 
-    #[cfg(feature = "async")]
-    #[tokio::test]
-    async fn test_timed_future() {
-        let timer = Timer::new();
-
-        let result = timer
-            .time_async(|| async {
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                42
-            })
-            .await;
-
-        assert_eq!(result, 42);
-        assert_eq!(timer.count(), 1);
-        assert!(timer.average() >= std::time::Duration::from_millis(9));
+    #[cfg(feature = "gauge")]
+    #[test]
+    fn test_runtime_metrics_are_recorded() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(3)
+            .build()
+            .unwrap();
+        let registry = Registry::new();
+        record_runtime_metrics(rt.handle(), &registry, "");
+        assert!((registry.gauge("tokio_workers").get() - 3.0).abs() < f64::EPSILON);
+        assert!(registry.gauge("tokio_alive_tasks").get() >= 0.0);
+        assert!(registry.gauge("tokio_global_queue_depth").get() >= 0.0);
     }
 }

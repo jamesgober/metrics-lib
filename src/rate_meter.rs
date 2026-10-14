@@ -1,322 +1,363 @@
-//! # Ultra-Fast Rate Meter
+//! Event-rate meter with sliding-window estimates.
 //!
-//! High-performance rate calculations with tumbling-window tracking.
+//! A [`RateMeter`] counts events and estimates how many happened over the
+//! last second, minute and hour, plus over one configurable *primary*
+//! window used by [`RateMeter::rate`] and the limit helpers.
 //!
-//! ## Features
+//! # How the estimate works
 //!
-//! - **Sub-microsecond tick operations** - Blazingly fast rate tracking
-//! - **Tumbling window counters** - Per-second, per-minute, and per-hour
-//!   event counters that reset atomically at each window boundary. This is a
-//!   *tumbling* (non-overlapping) window, not a sliding window.
-//! - **Multiple time windows** - Second, minute, hour rates
-//! - **Lock-free** - Never blocks, never waits
-//! - **Zero allocations** - Pure atomic operations
-//! - **Rate limiting** - Built-in support for throttling
+//! Each window keeps two counters: events in the current fixed slot and in
+//! the previous one. The sliding estimate is
 //!
-//! ## Accuracy & concurrency contract
+//! ```text
+//! previous × (1 − elapsed_fraction_of_current_slot) + current
+//! ```
 //!
-//! `RateMeter` trades a small amount of accuracy under contention for
-//! lock-free hot-path performance. Callers should be aware of the following
-//! best-effort semantics:
+//! the "sliding window counter" approximation. It does not drop to zero at
+//! every slot boundary (so `tick_if_under_limit` cannot admit twice the limit
+//! across a boundary), and it assumes events were spread evenly over the
+//! previous slot.
 //!
-//! - **Window-boundary event-loss bound.** When two or more threads cross a
-//!   second/minute/hour boundary concurrently, one thread wins the boundary
-//!   CAS and `store()`s its delta into the new window; threads that lost the
-//!   CAS fall back to `fetch_add()` — but if they were carrying ticks intended
-//!   for the prior window, those ticks land in the new window's counter
-//!   instead. The total event count (`total_events`) is always correct; only
-//!   the per-window counts may be off by up to `(num_threads − 1)` at each
-//!   boundary.
-//! - **`tick_if_under_limit` TOCTOU overshoot.** `can_allow` → `tick` is not
-//!   a single atomic operation. Multiple threads can each observe a passing
-//!   `can_allow` and then `tick`, briefly overshooting the limit by up to
-//!   `num_threads − 1` events. For strict admission control, see the
-//!   `TokenBucket` primitive (introduced in 0.9.5).
+//! Time comes from the monotonic [`Instant`] clock, so wall-clock steps (NTP,
+//! manual changes) do not disturb the windows. All counters are `u64`.
 //!
-//! Both effects are bounded and self-correcting on the next window roll. For
-//! observability use cases (dashboards, alerting) the error is well below the
-//! sampling noise floor; for billing or hard-limit enforcement, use a
-//! token-bucket primitive instead.
+//! # Accuracy under concurrency
+//!
+//! - [`RateMeter::total`] is always exact.
+//! - When threads race across a slot boundary, events recorded between the
+//!   boundary being claimed and the old slot being archived are attributed
+//!   to the previous slot. The error is bounded by the events recorded in
+//!   that window of a few nanoseconds and self-corrects one slot later.
+//! - [`RateMeter::tick_if_under_limit`] reads, then ticks: concurrent callers
+//!   can overshoot the limit by up to `threads − 1` events. For strict
+//!   admission use [`TokenBucket`](crate::TokenBucket).
 
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Ultra-fast rate meter with tumbling-window counters.
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+/// Smallest accepted primary window.
+pub const MIN_RATE_WINDOW: Duration = Duration::from_millis(1);
+
+/// One sliding-window counter.
+struct Window {
+    width_ns: u64,
+    /// Index (`now / width`) of the slot `current` belongs to.
+    slot: AtomicU64,
+    current: AtomicU64,
+    previous: AtomicU64,
+}
+
+impl Window {
+    const fn new(width_ns: u64) -> Self {
+        Self {
+            width_ns,
+            slot: AtomicU64::new(0),
+            current: AtomicU64::new(0),
+            previous: AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    fn record(&self, now_ns: u64, n: u64) {
+        let target = now_ns / self.width_ns;
+        let mut seen = self.slot.load(Ordering::Acquire);
+        while target > seen {
+            match self
+                .slot
+                .compare_exchange(seen, target, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    let finished = self.current.swap(0, Ordering::AcqRel);
+                    let carried = if target == seen + 1 { finished } else { 0 };
+                    self.previous.store(carried, Ordering::Release);
+                    break;
+                }
+                Err(actual) => seen = actual,
+            }
+        }
+        let _ = self.current.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Sliding estimate of events in the last `width` at `now_ns`.
+    #[allow(clippy::cast_precision_loss)] // statistics: f64 precision is the contract
+    fn estimate(&self, now_ns: u64) -> f64 {
+        let target = now_ns / self.width_ns;
+        let slot = self.slot.load(Ordering::Acquire);
+        let current = self.current.load(Ordering::Relaxed) as f64;
+        let previous = self.previous.load(Ordering::Relaxed) as f64;
+        let into_slot = (now_ns % self.width_ns) as f64 / self.width_ns as f64;
+        if target == slot {
+            previous * (1.0 - into_slot) + current
+        } else if target == slot + 1 {
+            current * (1.0 - into_slot)
+        } else if target < slot {
+            // A reader with an older clock reading than the last writer.
+            current
+        } else {
+            0.0
+        }
+    }
+
+    fn reset(&self, now_ns: u64) {
+        self.slot.store(now_ns / self.width_ns, Ordering::Release);
+        self.current.store(0, Ordering::Relaxed);
+        self.previous.store(0, Ordering::Relaxed);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn width_secs(&self) -> f64 {
+        self.width_ns as f64 / NANOS_PER_SEC as f64
+    }
+}
+
+/// Lock-free event counter with sliding-window rate estimates.
 ///
-/// Tracks events per second, per minute, and per hour with minimal overhead.
-/// Counters reset at each second/minute/hour boundary (tumbling windows, not
-/// sliding). Cache-line aligned to prevent false sharing.
+/// # Examples
+///
+/// ```
+/// use metrics_lib::RateMeter;
+///
+/// let requests = RateMeter::new();
+/// requests.tick();
+/// requests.tick_n(9);
+/// assert_eq!(requests.total(), 10);
+/// assert!(requests.rate() > 0.0);
+/// ```
 #[repr(align(64))]
 pub struct RateMeter {
-    /// Total events seen (monotonic counter)
-    total_events: AtomicU64,
-    /// Current second's events
-    current_second_events: AtomicU32,
-    /// Current minute's events  
-    current_minute_events: AtomicU32,
-    /// Current hour's events
-    current_hour_events: AtomicU32,
-    /// Last update timestamp (seconds since epoch)
-    last_second: AtomicU64,
-    /// Last minute timestamp
-    last_minute: AtomicU64,
-    /// Last hour timestamp
-    last_hour: AtomicU64,
-    /// Window size for rate calculations (nanoseconds)
-    window_ns: u64,
-    /// Creation timestamp
+    total: AtomicU64,
+    /// Primary window; `None` when it equals the one-second window.
+    primary: Option<Window>,
+    second: Window,
+    minute: Window,
+    hour: Window,
     created_at: Instant,
 }
 
-/// Rate statistics
+/// Point-in-time statistics for a [`RateMeter`].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct RateStats {
-    /// Total events recorded
+    /// Total events recorded.
     pub total_events: u64,
-    /// Events per second (current window)
+    /// Events per second over the primary window.
+    pub rate: f64,
+    /// Estimated events in the last second.
     pub per_second: f64,
-    /// Events per minute (current window)
+    /// Estimated events in the last minute.
     pub per_minute: f64,
-    /// Events per hour (current window)
+    /// Estimated events in the last hour.
     pub per_hour: f64,
-    /// Average rate since creation
+    /// Average events per second since creation.
     pub average_rate: f64,
-    /// Time since creation
+    /// Time since the meter was created.
     pub age: Duration,
-    /// Current window fill percentage
-    pub window_fill: f64,
+    /// Width of the primary window.
+    pub window: Duration,
 }
 
 impl RateMeter {
-    /// Create new rate meter with 1-second window
+    /// Create a meter whose primary window is one second.
     #[inline]
+    #[must_use]
     pub fn new() -> Self {
         Self::with_window(Duration::from_secs(1))
     }
 
-    /// Create rate meter with custom window size
-    #[inline]
+    /// Create a meter whose primary window ([`RateMeter::rate`] and the limit
+    /// helpers) is `window`, clamped to at least [`MIN_RATE_WINDOW`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::RateMeter;
+    /// use std::time::Duration;
+    ///
+    /// let m = RateMeter::with_window(Duration::from_secs(10));
+    /// assert_eq!(m.window(), Duration::from_secs(10));
+    /// ```
+    #[must_use]
     pub fn with_window(window: Duration) -> Self {
+        let width = crate::util::duration_to_nanos(window.max(MIN_RATE_WINDOW));
         Self {
-            total_events: AtomicU64::new(0),
-            current_second_events: AtomicU32::new(0),
-            current_minute_events: AtomicU32::new(0),
-            current_hour_events: AtomicU32::new(0),
-            last_second: AtomicU64::new(0),
-            last_minute: AtomicU64::new(0),
-            last_hour: AtomicU64::new(0),
-            window_ns: window.as_nanos() as u64,
+            total: AtomicU64::new(0),
+            primary: (width != NANOS_PER_SEC).then(|| Window::new(width)),
+            second: Window::new(NANOS_PER_SEC),
+            minute: Window::new(60 * NANOS_PER_SEC),
+            hour: Window::new(3600 * NANOS_PER_SEC),
             created_at: Instant::now(),
         }
     }
 
-    /// Record an event - THE FASTEST PATH
-    ///
-    /// This is optimized for maximum speed:
-    /// - Single atomic increment for total
-    /// - Lazy window updates only when needed
-    /// - Branch prediction friendly
-    #[inline(always)]
+    /// Width of the primary window.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        Duration::from_nanos(self.primary_window().width_ns)
+    }
+
+    fn primary_window(&self) -> &Window {
+        self.primary.as_ref().unwrap_or(&self.second)
+    }
+
+    #[inline]
+    fn now_ns(&self) -> u64 {
+        crate::util::duration_to_nanos(self.created_at.elapsed())
+    }
+
+    /// Record one event.
+    #[inline]
     pub fn tick(&self) {
         self.tick_n(1);
     }
 
-    /// Try to record a single event with overflow checks
+    /// Record `n` events.
+    #[inline]
+    pub fn tick_n(&self, n: u64) {
+        if n > 0 {
+            let _ = self.total.fetch_add(n, Ordering::Relaxed);
+            self.record_windows(self.now_ns(), n);
+        }
+    }
+
+    #[inline]
+    fn record_windows(&self, now_ns: u64, n: u64) {
+        if let Some(primary) = &self.primary {
+            primary.record(now_ns, n);
+        }
+        self.second.record(now_ns, n);
+        self.minute.record(now_ns, n);
+        self.hour.record(now_ns, n);
+    }
+
+    /// Record one event unless the total would overflow.
     ///
-    /// Returns `Err(MetricsError::Overflow)` if incrementing the total or any
-    /// current window counter would overflow. On success returns `Ok(())`.
+    /// # Errors
     ///
-    /// Example
+    /// Returns [`MetricsError::Overflow`] when the total is `u64::MAX`.
+    ///
+    /// # Examples
+    ///
     /// ```
-    /// use metrics_lib::{RateMeter, MetricsError};
+    /// use metrics_lib::RateMeter;
+    ///
     /// let m = RateMeter::new();
     /// m.try_tick().unwrap();
     /// assert_eq!(m.total(), 1);
     /// ```
-    #[inline(always)]
+    #[inline]
     pub fn try_tick(&self) -> Result<()> {
         self.try_tick_n(1)
     }
 
-    /// Record N events at once
-    #[inline(always)]
-    pub fn tick_n(&self, n: u32) {
-        if n == 0 {
-            return;
-        }
-
-        // Always increment total (fastest path)
-        self.total_events.fetch_add(n as u64, Ordering::Relaxed);
-
-        // Update windows (lazy - only when needed)
-        let now = self.get_unix_timestamp();
-        self.update_windows(now, n);
-    }
-
-    /// Try to record N events at once with overflow checks
+    /// Record `n` events unless the total would overflow.
     ///
-    /// - Returns `Ok(())` on success.
-    /// - Returns `Err(MetricsError::Overflow)` if incrementing any of the
-    ///   involved counters would overflow (`total_events`, `current_second_events`,
-    ///   `current_minute_events`, or `current_hour_events`).
+    /// # Errors
     ///
-    /// Example
-    /// ```
-    /// use metrics_lib::{RateMeter, MetricsError};
-    /// let m = RateMeter::new();
-    /// assert!(m.try_tick_n(5).is_ok());
-    /// assert_eq!(m.total(), 5);
-    /// ```
-    #[inline(always)]
-    pub fn try_tick_n(&self, n: u32) -> Result<()> {
+    /// Returns [`MetricsError::Overflow`] when `total + n` exceeds
+    /// `u64::MAX`; nothing is recorded.
+    pub fn try_tick_n(&self, n: u64) -> Result<()> {
         if n == 0 {
             return Ok(());
         }
-
-        // Check total_events overflow
-        let total = self.total_events.load(Ordering::Relaxed);
-        if total.checked_add(n as u64).is_none() {
-            return Err(MetricsError::Overflow);
-        }
-
-        // Pre-check window counters roughly (race-safe best-effort). Since windows reset, we
-        // only guard against immediate and obvious overflow.
-        let sec = self.current_second_events.load(Ordering::Relaxed);
-        if sec.checked_add(n).is_none() {
-            return Err(MetricsError::Overflow);
-        }
-        let min = self.current_minute_events.load(Ordering::Relaxed);
-        if min.checked_add(n).is_none() {
-            return Err(MetricsError::Overflow);
-        }
-        let hour = self.current_hour_events.load(Ordering::Relaxed);
-        if hour.checked_add(n).is_none() {
-            return Err(MetricsError::Overflow);
-        }
-
-        // Apply updates
-        self.total_events.fetch_add(n as u64, Ordering::Relaxed);
-        let now = self.get_unix_timestamp();
-        self.update_windows(now, n);
+        let _ = self
+            .total
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| t.checked_add(n))
+            .map_err(|_| MetricsError::Overflow)?;
+        self.record_windows(self.now_ns(), n);
         Ok(())
     }
 
-    /// Get current rate (events per second in current window)
-    ///
-    /// Note: This method is `#[must_use]`. The returned rate conveys the
-    /// current measurement; ignoring it may indicate a logic bug.
-    #[must_use]
+    /// Events per second, estimated over the primary window.
     #[inline]
+    #[must_use]
     pub fn rate(&self) -> f64 {
-        let now = self.get_unix_timestamp();
-        self.update_windows(now, 0);
-
-        let events = self.current_second_events.load(Ordering::Relaxed);
-        events as f64
+        self.rate_at(self.now_ns())
     }
 
-    /// Get rate per second
-    ///
-    /// Note: `#[must_use]` — see [`Self::rate`].
-    #[must_use]
+    fn rate_at(&self, now_ns: u64) -> f64 {
+        let w = self.primary_window();
+        w.estimate(now_ns) / w.width_secs()
+    }
+
+    /// Estimated events in the last second.
     #[inline]
+    #[must_use]
     pub fn rate_per_second(&self) -> f64 {
-        self.rate()
+        self.second.estimate(self.now_ns())
     }
 
-    /// Get rate per minute
-    ///
-    /// Note: `#[must_use]`. The returned value reflects the current window
-    /// state; dropping it may hide incorrect flow.
-    #[must_use]
+    /// Estimated events in the last minute.
     #[inline]
+    #[must_use]
     pub fn rate_per_minute(&self) -> f64 {
-        let now = self.get_unix_timestamp();
-        self.update_windows(now, 0);
-
-        let events = self.current_minute_events.load(Ordering::Relaxed);
-        events as f64
+        self.minute.estimate(self.now_ns())
     }
 
-    /// Get rate per hour
-    ///
-    /// Note: `#[must_use]`. The returned value reflects the current window
-    /// state; dropping it may hide incorrect flow.
-    #[must_use]
+    /// Estimated events in the last hour.
     #[inline]
+    #[must_use]
     pub fn rate_per_hour(&self) -> f64 {
-        let now = self.get_unix_timestamp();
-        self.update_windows(now, 0);
-
-        let events = self.current_hour_events.load(Ordering::Relaxed);
-        events as f64
+        self.hour.estimate(self.now_ns())
     }
 
-    /// Get total events since creation
-    ///
-    /// Note: `#[must_use]`. Total is often used for invariants and sanity
-    /// checks; ignoring it may indicate a bug.
-    #[must_use]
-    #[inline(always)]
-    pub fn total(&self) -> u64 {
-        self.total_events.load(Ordering::Relaxed)
-    }
-
-    /// Check if rate exceeds limit
-    ///
-    /// Note: `#[must_use]`. The boolean result determines control flow; if you
-    /// don't branch on it, consider whether the call is needed.
-    #[must_use]
+    /// Total events since creation (or the last reset). Always exact.
     #[inline]
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    /// `true` when [`RateMeter::rate`] is above `limit` events per second.
+    #[inline]
+    #[must_use]
     pub fn exceeds_rate(&self, limit: f64) -> bool {
         self.rate() > limit
     }
 
-    /// Check if we can allow N more events without exceeding limit
-    ///
-    /// Note: `#[must_use]`. The boolean result determines control flow; if you
-    /// don't branch on it, consider whether the call is needed.
-    #[must_use]
+    /// `true` when recording `n` more events now would keep the primary
+    /// window at or below `limit` events per second.
     #[inline]
-    pub fn can_allow(&self, n: u32, limit: f64) -> bool {
-        let current_rate = self.rate();
-        (current_rate + n as f64) <= limit
+    #[must_use]
+    pub fn can_allow(&self, n: u64, limit: f64) -> bool {
+        self.can_allow_at(self.now_ns(), n, limit)
     }
 
-    /// Rate limiting - tick only if under limit
-    ///
-    /// Note: `#[must_use]`. The boolean result indicates whether a tick was
-    /// recorded; ignoring it may hide throttling decisions.
-    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    fn can_allow_at(&self, now_ns: u64, n: u64, limit: f64) -> bool {
+        let w = self.primary_window();
+        (w.estimate(now_ns) + n as f64) / w.width_secs() <= limit
+    }
+
+    /// Record one event if [`RateMeter::can_allow`] says it fits under
+    /// `limit`. Returns whether it was recorded. See the module docs for the
+    /// concurrent overshoot bound.
     #[inline]
+    #[must_use = "the return value says whether the event was admitted"]
     pub fn tick_if_under_limit(&self, limit: f64) -> bool {
-        if self.can_allow(1, limit) {
-            self.tick();
-            true
-        } else {
-            false
-        }
+        self.tick_burst_if_under_limit(1, limit)
     }
 
-    /// Try to tick if under limit, with overflow checks
+    /// Checked form of [`RateMeter::tick_if_under_limit`].
     ///
-    /// Attempts to record a single event only if the current rate would not
-    /// exceed `limit`. Returns:
-    /// - `Ok(true)` if the event was recorded.
-    /// - `Ok(false)` if the event would exceed the limit (no change made).
-    /// - `Err(MetricsError::Overflow)` if counters would overflow while recording.
+    /// # Errors
     ///
-    /// Example
+    /// Returns [`MetricsError::Overflow`] when the event fits under the limit
+    /// but the total would overflow.
+    ///
+    /// # Examples
+    ///
     /// ```
     /// use metrics_lib::RateMeter;
+    ///
     /// let m = RateMeter::new();
-    /// assert!(m.try_tick_if_under_limit(10.0).unwrap());
+    /// assert_eq!(m.try_tick_if_under_limit(10.0), Ok(true));
     /// ```
-    #[inline]
     pub fn try_tick_if_under_limit(&self, limit: f64) -> Result<bool> {
-        if self.can_allow(1, limit) {
+        let now = self.now_ns();
+        if self.can_allow_at(now, 1, limit) {
             self.try_tick()?;
             Ok(true)
         } else {
@@ -324,190 +365,63 @@ impl RateMeter {
         }
     }
 
-    /// Burst rate limiting - allow N events if under limit
-    ///
-    /// Note: `#[must_use]`. The boolean result indicates whether a burst was
-    /// recorded; ignoring it may hide throttling decisions.
-    #[must_use]
+    /// Record `n` events if they all fit under `limit`. Returns whether they
+    /// were recorded.
     #[inline]
-    pub fn tick_burst_if_under_limit(&self, n: u32, limit: f64) -> bool {
-        if self.can_allow(n, limit) {
-            self.tick_n(n);
+    #[must_use = "the return value says whether the events were admitted"]
+    pub fn tick_burst_if_under_limit(&self, n: u64, limit: f64) -> bool {
+        let now = self.now_ns();
+        if self.can_allow_at(now, n, limit) {
+            let _ = self.total.fetch_add(n, Ordering::Relaxed);
+            self.record_windows(now, n);
             true
         } else {
             false
         }
     }
 
-    /// Reset all counters
-    #[inline]
+    /// Clear every counter and window.
     pub fn reset(&self) {
-        let now = self.get_unix_timestamp();
-
-        self.total_events.store(0, Ordering::SeqCst);
-        self.current_second_events.store(0, Ordering::SeqCst);
-        self.current_minute_events.store(0, Ordering::SeqCst);
-        self.current_hour_events.store(0, Ordering::SeqCst);
-        self.last_second.store(now, Ordering::SeqCst);
-        self.last_minute.store(now / 60, Ordering::SeqCst);
-        self.last_hour.store(now / 3600, Ordering::SeqCst);
+        let now = self.now_ns();
+        self.total.store(0, Ordering::Relaxed);
+        if let Some(primary) = &self.primary {
+            primary.reset(now);
+        }
+        self.second.reset(now);
+        self.minute.reset(now);
+        self.hour.reset(now);
     }
 
-    /// Get comprehensive statistics
-    ///
-    /// Note: `#[must_use]`. Statistics summarize current state; dropping the
-    /// result may indicate a logic bug.
+    /// Point-in-time statistics.
     #[must_use]
     pub fn stats(&self) -> RateStats {
-        let now = self.get_unix_timestamp();
-        self.update_windows(now, 0);
-
+        let now = self.now_ns();
         let total_events = self.total();
-        let per_second = self.current_second_events.load(Ordering::Relaxed) as f64;
-        let per_minute = self.current_minute_events.load(Ordering::Relaxed) as f64;
-        let per_hour = self.current_hour_events.load(Ordering::Relaxed) as f64;
-
-        let age = self.created_at.elapsed();
-        let average_rate = if age.as_secs_f64() > 0.0 {
-            total_events as f64 / age.as_secs_f64()
-        } else {
-            0.0
-        };
-
-        // Calculate window fill (how much of the window has data)
-        let window_fill = if self.window_ns > 0 {
-            let window_seconds = self.window_ns as f64 / 1_000_000_000.0;
-            let elapsed_in_window = age.as_secs_f64().min(window_seconds);
-            (elapsed_in_window / window_seconds * 100.0).min(100.0)
-        } else {
-            100.0
-        };
-
+        let age = Duration::from_nanos(now);
         RateStats {
             total_events,
-            per_second,
-            per_minute,
-            per_hour,
-            average_rate,
+            rate: self.rate_at(now),
+            per_second: self.second.estimate(now),
+            per_minute: self.minute.estimate(now),
+            per_hour: self.hour.estimate(now),
+            average_rate: crate::util::per_second(total_events, age),
             age,
-            window_fill,
+            window: self.window(),
         }
     }
 
-    /// Get age since creation
-    ///
-    /// Note: `#[must_use]`. Age is frequently used in rate calculations; don't
-    /// call this for side effects.
-    #[must_use]
+    /// Time since the meter was created.
     #[inline]
+    #[must_use]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
-    /// Check if rate meter is empty (no events recorded)
-    ///
-    /// Note: `#[must_use]`. The boolean result determines control flow.
-    #[must_use]
+    /// `true` when no event was recorded.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.total() == 0
-    }
-
-    // Internal helper methods
-
-    #[inline(always)]
-    fn get_unix_timestamp(&self) -> u64 {
-        // Use the current system time in seconds since UNIX_EPOCH.
-        // The previous implementation added `created_at.elapsed()` to now, which
-        // double-counted time and could skew window transitions.
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
-
-    #[inline]
-    fn update_windows(&self, now: u64, new_events: u32) {
-        // Update second window
-        let current_second = now;
-        let last_second = self.last_second.load(Ordering::Relaxed);
-
-        if current_second != last_second {
-            // New second - reset counter
-            if self
-                .last_second
-                .compare_exchange(
-                    last_second,
-                    current_second,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                self.current_second_events
-                    .store(new_events, Ordering::Relaxed);
-            } else {
-                // Another thread updated, add to current
-                self.current_second_events
-                    .fetch_add(new_events, Ordering::Relaxed);
-            }
-        } else if new_events > 0 {
-            // Same second - add events
-            self.current_second_events
-                .fetch_add(new_events, Ordering::Relaxed);
-        }
-
-        // Update minute window
-        let current_minute = now / 60;
-        let last_minute = self.last_minute.load(Ordering::Relaxed);
-
-        if current_minute != last_minute {
-            if self
-                .last_minute
-                .compare_exchange(
-                    last_minute,
-                    current_minute,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                self.current_minute_events
-                    .store(new_events, Ordering::Relaxed);
-            } else {
-                self.current_minute_events
-                    .fetch_add(new_events, Ordering::Relaxed);
-            }
-        } else if new_events > 0 {
-            self.current_minute_events
-                .fetch_add(new_events, Ordering::Relaxed);
-        }
-
-        // Update hour window
-        let current_hour = now / 3600;
-        let last_hour = self.last_hour.load(Ordering::Relaxed);
-
-        if current_hour != last_hour {
-            if self
-                .last_hour
-                .compare_exchange(
-                    last_hour,
-                    current_hour,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                self.current_hour_events
-                    .store(new_events, Ordering::Relaxed);
-            } else {
-                self.current_hour_events
-                    .fetch_add(new_events, Ordering::Relaxed);
-            }
-        } else if new_events > 0 {
-            self.current_hour_events
-                .fetch_add(new_events, Ordering::Relaxed);
-        }
     }
 }
 
@@ -529,32 +443,30 @@ impl std::fmt::Debug for RateMeter {
         let stats = self.stats();
         f.debug_struct("RateMeter")
             .field("total_events", &stats.total_events)
-            .field("per_second", &stats.per_second)
-            .field("per_minute", &stats.per_minute)
-            .field("average_rate", &stats.average_rate)
-            .field("age", &stats.age)
+            .field("rate", &stats.rate)
+            .field("window", &stats.window)
             .finish()
     }
 }
 
-// Thread safety
-// RateMeter is composed of atomic types (Send + Sync) and `Instant`/`u64`
-// (Send + Sync). The compiler derives Send + Sync automatically.
-
-/// Specialized rate meters for common use cases
+/// Rate meters specialised for request limiting and byte throughput.
 pub mod specialized {
-    use super::*;
+    use super::{AtomicU32, Ordering, RateMeter};
 
-    /// API rate limiter (requests per second)
+    /// Requests-per-second limiter built on [`RateMeter`].
+    ///
+    /// Best-effort: concurrent callers can overshoot the limit by up to
+    /// `threads − 1` requests. Use [`TokenBucket`](crate::TokenBucket) for a
+    /// hard limit.
     #[repr(align(64))]
     pub struct ApiRateLimiter {
         meter: RateMeter,
-        limit: AtomicU32, // requests per second
+        limit: AtomicU32,
     }
 
     impl ApiRateLimiter {
-        /// Create API rate limiter with requests per second limit
-        #[inline]
+        /// Create a limiter allowing `requests_per_second`.
+        #[must_use]
         pub fn new(requests_per_second: u32) -> Self {
             Self {
                 meter: RateMeter::new(),
@@ -562,52 +474,60 @@ pub mod specialized {
             }
         }
 
-        /// Try to make a request - returns true if allowed
+        /// Admit one request if it fits under the limit.
         #[inline]
+        #[must_use = "the return value says whether the request was admitted"]
         pub fn try_request(&self) -> bool {
-            let limit = self.limit.load(Ordering::Relaxed) as f64;
-            self.meter.tick_if_under_limit(limit)
+            self.meter
+                .tick_if_under_limit(f64::from(self.limit.load(Ordering::Relaxed)))
         }
 
-        /// Try to make N requests - returns true if all allowed
+        /// Admit `n` requests if they all fit under the limit.
         #[inline]
+        #[must_use = "the return value says whether the requests were admitted"]
         pub fn try_requests(&self, n: u32) -> bool {
-            let limit = self.limit.load(Ordering::Relaxed) as f64;
-            self.meter.tick_burst_if_under_limit(n, limit)
+            self.meter.tick_burst_if_under_limit(
+                u64::from(n),
+                f64::from(self.limit.load(Ordering::Relaxed)),
+            )
         }
 
-        /// Update the rate limit
+        /// Change the limit.
         #[inline]
         pub fn set_limit(&self, requests_per_second: u32) {
             self.limit.store(requests_per_second, Ordering::Relaxed);
         }
 
-        /// Get current limit
+        /// Current limit.
         #[inline]
+        #[must_use]
         pub fn get_limit(&self) -> u32 {
             self.limit.load(Ordering::Relaxed)
         }
 
-        /// Get current rate
+        /// Current request rate (events per second).
         #[inline]
+        #[must_use]
         pub fn current_rate(&self) -> f64 {
             self.meter.rate()
         }
 
-        /// Get total requests
+        /// Total admitted requests.
         #[inline]
+        #[must_use]
         pub fn total_requests(&self) -> u64 {
             self.meter.total()
         }
 
-        /// Check if currently over limit
+        /// `true` when the current rate is above the limit.
         #[inline]
+        #[must_use]
         pub fn is_over_limit(&self) -> bool {
-            let limit = self.limit.load(Ordering::Relaxed) as f64;
-            self.meter.rate() > limit
+            self.meter
+                .exceeds_rate(f64::from(self.limit.load(Ordering::Relaxed)))
         }
 
-        /// Reset the rate limiter
+        /// Clear the meter.
         #[inline]
         pub fn reset(&self) {
             self.meter.reset();
@@ -615,488 +535,325 @@ pub mod specialized {
     }
 
     impl Default for ApiRateLimiter {
+        /// 1000 requests per second.
         fn default() -> Self {
             Self::new(1000)
-        } // 1000 req/s default
+        }
     }
 
-    /// Throughput meter for measuring data rates
+    /// Byte-throughput meter built on [`RateMeter`].
     #[repr(align(64))]
+    #[derive(Default)]
     pub struct ThroughputMeter {
         meter: RateMeter,
     }
 
     impl ThroughputMeter {
-        /// Create new throughput meter
-        #[inline]
+        /// Create an empty meter.
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 meter: RateMeter::new(),
             }
         }
 
-        /// Record bytes transferred
-        #[inline(always)]
+        /// Record `bytes` transferred (any `u64`, no truncation).
+        #[inline]
         pub fn record_bytes(&self, bytes: u64) {
-            self.meter.tick_n(bytes as u32);
+            self.meter.tick_n(bytes);
         }
 
-        /// Get bytes per second
+        /// Bytes per second.
         #[inline]
+        #[must_use]
         pub fn bytes_per_second(&self) -> f64 {
             self.meter.rate()
         }
 
-        /// Get kilobytes per second
+        /// KiB per second.
         #[inline]
+        #[must_use]
         pub fn kb_per_second(&self) -> f64 {
             self.meter.rate() / 1024.0
         }
 
-        /// Get megabytes per second
+        /// MiB per second.
         #[inline]
+        #[must_use]
         pub fn mb_per_second(&self) -> f64 {
             self.meter.rate() / (1024.0 * 1024.0)
         }
 
-        /// Get gigabytes per second
+        /// GiB per second.
         #[inline]
+        #[must_use]
         pub fn gb_per_second(&self) -> f64 {
             self.meter.rate() / (1024.0 * 1024.0 * 1024.0)
         }
 
-        /// Get total bytes transferred
+        /// Total bytes recorded.
         #[inline]
+        #[must_use]
         pub fn total_bytes(&self) -> u64 {
             self.meter.total()
         }
 
-        /// Reset the throughput meter
+        /// Clear the meter.
         #[inline]
         pub fn reset(&self) {
             self.meter.reset();
         }
     }
-
-    impl Default for ThroughputMeter {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)] // exact comparisons of exactly representable values
 mod tests {
+    use super::specialized::{ApiRateLimiter, ThroughputMeter};
     use super::*;
-    use std::sync::Arc;
-    use std::thread;
+    use proptest::prelude::*;
+    use std::sync::{Arc, Barrier};
+
+    const SEC: u64 = NANOS_PER_SEC;
 
     #[test]
-    fn test_basic_operations() {
+    fn test_rate_meter_basic_operations() {
         let meter = RateMeter::new();
-
         assert!(meter.is_empty());
-        assert_eq!(meter.total(), 0);
-        assert_eq!(meter.rate(), 0.0);
-
         meter.tick();
-        assert!(!meter.is_empty());
-        assert_eq!(meter.total(), 1);
-
         meter.tick_n(5);
+        meter.tick_n(0);
         assert_eq!(meter.total(), 6);
+        assert!(!meter.is_empty());
+        assert!(meter.rate() > 0.0);
+        assert!(meter.rate_per_second() > 0.0);
+        assert!(meter.rate_per_minute() >= 6.0 - 1e-9);
+        assert!(meter.rate_per_hour() >= 6.0 - 1e-9);
+        assert!(format!("{meter}").contains("6 total"));
+        assert!(format!("{meter:?}").contains("RateMeter"));
+        assert!(meter.age() < Duration::from_secs(60));
     }
 
     #[test]
-    fn test_rate_calculations() {
-        let meter = RateMeter::new();
+    fn test_window_sliding_estimate_with_injected_clock() {
+        let w = Window::new(SEC);
+        w.record(0, 100);
+        assert_eq!(w.estimate(0), 100.0);
+        // Halfway into the next slot, half of the previous slot still counts.
+        w.record(SEC, 10);
+        assert_eq!(w.estimate(SEC + SEC / 2), 50.0 + 10.0);
+        // A reader one slot ahead sees the decaying tail of `current`.
+        assert_eq!(w.estimate(2 * SEC + SEC / 2), 5.0);
+        // Two or more empty slots later: nothing.
+        assert_eq!(w.estimate(5 * SEC), 0.0);
+        // A skipped slot drops the previous count.
+        w.record(5 * SEC, 1);
+        assert_eq!(w.estimate(5 * SEC), 1.0);
+        // A reader with an older clock sees the current slot.
+        assert_eq!(w.estimate(4 * SEC), 1.0);
+    }
 
-        // Record events rapidly in same second
-        for _ in 0..100 {
-            meter.tick();
+    #[test]
+    fn test_rate_does_not_reset_at_boundary_regression_ml014() {
+        // ML-014: rate() read ~0 right after each wall-clock second, letting
+        // tick_if_under_limit admit up to 2x the limit across a boundary.
+        let meter = RateMeter::new();
+        for i in 0..10 {
+            meter.record_windows(SEC - 1_000 + i, 1);
         }
-
-        let rate = meter.rate();
-        assert_eq!(rate, 100.0);
-        assert_eq!(meter.rate_per_second(), 100.0);
+        let just_after = SEC + 1;
+        assert!(meter.rate_at(just_after) > 9.9);
+        assert!(!meter.can_allow_at(just_after, 1, 10.0));
     }
 
     #[test]
-    fn test_multiple_windows() {
-        let meter = RateMeter::new();
-
-        // Record events
-        for _ in 0..60 {
-            meter.tick();
-        }
-
-        let stats = meter.stats();
-        assert_eq!(stats.total_events, 60);
-        assert_eq!(stats.per_second, 60.0);
-        assert_eq!(stats.per_minute, 60.0);
-        assert_eq!(stats.per_hour, 60.0);
+    fn test_custom_window_is_honoured_regression_ml014() {
+        let meter = RateMeter::with_window(Duration::from_secs(10));
+        assert_eq!(meter.window(), Duration::from_secs(10));
+        meter.record_windows(0, 50);
+        // 50 events in a 10 s window = 5 events/s.
+        assert_eq!(meter.rate_at(0), 5.0);
+        assert!(meter.can_allow_at(0, 50, 10.0));
+        assert!(!meter.can_allow_at(0, 51, 10.0));
+        assert_eq!(meter.stats().window, Duration::from_secs(10));
+        assert_eq!(
+            RateMeter::with_window(Duration::ZERO).window(),
+            MIN_RATE_WINDOW
+        );
     }
 
     #[test]
-    fn test_rate_limiting() {
+    fn test_counters_do_not_wrap_at_u32_regression_ml014() {
         let meter = RateMeter::new();
+        let big = u64::from(u32::MAX) + 10;
+        meter.tick_n(big);
+        assert_eq!(meter.total(), big);
+        assert!(meter.rate_per_hour() >= big as f64 * 0.99);
+    }
 
-        // Allow requests under limit
+    #[test]
+    fn test_rate_limiting_helpers() {
+        let meter = RateMeter::new();
         assert!(meter.tick_if_under_limit(10.0));
         assert!(meter.tick_if_under_limit(10.0));
-
-        // Add more to approach limit
         meter.tick_n(8);
-
-        // Should now be at/over limit
         assert!(!meter.tick_if_under_limit(10.0));
         assert!(meter.exceeds_rate(9.0));
         assert!(!meter.exceeds_rate(11.0));
+        assert!(!meter.can_allow(1, 10.0));
+        assert_eq!(meter.try_tick_if_under_limit(10.0), Ok(false));
+        assert_eq!(meter.try_tick_if_under_limit(1000.0), Ok(true));
     }
 
     #[test]
     fn test_burst_rate_limiting() {
         let meter = RateMeter::new();
-
-        // Try burst under limit
         assert!(meter.tick_burst_if_under_limit(5, 10.0));
-        assert_eq!(meter.total(), 5);
-
-        // Try burst that would exceed limit
         assert!(!meter.tick_burst_if_under_limit(10, 10.0));
-        assert_eq!(meter.total(), 5); // Should be unchanged
-
-        // Try smaller burst that fits
         assert!(meter.tick_burst_if_under_limit(3, 10.0));
         assert_eq!(meter.total(), 8);
     }
 
     #[test]
-    fn test_can_allow() {
+    fn test_try_tick_overflow() {
         let meter = RateMeter::new();
-
-        meter.tick_n(5);
-
-        assert!(meter.can_allow(3, 10.0)); // 5 + 3 = 8 <= 10
-        assert!(!meter.can_allow(6, 10.0)); // 5 + 6 = 11 > 10
-        assert!(meter.can_allow(5, 10.0)); // 5 + 5 = 10 <= 10
+        meter.try_tick().unwrap();
+        meter.try_tick_n(0).unwrap();
+        meter.total.store(u64::MAX, Ordering::Relaxed);
+        assert_eq!(meter.try_tick(), Err(MetricsError::Overflow));
+        assert_eq!(
+            meter.try_tick_if_under_limit(f64::MAX),
+            Err(MetricsError::Overflow)
+        );
     }
 
     #[test]
-    fn test_reset() {
-        let meter = RateMeter::new();
-
+    fn test_reset_and_stats() {
+        let meter = RateMeter::with_window(Duration::from_secs(2));
         meter.tick_n(100);
-        assert_eq!(meter.total(), 100);
-        assert!(meter.rate() > 0.0);
-
+        let stats = meter.stats();
+        assert_eq!(stats.total_events, 100);
+        assert!(stats.per_second > 0.0);
+        assert!(stats.rate > 0.0);
+        assert!(stats.average_rate > 0.0);
         meter.reset();
         assert_eq!(meter.total(), 0);
         assert_eq!(meter.rate(), 0.0);
+        assert_eq!(meter.rate_per_minute(), 0.0);
         assert!(meter.is_empty());
     }
 
     #[test]
-    fn test_statistics() {
-        let meter = RateMeter::new();
-
-        meter.tick_n(50);
-
-        let stats = meter.stats();
-        assert_eq!(stats.total_events, 50);
-        assert_eq!(stats.per_second, 50.0);
-        assert!(stats.average_rate > 0.0);
-        assert!(stats.age > Duration::from_nanos(0));
-        assert!(stats.window_fill >= 0.0);
-    }
-
-    #[test]
     fn test_api_rate_limiter() {
-        let limiter = specialized::ApiRateLimiter::new(10);
-
-        // Should allow requests under limit
+        let limiter = ApiRateLimiter::new(10);
         for _ in 0..10 {
             assert!(limiter.try_request());
         }
-
-        // Should deny request over limit
         assert!(!limiter.try_request());
-
-        // Check status - rate is at limit (10), not over it since request was denied
-        assert_eq!(limiter.current_rate(), 10.0);
         assert_eq!(limiter.total_requests(), 10);
-        assert_eq!(limiter.get_limit(), 10);
-
-        // Update limit
+        assert!(limiter.current_rate() > 0.0);
         limiter.set_limit(20);
         assert_eq!(limiter.get_limit(), 20);
-        assert!(!limiter.is_over_limit()); // Now under new limit
-
-        // Test burst requests
+        assert!(!limiter.is_over_limit());
         limiter.reset();
         assert!(limiter.try_requests(5));
+        assert!(!limiter.try_requests(20));
         assert_eq!(limiter.total_requests(), 5);
-
-        assert!(!limiter.try_requests(20)); // Would exceed limit
-        assert_eq!(limiter.total_requests(), 5); // Unchanged
+        assert_eq!(ApiRateLimiter::default().get_limit(), 1000);
     }
 
     #[test]
-    fn test_throughput_meter() {
-        let meter = specialized::ThroughputMeter::new();
-
-        meter.record_bytes(1024); // 1 KB
-        assert_eq!(meter.bytes_per_second(), 1024.0);
-        assert_eq!(meter.kb_per_second(), 1.0);
-        assert_eq!(meter.total_bytes(), 1024);
-
-        meter.record_bytes(1024 * 1024); // 1 MB more
-        assert_eq!(meter.total_bytes(), 1024 + 1024 * 1024);
-        assert!((meter.mb_per_second() - 1.001).abs() < 0.01);
+    fn test_throughput_meter_keeps_full_u64_regression_ml006() {
+        // ML-006: record_bytes truncated to u32, so 5 GiB counted as 1 GiB.
+        let meter = ThroughputMeter::new();
+        let five_gib = 5 * 1024 * 1024 * 1024u64;
+        meter.record_bytes(five_gib);
+        meter.record_bytes(4 * 1024 * 1024 * 1024);
+        assert_eq!(meter.total_bytes(), five_gib + 4 * 1024 * 1024 * 1024);
+        assert!(meter.bytes_per_second() > 0.0);
+        assert!(meter.kb_per_second() > 0.0);
+        assert!(meter.mb_per_second() > 0.0);
+        assert!(meter.gb_per_second() > 0.0);
+        meter.reset();
+        assert_eq!(meter.total_bytes(), 0);
+        assert_eq!(ThroughputMeter::default().total_bytes(), 0);
     }
 
     #[test]
-    fn test_high_concurrency() {
+    fn test_rate_meter_concurrent_total_is_exact() {
         let meter = Arc::new(RateMeter::new());
-        let num_threads = 50;
-        let ticks_per_thread = 1000;
-
-        let handles: Vec<_> = (0..num_threads)
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
             .map(|_| {
                 let meter = Arc::clone(&meter);
-                thread::spawn(move || {
-                    for _ in 0..ticks_per_thread {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let _ = barrier.wait();
+                    for _ in 0..20_000 {
                         meter.tick();
                     }
                 })
             })
             .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
-
-        assert_eq!(meter.total(), num_threads * ticks_per_thread);
-
-        let stats = meter.stats();
-        assert!(stats.average_rate > 0.0);
-        assert_eq!(stats.total_events, num_threads * ticks_per_thread);
+        assert_eq!(meter.total(), 160_000);
+        // The hour window holds every event (the test runs well within it).
+        assert!((meter.rate_per_hour() - 160_000.0).abs() < 1.0);
     }
 
     #[test]
-    fn test_concurrent_rate_limiting() {
-        let limiter = Arc::new(specialized::ApiRateLimiter::new(100));
-        let num_threads = 20;
-
-        let handles: Vec<_> = (0..num_threads)
+    fn test_window_roll_under_contention_stays_consistent() {
+        // Threads race across many slot boundaries with an injected clock.
+        // The slot index must end on the last slot, and the two visible slots
+        // can never hold more than was recorded in total.
+        let w = Arc::new(Window::new(1_000));
+        let barrier = Arc::new(Barrier::new(4));
+        let handles: Vec<_> = (0..4u64)
             .map(|_| {
-                let limiter = Arc::clone(&limiter);
-                thread::spawn(move || {
-                    let mut successful = 0;
-                    for _ in 0..10 {
-                        if limiter.try_request() {
-                            successful += 1;
-                        }
+                let w = Arc::clone(&w);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let _ = barrier.wait();
+                    for t in 0..10_000u64 {
+                        w.record(t * 10, 1);
                     }
-                    successful
                 })
             })
             .collect();
-
-        let total_successful: i32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-
-        // Should be limited to around 100 requests.
-        // Allow tolerance for concurrent overshoot across varied CI runners.
-        // Cap by total attempts (num_threads * 10) and relax to up to 2x the limit in extreme cases.
-        // Under coverage instrumentation, timing can skew more; keep a generous bound.
-        let total_attempts = num_threads * 10;
-        let strict_cap = 2 * 100; // 2x limit
-        let upper_bound = if cfg!(coverage) {
-            total_attempts.min(strict_cap.max(160))
-        } else {
-            total_attempts.min(strict_cap)
-        };
-        assert!(
-            total_successful <= upper_bound,
-            "total_successful={total_successful} > upper_bound={upper_bound}",
-        );
-        assert!(
-            total_successful >= 90,
-            "total_successful={total_successful} < lower_bound=90",
-        ); // Account for timing variations
-    }
-
-    #[test]
-    fn test_display_and_debug() {
-        let meter = RateMeter::new();
-        meter.tick_n(42);
-
-        let display_str = format!("{meter}");
-        assert!(display_str.contains("RateMeter"));
-        assert!(display_str.contains("42 total"));
-
-        let debug_str = format!("{meter:?}");
-        assert!(debug_str.contains("RateMeter"));
-        assert!(debug_str.contains("total_events"));
-    }
-
-    #[test]
-    fn test_custom_window() {
-        let meter = RateMeter::with_window(Duration::from_secs(5));
-
-        meter.tick_n(10);
-        assert_eq!(meter.total(), 10);
-        assert_eq!(meter.rate(), 10.0);
-
-        let stats = meter.stats();
-        assert!(stats.window_fill >= 0.0);
-    }
-
-    // New tests for try_ variants and overflow/error conditions
-    #[test]
-    fn test_try_tick_and_try_tick_n_ok() {
-        let meter = RateMeter::new();
-        assert!(meter.try_tick().is_ok());
-        assert!(meter.try_tick_n(5).is_ok());
-        assert_eq!(meter.total(), 6);
-    }
-
-    #[test]
-    fn test_try_tick_n_total_overflow() {
-        let meter = RateMeter::new();
-        // Directly set near overflow
-        meter.total_events.store(u64::MAX - 1, Ordering::Relaxed);
-        // Adding 2 should overflow
-        let err = meter.try_tick_n(2).unwrap_err();
-        assert_eq!(err, MetricsError::Overflow);
-    }
-
-    #[test]
-    fn test_try_tick_n_window_overflow() {
-        let meter = RateMeter::new();
-        // Force current windows to near overflow and ensure we are in the same second/minute/hour
-        let now = meter.get_unix_timestamp();
-        meter.last_second.store(now, Ordering::Relaxed);
-        meter.last_minute.store(now / 60, Ordering::Relaxed);
-        meter.last_hour.store(now / 3600, Ordering::Relaxed);
-
-        meter
-            .current_second_events
-            .store(u32::MAX - 1, Ordering::Relaxed);
-        meter
-            .current_minute_events
-            .store(u32::MAX - 1, Ordering::Relaxed);
-        meter
-            .current_hour_events
-            .store(u32::MAX - 1, Ordering::Relaxed);
-
-        // Any n >= 2 should trip the pre-check overflow guard
-        let err = meter.try_tick_n(2).unwrap_err();
-        assert_eq!(err, MetricsError::Overflow);
-    }
-
-    #[test]
-    fn test_try_tick_if_under_limit() {
-        let meter = RateMeter::new();
-        // Under limit should tick and return true
-        assert!(meter.try_tick_if_under_limit(10.0).unwrap());
-        // Drive rate up close to limit
-        assert!(meter.try_tick_n(8).is_ok());
-        // Now at 9; allow one more at limit 10
-        assert!(meter.try_tick_if_under_limit(10.0).unwrap());
-        // Next should be denied (would exceed)
-        assert!(!meter.try_tick_if_under_limit(10.0).unwrap());
-    }
-}
-
-#[cfg(all(test, feature = "bench-tests", not(tarpaulin), not(coverage)))]
-#[allow(unused_imports)]
-mod benchmarks {
-    use super::*;
-    use std::time::Instant;
-
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_rate_meter_tick() {
-        let meter = RateMeter::new();
-        let iterations = 10_000_000;
-
-        let start = Instant::now();
-        for _ in 0..iterations {
-            meter.tick();
+        for h in handles {
+            h.join().unwrap();
         }
-        let elapsed = start.elapsed();
-
-        println!(
-            "RateMeter tick: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check; Criterion is the regression detector.
-        assert_eq!(meter.total(), iterations);
+        let last_slot = w.slot.load(Ordering::Relaxed);
+        assert_eq!(last_slot, 99);
+        let visible = w.current.load(Ordering::Relaxed) + w.previous.load(Ordering::Relaxed);
+        assert!(visible >= 1, "the last recorded event must be visible");
+        assert!(visible <= 4 * 10_000, "{visible}");
+        assert!(w.estimate(99_990) <= 40_000.0);
     }
 
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_rate_meter_tick_n() {
-        let meter = RateMeter::new();
-        let iterations = 1_000_000;
-
-        let start = Instant::now();
-        for i in 0..iterations {
-            meter.tick_n((i % 10) + 1);
+    proptest! {
+        #[test]
+        fn prop_estimate_never_exceeds_events_in_two_slots(
+            events in proptest::collection::vec((0u64..10 * SEC, 1u64..1000), 1..100)
+        ) {
+            let mut sorted = events.clone();
+            sorted.sort_unstable();
+            let w = Window::new(SEC);
+            for (t, n) in &sorted {
+                w.record(*t, *n);
+            }
+            let now = sorted.last().map_or(0, |(t, _)| *t);
+            let slot = now / SEC;
+            let recent: u64 = sorted
+                .iter()
+                .filter(|(t, _)| *t / SEC + 1 >= slot)
+                .map(|(_, n)| n)
+                .sum();
+            let est = w.estimate(now);
+            prop_assert!(est >= 0.0);
+            prop_assert!(est <= recent as f64 + 1e-6, "est {} recent {}", est, recent);
         }
-        let elapsed = start.elapsed();
-
-        println!(
-            "RateMeter tick_n: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check; Criterion is the regression detector.
-    }
-
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_rate_calculation() {
-        let meter = RateMeter::new();
-
-        // Fill with data
-        meter.tick_n(1000);
-
-        let iterations = 1_000_000;
-        let start = Instant::now();
-
-        for _ in 0..iterations {
-            let _ = meter.rate();
-        }
-
-        let elapsed = start.elapsed();
-        println!(
-            "RateMeter rate: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check; Criterion is the regression detector.
-    }
-
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_api_rate_limiter() {
-        let limiter = specialized::ApiRateLimiter::new(1_000_000); // High limit
-        let iterations = 1_000_000;
-
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = limiter.try_request();
-        }
-        let elapsed = start.elapsed();
-
-        println!(
-            "ApiRateLimiter try_request: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check; Criterion is the regression detector.
     }
 }

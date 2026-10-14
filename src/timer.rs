@@ -1,436 +1,391 @@
-//! # High-Precision Timer
+//! Duration statistics: count, sum, minimum and maximum.
 //!
-//! Ultra-fast timer implementation with nanosecond precision.
+//! [`Timer::record_ns`] is two relaxed `fetch_add`s plus a minimum/maximum
+//! update that only writes when a new extreme is seen. Exporters render a
+//! timer as a Prometheus/OpenMetrics `summary` (`_count`, `_sum` in seconds)
+//! plus `_min` / `_max` gauges. For percentiles use a
+//! [`Histogram`](crate::Histogram) or a [`Summary`](crate::Summary)
+//! (feature `histogram`).
 //!
-//! ## Features
+//! # Guards
 //!
-//! - **Nanosecond precision** - Using system high-resolution clocks
-//! - **Zero allocation** - Pure stack operations
-//! - **RAII support** - Automatic timing with scoped timers
-//! - **Lock-free** - Never blocks, never waits
-//! - **Cache optimized** - Aligned to prevent false sharing
+//! [`Timer::start`] returns a [`RunningTimer`] that borrows the timer and
+//! records on drop. When the timer is a temporary — for example
+//! `core.timer("x")` — use [`Timer::start_owned`], which keeps the `Arc` alive
+//! inside an [`OwnedTimerGuard`]:
+//!
+//! ```
+//! use metrics_lib::MetricsCore;
+//!
+//! let core = MetricsCore::new();
+//! {
+//!     let _guard = core.timer("db_query").start_owned();
+//!     // ... timed work ...
+//! } // recorded here
+//! assert_eq!(core.timer("db_query").count(), 1);
+//! ```
+//!
+//! # Overflow
+//!
+//! The running sum is a 128-bit value (a 64-bit nanosecond sum plus a wrap
+//! counter), so it does not overflow in practice: 2^64 ns is 584 years of
+//! accumulated time and the wrap counter multiplies that by another 2^64.
+//! Durations longer than `u64::MAX` nanoseconds are clamped.
 
 use crate::{MetricsError, Result};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// High-precision timer with automatic statistics
+/// Lock-free duration statistics.
 ///
-/// Optimized for sub-10ns timing operations.
-/// Cache-line aligned to prevent false sharing.
+/// Cache-line aligned so the hot fields of two timers never share a line.
+///
+/// # Examples
+///
+/// ```
+/// use metrics_lib::Timer;
+/// use std::time::Duration;
+///
+/// let t = Timer::new();
+/// t.record(Duration::from_millis(3));
+/// t.record(Duration::from_millis(5));
+/// assert_eq!(t.count(), 2);
+/// assert_eq!(t.average(), Duration::from_millis(4));
+/// ```
 #[repr(align(64))]
 pub struct Timer {
-    /// Number of timing samples
     count: AtomicU64,
-    /// Sum of all recorded durations in nanoseconds
+    /// Low 64 bits of the nanosecond sum.
     total_nanos: AtomicU64,
-    /// Minimum duration in nanoseconds
+    /// Number of times `total_nanos` wrapped (the high 64 bits of the sum).
+    total_wraps: AtomicU64,
     min_nanos: AtomicU64,
-    /// Maximum duration in nanoseconds
     max_nanos: AtomicU64,
-    /// Creation timestamp
     created_at: Instant,
 }
 
-/// Running timer instance (RAII)
-///
-/// When dropped, automatically records the elapsed time
-pub struct RunningTimer<'a> {
-    timer: &'a Timer,
-    start_time: Instant,
-    stopped: bool,
-}
-
-/// Timer statistics
+/// Point-in-time statistics for a [`Timer`].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct TimerStats {
-    /// Total number of timing samples
+    /// Number of recorded durations.
     pub count: u64,
-    /// Sum of all durations
+    /// Sum of recorded durations (saturates at `Duration::MAX`).
     pub total: Duration,
-    /// Average duration
+    /// Mean duration (`Duration::ZERO` when empty).
     pub average: Duration,
-    /// Minimum duration recorded
+    /// Smallest duration recorded (`Duration::ZERO` when empty).
     pub min: Duration,
-    /// Maximum duration recorded
+    /// Largest duration recorded (`Duration::ZERO` when empty).
     pub max: Duration,
-    /// Time since timer creation
+    /// Time since the timer was created.
     pub age: Duration,
-    /// Rate of samples per second
+    /// Recordings per second since creation.
     pub rate_per_second: f64,
 }
 
+pub(crate) use crate::util::{duration_from_nanos_u128, duration_to_nanos};
+
 impl Timer {
-    /// Create new timer
+    /// Create an empty timer.
     #[inline]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             count: AtomicU64::new(0),
             total_nanos: AtomicU64::new(0),
+            total_wraps: AtomicU64::new(0),
             min_nanos: AtomicU64::new(u64::MAX),
             max_nanos: AtomicU64::new(0),
             created_at: Instant::now(),
         }
     }
 
-    /// Try to record nanoseconds directly with overflow checks
+    /// Start timing. The guard records the elapsed time when it is dropped
+    /// or [stopped](RunningTimer::stop).
+    #[inline]
+    #[must_use = "dropping the guard immediately records a near-zero duration"]
+    pub fn start(&self) -> RunningTimer<'_> {
+        RunningTimer {
+            timer: self,
+            start_time: Instant::now(),
+            armed: true,
+        }
+    }
+
+    /// Start timing with a guard that owns a clone of the `Arc`.
     ///
-    /// Returns `Err(MetricsError::Overflow)` if adding `duration_ns` would
-    /// overflow internal counters (`total_nanos` or `count`). On success
-    /// updates min/max as needed.
+    /// Use this when the timer is a temporary, such as the value returned by
+    /// `MetricsCore::timer`; [`Timer::start`] would borrow from the temporary
+    /// and fail to compile (E0716).
+    #[inline]
+    #[must_use = "dropping the guard immediately records a near-zero duration"]
+    pub fn start_owned(self: &Arc<Self>) -> OwnedTimerGuard {
+        OwnedTimerGuard {
+            timer: Arc::clone(self),
+            start_time: Instant::now(),
+            armed: true,
+        }
+    }
+
+    /// Record a duration (clamped to `u64::MAX` nanoseconds).
+    #[inline]
+    pub fn record(&self, duration: Duration) {
+        self.record_ns(duration_to_nanos(duration));
+    }
+
+    /// Record a duration given in nanoseconds.
+    #[inline]
+    pub fn record_ns(&self, duration_ns: u64) {
+        self.add_total(duration_ns);
+        let _ = self.count.fetch_add(1, Ordering::Relaxed);
+        self.update_min(duration_ns);
+        self.update_max(duration_ns);
+    }
+
+    /// Record a duration, refusing when the sample count would overflow.
     ///
-    /// Example
+    /// # Errors
+    ///
+    /// Returns [`MetricsError::Overflow`] when `count` is already
+    /// `u64::MAX`; nothing is recorded.
+    #[inline]
+    pub fn try_record(&self, duration: Duration) -> Result<()> {
+        self.try_record_ns(duration_to_nanos(duration))
+    }
+
+    /// Nanosecond form of [`Timer::try_record`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetricsError::Overflow`] when `count` is already
+    /// `u64::MAX`; nothing is recorded.
+    ///
+    /// # Examples
+    ///
     /// ```
-    /// use metrics_lib::{Timer, MetricsError};
+    /// use metrics_lib::Timer;
+    ///
     /// let t = Timer::new();
     /// t.try_record_ns(1_000).unwrap();
     /// assert_eq!(t.count(), 1);
-    /// assert!(matches!(t.try_record_ns(u64::MAX), Err(MetricsError::Overflow)));
     /// ```
-    #[inline(always)]
+    #[inline]
     pub fn try_record_ns(&self, duration_ns: u64) -> Result<()> {
-        // Check total_nanos overflow
-        let total = self.total_nanos.load(Ordering::Relaxed);
-        if total.checked_add(duration_ns).is_none() {
-            return Err(MetricsError::Overflow);
-        }
-
-        // Check count overflow
-        let cnt = self.count.load(Ordering::Relaxed);
-        if cnt == u64::MAX {
-            return Err(MetricsError::Overflow);
-        }
-
-        // Apply updates
-        self.total_nanos.fetch_add(duration_ns, Ordering::Relaxed);
-        self.count.fetch_add(1, Ordering::Relaxed);
-
-        // Update min and max
+        // Claim the count first: the check and the increment are one atomic
+        // step, so concurrent callers cannot push it past u64::MAX.
+        let _ = self
+            .count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_add(1))
+            .map_err(|_| MetricsError::Overflow)?;
+        self.add_total(duration_ns);
         self.update_min(duration_ns);
         self.update_max(duration_ns);
         Ok(())
     }
 
-    /// Start timing - returns RAII guard that auto-records on drop
-    #[inline(always)]
-    pub fn start(&self) -> RunningTimer<'_> {
-        RunningTimer {
-            timer: self,
-            start_time: Instant::now(),
-            stopped: false,
-        }
-    }
-
-    /// Record a duration manually
-    #[inline]
-    pub fn record(&self, duration: Duration) {
-        let duration_ns = duration.as_nanos() as u64;
-        self.record_ns(duration_ns);
-    }
-
-    /// Try to record a duration with overflow checks
-    ///
-    /// Returns `Err(MetricsError::Overflow)` if adding this sample would overflow
-    /// internal counters.
-    ///
-    /// Example
-    /// ```
-    /// use metrics_lib::{Timer, MetricsError};
-    /// use std::time::Duration;
-    /// let t = Timer::new();
-    /// assert!(t.try_record(Duration::from_millis(1)).is_ok());
-    /// ```
-    #[inline]
-    pub fn try_record(&self, duration: Duration) -> Result<()> {
-        let duration_ns = duration.as_nanos() as u64;
-        self.try_record_ns(duration_ns)
-    }
-
-    /// Record nanoseconds directly - fastest path
-    #[inline(always)]
-    pub fn record_ns(&self, duration_ns: u64) {
-        // Update total and count
-        self.total_nanos.fetch_add(duration_ns, Ordering::Relaxed);
-        self.count.fetch_add(1, Ordering::Relaxed);
-
-        // Update min (compare-and-swap loop)
-        self.update_min(duration_ns);
-
-        // Update max (compare-and-swap loop)
-        self.update_max(duration_ns);
-    }
-
-    /// Record multiple durations at once
+    /// Record several durations, updating each field once.
     #[inline]
     pub fn record_batch(&self, durations: &[Duration]) {
         if durations.is_empty() {
             return;
         }
-
-        let mut total_ns: u64 = 0;
-        let mut local_min = u64::MAX;
-        let mut local_max = 0u64;
-
-        for duration in durations {
-            let ns = duration.as_nanos() as u64;
-            // Saturate on overflow rather than panic in debug builds. Real
-            // durations stay well clear of u64::MAX ns (~584 years); this is
-            // hardening against adversarial inputs.
-            total_ns = total_ns.saturating_add(ns);
-            local_min = local_min.min(ns);
-            local_max = local_max.max(ns);
-        }
-
-        self.total_nanos.fetch_add(total_ns, Ordering::Relaxed);
-        self.count
-            .fetch_add(durations.len() as u64, Ordering::Relaxed);
-
-        if local_min < u64::MAX {
-            self.update_min(local_min);
-        }
-        if local_max > 0 {
-            self.update_max(local_max);
-        }
+        let (sum, min, max) = summarize(durations);
+        self.add_total_u128(sum);
+        let _ = self.count.fetch_add(
+            u64::try_from(durations.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.update_min(min);
+        self.update_max(max);
     }
 
-    /// Try to record multiple durations at once with overflow checks
+    /// [`Timer::record_batch`] that refuses when the sample count would
+    /// overflow.
     ///
-    /// Returns `Err(MetricsError::Overflow)` if the aggregated additions would
-    /// overflow internal counters. Updates min/max based on batch extrema.
+    /// # Errors
     ///
-    /// Example
+    /// Returns [`MetricsError::Overflow`] when adding `durations.len()` would
+    /// overflow `count`; nothing is recorded.
+    ///
+    /// # Examples
+    ///
     /// ```
     /// use metrics_lib::Timer;
     /// use std::time::Duration;
+    ///
     /// let t = Timer::new();
     /// t.try_record_batch(&[Duration::from_micros(5), Duration::from_micros(10)]).unwrap();
     /// assert_eq!(t.count(), 2);
     /// ```
-    #[inline]
     pub fn try_record_batch(&self, durations: &[Duration]) -> Result<()> {
         if durations.is_empty() {
             return Ok(());
         }
-
-        let mut total_ns: u64 = 0;
-        let mut local_min = u64::MAX;
-        let mut local_max = 0u64;
-
-        for d in durations {
-            let ns = d.as_nanos() as u64;
-            total_ns = total_ns.checked_add(ns).ok_or(MetricsError::Overflow)?;
-            local_min = local_min.min(ns);
-            local_max = local_max.max(ns);
-        }
-
-        // Check counters will not overflow
-        let current_total = self.total_nanos.load(Ordering::Relaxed);
-        if current_total.checked_add(total_ns).is_none() {
-            return Err(MetricsError::Overflow);
-        }
-        let current_count = self.count.load(Ordering::Relaxed);
-        let add_count = durations.len() as u64;
-        if current_count.checked_add(add_count).is_none() {
-            return Err(MetricsError::Overflow);
-        }
-
-        // Apply updates
-        self.total_nanos.fetch_add(total_ns, Ordering::Relaxed);
-        self.count.fetch_add(add_count, Ordering::Relaxed);
-        if local_min < u64::MAX {
-            self.update_min(local_min);
-        }
-        if local_max > 0 {
-            self.update_max(local_max);
-        }
+        let n = u64::try_from(durations.len()).map_err(|_| MetricsError::Overflow)?;
+        let _ = self
+            .count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_add(n))
+            .map_err(|_| MetricsError::Overflow)?;
+        let (sum, min, max) = summarize(durations);
+        self.add_total_u128(sum);
+        self.update_min(min);
+        self.update_max(max);
         Ok(())
     }
 
-    /// Get current count of samples
-    ///
-    /// Note: `#[must_use]`. The count informs control flow and sanity checks;
-    /// ignoring it may indicate a logic bug.
+    #[inline]
+    fn add_total(&self, ns: u64) {
+        let prev = self.total_nanos.fetch_add(ns, Ordering::Relaxed);
+        if prev.checked_add(ns).is_none() {
+            let _ = self.total_wraps.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[inline]
+    fn add_total_u128(&self, sum: u128) {
+        #[allow(clippy::cast_possible_truncation)] // intentional: keep the low 64 bits
+        let low = sum as u64;
+        let high = u64::try_from(sum >> 64).unwrap_or(u64::MAX);
+        self.add_total(low);
+        if high > 0 {
+            let _ = self.total_wraps.fetch_add(high, Ordering::Release);
+        }
+    }
+
+    /// Number of recorded durations.
+    #[inline]
     #[must_use]
-    #[inline(always)]
     pub fn count(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }
 
-    /// Get total accumulated time
+    /// Sum of recorded durations in nanoseconds, as a 128-bit value.
     ///
-    /// Note: `#[must_use]`. The total duration is commonly used for reporting
-    /// and ratios; dropping it may indicate a bug.
+    /// Not linearizable with a concurrent wrap of the low word: in the few
+    /// nanoseconds between the low word wrapping and the wrap counter being
+    /// bumped, a reader can see a sum 2^64 ns too low. That window opens once
+    /// per 584 years of accumulated duration.
     #[must_use]
-    #[inline]
-    pub fn total(&self) -> Duration {
-        Duration::from_nanos(self.total_nanos.load(Ordering::Relaxed))
-    }
-
-    /// Get average duration
-    ///
-    /// Note: `#[must_use]`. The average is a derived metric; call this only
-    /// when you consume the result.
-    #[must_use]
-    #[inline]
-    pub fn average(&self) -> Duration {
-        let count = self.count();
-        let total_ns = self.total_nanos.load(Ordering::Relaxed);
-        total_ns
-            .checked_div(count)
-            .map(Duration::from_nanos)
-            .unwrap_or(Duration::ZERO)
-    }
-
-    /// Get minimum duration
-    ///
-    /// Note: `#[must_use]`. Often used for alerting/thresholds.
-    #[must_use]
-    #[inline]
-    pub fn min(&self) -> Duration {
-        let min_ns = self.min_nanos.load(Ordering::Relaxed);
-        if min_ns == u64::MAX {
-            Duration::ZERO
-        } else {
-            Duration::from_nanos(min_ns)
+    pub fn total_nanos(&self) -> u128 {
+        // Read the wrap counter on both sides of the low word and retry when
+        // it moved in between.
+        loop {
+            let wraps = self.total_wraps.load(Ordering::Acquire);
+            let low = self.total_nanos.load(Ordering::Acquire);
+            if self.total_wraps.load(Ordering::Acquire) == wraps {
+                return (u128::from(wraps) << 64) | u128::from(low);
+            }
         }
     }
 
-    /// Get maximum duration
-    ///
-    /// Note: `#[must_use]`. Often used for alerting/thresholds.
-    #[must_use]
+    /// Sum of recorded durations (saturates at `Duration::MAX`).
     #[inline]
+    #[must_use]
+    pub fn total(&self) -> Duration {
+        duration_from_nanos_u128(self.total_nanos())
+    }
+
+    /// Mean duration, or `Duration::ZERO` when nothing was recorded.
+    #[inline]
+    #[must_use]
+    pub fn average(&self) -> Duration {
+        match self.count() {
+            0 => Duration::ZERO,
+            count => duration_from_nanos_u128(self.total_nanos() / u128::from(count)),
+        }
+    }
+
+    /// Smallest recorded duration, or `Duration::ZERO` when empty.
+    #[inline]
+    #[must_use]
+    pub fn min(&self) -> Duration {
+        match self.min_nanos.load(Ordering::Relaxed) {
+            u64::MAX if self.count() == 0 => Duration::ZERO,
+            ns => Duration::from_nanos(ns),
+        }
+    }
+
+    /// Largest recorded duration, or `Duration::ZERO` when empty.
+    #[inline]
+    #[must_use]
     pub fn max(&self) -> Duration {
         Duration::from_nanos(self.max_nanos.load(Ordering::Relaxed))
     }
 
-    /// Reset all statistics
-    #[inline]
+    /// Clear every statistic.
+    ///
+    /// Recordings racing with the reset may be partially kept.
     pub fn reset(&self) {
-        self.total_nanos.store(0, Ordering::SeqCst);
-        self.count.store(0, Ordering::SeqCst);
-        self.min_nanos.store(u64::MAX, Ordering::SeqCst);
-        self.max_nanos.store(0, Ordering::SeqCst);
+        self.count.store(0, Ordering::Relaxed);
+        self.total_nanos.store(0, Ordering::Relaxed);
+        self.total_wraps.store(0, Ordering::Release);
+        self.min_nanos.store(u64::MAX, Ordering::Relaxed);
+        self.max_nanos.store(0, Ordering::Relaxed);
     }
 
-    /// Get comprehensive statistics
-    ///
-    /// Note: `#[must_use]`. Statistics summarize current state; dropping the
-    /// result may indicate a logic bug.
+    /// Point-in-time statistics.
     #[must_use]
     pub fn stats(&self) -> TimerStats {
         let count = self.count();
-        let total_ns = self.total_nanos.load(Ordering::Relaxed);
-        let min_ns = self.min_nanos.load(Ordering::Relaxed);
-        let max_ns = self.max_nanos.load(Ordering::Relaxed);
-
-        let total = Duration::from_nanos(total_ns);
-        let average = total_ns
-            .checked_div(count)
-            .map(Duration::from_nanos)
-            .unwrap_or(Duration::ZERO);
-
-        let min = if min_ns == u64::MAX {
-            Duration::ZERO
-        } else {
-            Duration::from_nanos(min_ns)
-        };
-
-        let max = Duration::from_nanos(max_ns);
-        let age = self.created_at.elapsed();
-
-        let rate_per_second = if age.as_secs_f64() > 0.0 {
-            count as f64 / age.as_secs_f64()
-        } else {
-            0.0
-        };
-
+        let age = self.age();
         TimerStats {
             count,
-            total,
-            average,
-            min,
-            max,
+            total: self.total(),
+            average: self.average(),
+            min: self.min(),
+            max: self.max(),
             age,
-            rate_per_second,
+            rate_per_second: crate::util::per_second(count, age),
         }
     }
 
-    /// Get age since creation
-    ///
-    /// Note: `#[must_use]`. Age is used in rate calculations; don't call for
-    /// side effects.
-    #[must_use]
+    /// Time since the timer was created.
     #[inline]
+    #[must_use]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
-    /// Check if timer has recorded any samples
-    ///
-    /// Note: `#[must_use]`. The boolean result determines control flow.
-    #[must_use]
+    /// `true` when nothing was recorded.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.count() == 0
     }
 
-    /// Get samples per second rate
-    ///
-    /// Note: `#[must_use]`. Derived metric; consume the result.
-    #[must_use]
+    /// Recordings per second since creation.
     #[inline]
+    #[must_use]
     pub fn rate_per_second(&self) -> f64 {
-        let age_seconds = self.age().as_secs_f64();
-        if age_seconds > 0.0 {
-            self.count() as f64 / age_seconds
-        } else {
-            0.0
-        }
+        crate::util::per_second(self.count(), self.age())
     }
 
-    // Internal helper methods
-
-    #[inline(always)]
+    #[inline]
     fn update_min(&self, value: u64) {
-        loop {
-            let current = self.min_nanos.load(Ordering::Relaxed);
-            if value >= current {
-                break; // Current min is already smaller
-            }
-
-            match self.min_nanos.compare_exchange_weak(
-                current,
-                value,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(_) => continue, // Retry
-            }
+        if value < self.min_nanos.load(Ordering::Relaxed) {
+            let _ = self.min_nanos.fetch_min(value, Ordering::Relaxed);
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn update_max(&self, value: u64) {
-        loop {
-            let current = self.max_nanos.load(Ordering::Relaxed);
-            if value <= current {
-                break; // Current max is already larger
-            }
-
-            match self.max_nanos.compare_exchange_weak(
-                current,
-                value,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(_) => continue, // Retry
-            }
+        if value > self.max_nanos.load(Ordering::Relaxed) {
+            let _ = self.max_nanos.fetch_max(value, Ordering::Relaxed);
         }
     }
+}
+
+/// `(sum, min, max)` of a non-empty slice, in nanoseconds.
+fn summarize(durations: &[Duration]) -> (u128, u64, u64) {
+    durations
+        .iter()
+        .map(|d| duration_to_nanos(*d))
+        .fold((0u128, u64::MAX, 0u64), |(sum, min, max), ns| {
+            (sum + u128::from(ns), min.min(ns), max.max(ns))
+        })
 }
 
 impl Default for Timer {
@@ -442,8 +397,12 @@ impl Default for Timer {
 
 impl std::fmt::Display for Timer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let stats = self.stats();
-        write!(f, "Timer(count: {}, avg: {:?})", stats.count, stats.average)
+        write!(
+            f,
+            "Timer(count: {}, avg: {:?})",
+            self.count(),
+            self.average()
+        )
     }
 }
 
@@ -456,97 +415,173 @@ impl std::fmt::Debug for Timer {
             .field("average", &stats.average)
             .field("min", &stats.min)
             .field("max", &stats.max)
-            .field("rate_per_second", &stats.rate_per_second)
             .finish()
     }
 }
 
-// Timer is composed of `AtomicU64` fields (Send + Sync) and `Instant`
-// (Send + Sync). The compiler derives Send + Sync automatically.
+/// Guard returned by [`Timer::start`]; records the elapsed time on drop.
+#[must_use = "dropping the guard immediately records a near-zero duration"]
+pub struct RunningTimer<'a> {
+    timer: &'a Timer,
+    start_time: Instant,
+    armed: bool,
+}
 
-/// Running timer implementation (RAII)
-impl<'a> RunningTimer<'a> {
-    /// Get elapsed time without stopping the timer
-    ///
-    /// Note: `#[must_use]`. The elapsed duration is typically used in logic or
-    /// reporting; ignoring it may indicate a bug.
-    #[must_use]
+impl RunningTimer<'_> {
+    /// Time elapsed so far, without recording.
     #[inline]
+    #[must_use]
     pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()
     }
 
-    /// Stop the timer manually and record the duration
+    /// Record the elapsed time now and return it.
     #[inline]
-    pub fn stop(mut self) {
-        if !self.stopped {
-            let elapsed = self.start_time.elapsed();
-            self.timer.record(elapsed);
-            self.stopped = true;
-        }
-        // Timer is consumed here, preventing double recording
+    #[allow(clippy::must_use_candidate)] // the duration is optional information
+    pub fn stop(mut self) -> Duration {
+        let elapsed = self.start_time.elapsed();
+        self.timer.record(elapsed);
+        self.armed = false;
+        elapsed
+    }
+
+    /// Drop the guard without recording (for example when the timed
+    /// operation was cancelled).
+    #[inline]
+    pub fn discard(mut self) {
+        self.armed = false;
     }
 }
 
-impl<'a> Drop for RunningTimer<'a> {
+impl Drop for RunningTimer<'_> {
     #[inline]
     fn drop(&mut self) {
-        if !self.stopped {
-            let elapsed = self.start_time.elapsed();
-            self.timer.record(elapsed);
+        if self.armed {
+            self.timer.record(self.start_time.elapsed());
         }
     }
 }
 
-/// Utility functions for timing
-pub mod utils {
-    use super::*;
+impl std::fmt::Debug for RunningTimer<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningTimer")
+            .field("elapsed", &self.elapsed())
+            .finish_non_exhaustive()
+    }
+}
 
-    /// Time a function execution and return the result + duration
+/// Guard returned by [`Timer::start_owned`]; owns an `Arc<Timer>` and
+/// records the elapsed time on drop.
+#[must_use = "dropping the guard immediately records a near-zero duration"]
+pub struct OwnedTimerGuard {
+    timer: Arc<Timer>,
+    start_time: Instant,
+    armed: bool,
+}
+
+impl OwnedTimerGuard {
+    /// Time elapsed so far, without recording.
+    #[inline]
+    #[must_use]
+    pub fn elapsed(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+
+    /// Record the elapsed time now and return it.
+    #[inline]
+    #[allow(clippy::must_use_candidate)] // the duration is optional information
+    pub fn stop(mut self) -> Duration {
+        let elapsed = self.start_time.elapsed();
+        self.timer.record(elapsed);
+        self.armed = false;
+        elapsed
+    }
+
+    /// Drop the guard without recording.
+    #[inline]
+    pub fn discard(mut self) {
+        self.armed = false;
+    }
+
+    /// The timer this guard records into.
+    #[inline]
+    #[must_use]
+    pub fn timer(&self) -> &Arc<Timer> {
+        &self.timer
+    }
+}
+
+impl Drop for OwnedTimerGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if self.armed {
+            self.timer.record(self.start_time.elapsed());
+        }
+    }
+}
+
+impl std::fmt::Debug for OwnedTimerGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedTimerGuard")
+            .field("elapsed", &self.elapsed())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Free functions for timing closures.
+pub mod utils {
+    use super::{RunningTimer, Timer};
+    use std::time::{Duration, Instant};
+
+    /// Run `f` and return its result together with the elapsed time.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::timer_utils::time_fn;
+    ///
+    /// let (value, elapsed) = time_fn(|| 6 * 7);
+    /// assert_eq!(value, 42);
+    /// assert!(elapsed.as_secs() < 1);
+    /// ```
     #[inline]
     pub fn time_fn<T>(f: impl FnOnce() -> T) -> (T, Duration) {
         let start = Instant::now();
         let result = f();
-        let duration = start.elapsed();
-        (result, duration)
+        (result, start.elapsed())
     }
 
-    /// Time a function and record the duration in the provided timer
+    /// Run `f` and record its duration into `timer`.
     #[inline]
     pub fn time_and_record<T>(timer: &Timer, f: impl FnOnce() -> T) -> T {
-        let _timing_guard = timer.start();
-        f() // Timer automatically records when guard drops
+        let _guard = timer.start();
+        f()
     }
 
-    /// Create a scoped timer that records to the provided timer
+    /// Start a guard on `timer` (same as [`Timer::start`]).
     #[inline]
+    #[must_use = "dropping the guard immediately records a near-zero duration"]
     pub fn scoped_timer(timer: &Timer) -> RunningTimer<'_> {
         timer.start()
     }
-
-    /// Benchmark a function with multiple iterations
-    pub fn benchmark<F>(name: &str, iterations: usize, f: F) -> Duration
-    where
-        F: Fn(),
-    {
-        let timer = Timer::new();
-
-        for _ in 0..iterations {
-            let _guard = timer.start();
-            f();
-        }
-
-        let stats = timer.stats();
-        println!(
-            "Benchmark '{}': {} iterations, avg: {:?}, total: {:?}",
-            name, iterations, stats.average, stats.total
-        );
-
-        stats.average
-    }
 }
 
-/// Convenience macros
+/// Time a block and record its duration into a timer.
+///
+/// The first argument is any expression with a `start()` method returning a
+/// guard (a `Timer`, `&Timer`, `Arc<Timer>`, …). Evaluates to the block's
+/// value.
+///
+/// # Examples
+///
+/// ```
+/// use metrics_lib::{time_block, Timer};
+///
+/// let timer = Timer::new();
+/// let answer = time_block!(timer, { 6 * 7 });
+/// assert_eq!(answer, 42);
+/// assert_eq!(timer.count(), 1);
+/// ```
 #[macro_export]
 macro_rules! time_block {
     ($timer:expr, $block:block) => {{
@@ -555,402 +590,241 @@ macro_rules! time_block {
     }};
 }
 
-#[macro_export]
-/// Macro to time a function call and record the result
+/// Evaluate an expression and return `(value, elapsed)`.
 ///
 /// # Examples
 ///
-/// ```rust
-/// # use metrics_lib::time_fn;
+/// ```
+/// use metrics_lib::time_fn;
+///
 /// let (result, duration) = time_fn!({
-///     // Some work to time
-///     std::thread::sleep(std::time::Duration::from_millis(10));
+///     std::thread::sleep(std::time::Duration::from_millis(2));
 ///     "done"
 /// });
-/// assert!(duration >= std::time::Duration::from_millis(10));
+/// assert!(duration >= std::time::Duration::from_millis(2));
 /// assert_eq!(result, "done");
 /// ```
+#[macro_export]
 macro_rules! time_fn {
     ($func:expr) => {{
-        let start = std::time::Instant::now();
+        let start = ::std::time::Instant::now();
         let result = $func;
-        let duration = start.elapsed();
-        (result, duration)
+        (result, start.elapsed())
     }};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use proptest::prelude::*;
+    use std::sync::Barrier;
     use std::thread;
 
     #[test]
-    fn test_basic_operations() {
+    fn test_timer_basic_operations() {
         let timer = Timer::new();
-
         assert!(timer.is_empty());
-        assert_eq!(timer.count(), 0);
-        assert_eq!(timer.total(), Duration::ZERO);
         assert_eq!(timer.average(), Duration::ZERO);
-
-        // Record a duration
+        assert_eq!(timer.min(), Duration::ZERO);
+        assert_eq!(timer.max(), Duration::ZERO);
         timer.record(Duration::from_millis(100));
-
-        assert!(!timer.is_empty());
-        assert_eq!(timer.count(), 1);
-        assert!(timer.total() >= Duration::from_millis(99)); // Account for precision
-        assert!(timer.average() >= Duration::from_millis(99));
+        timer.record(Duration::from_millis(300));
+        assert_eq!(timer.count(), 2);
+        assert_eq!(timer.total(), Duration::from_millis(400));
+        assert_eq!(timer.average(), Duration::from_millis(200));
+        assert_eq!(timer.min(), Duration::from_millis(100));
+        assert_eq!(timer.max(), Duration::from_millis(300));
+        timer.reset();
+        assert!(timer.is_empty());
+        assert_eq!(timer.total(), Duration::ZERO);
     }
 
     #[test]
-    fn test_running_timer() {
+    fn test_timer_zero_duration_min_is_zero() {
         let timer = Timer::new();
+        timer.record_ns(0);
+        assert_eq!(timer.min(), Duration::ZERO);
+        assert_eq!(timer.count(), 1);
+    }
 
+    #[test]
+    fn test_running_timer_records_on_drop_and_stop() {
+        let timer = Timer::new();
         {
-            let running = timer.start();
-            thread::sleep(Duration::from_millis(10));
-            assert!(running.elapsed() >= Duration::from_millis(9));
-        } // Automatically recorded when dropped
-
-        assert_eq!(timer.count(), 1);
-        assert!(timer.average() >= Duration::from_millis(9));
+            let guard = timer.start();
+            assert!(guard.elapsed() < Duration::from_secs(5));
+            assert!(format!("{guard:?}").contains("RunningTimer"));
+        }
+        let elapsed = timer.start().stop();
+        assert!(elapsed < Duration::from_secs(5));
+        assert_eq!(timer.count(), 2);
+        timer.start().discard();
+        assert_eq!(timer.count(), 2);
     }
 
     #[test]
-    fn test_manual_stop() {
-        let timer = Timer::new();
-
-        let running = timer.start();
-        thread::sleep(Duration::from_millis(5));
-        running.stop(); // Manual stop
-
-        assert_eq!(timer.count(), 1);
-        assert!(timer.average() >= Duration::from_millis(4));
+    fn test_owned_guard_works_on_temporaries_regression_ml020() {
+        let shared = Arc::new(Timer::new());
+        let make = || Arc::clone(&shared);
+        {
+            // `make().start()` would not compile here (E0716).
+            let guard = make().start_owned();
+            assert!(Arc::ptr_eq(guard.timer(), &shared));
+            assert!(format!("{guard:?}").contains("OwnedTimerGuard"));
+            assert!(guard.elapsed() < Duration::from_secs(5));
+        }
+        assert_eq!(shared.count(), 1);
+        let _ = make().start_owned().stop();
+        make().start_owned().discard();
+        assert_eq!(shared.count(), 2);
     }
 
     #[test]
-    fn test_batch_recording() {
+    fn test_timer_batch_recording() {
         let timer = Timer::new();
-
-        let durations = vec![
+        timer.record_batch(&[
             Duration::from_millis(10),
             Duration::from_millis(20),
             Duration::from_millis(30),
-        ];
-
-        timer.record_batch(&durations);
-
+        ]);
+        timer.record_batch(&[]);
         assert_eq!(timer.count(), 3);
+        assert_eq!(timer.average(), Duration::from_millis(20));
         assert_eq!(timer.min(), Duration::from_millis(10));
         assert_eq!(timer.max(), Duration::from_millis(30));
-        assert_eq!(timer.total(), Duration::from_millis(60));
-        assert_eq!(timer.average(), Duration::from_millis(20));
-    }
-
-    #[test]
-    fn test_min_max_tracking() {
-        let timer = Timer::new();
-
-        timer.record(Duration::from_millis(50));
-        timer.record(Duration::from_millis(10));
-        timer.record(Duration::from_millis(100));
-        timer.record(Duration::from_millis(25));
-
+        timer.try_record_batch(&[]).unwrap();
+        timer.try_record_batch(&[Duration::from_millis(1)]).unwrap();
+        assert_eq!(timer.min(), Duration::from_millis(1));
         assert_eq!(timer.count(), 4);
-        assert_eq!(timer.min(), Duration::from_millis(10));
-        assert_eq!(timer.max(), Duration::from_millis(100));
+    }
 
-        // Check average is approximately 46.25ms (allowing for precision differences)
-        let avg = timer.average();
-        assert!(
-            avg >= Duration::from_millis(46) && avg <= Duration::from_millis(47),
-            "Average {avg:?} should be between 46ms and 47ms",
+    #[test]
+    fn test_timer_sum_survives_u64_wrap_regression_ml021() {
+        // ML-021: the nanosecond sum used to wrap silently, corrupting _sum.
+        let timer = Timer::new();
+        timer.record_ns(u64::MAX);
+        timer.record_ns(10);
+        let expected = u128::from(u64::MAX) + 10;
+        assert_eq!(timer.total_nanos(), expected);
+        assert_eq!(timer.total(), duration_from_nanos_u128(expected));
+        assert_eq!(timer.average(), duration_from_nanos_u128(expected / 2));
+        timer.record_batch(&[Duration::MAX, Duration::MAX]);
+        assert_eq!(timer.total_nanos(), expected + 2 * u128::from(u64::MAX));
+    }
+
+    #[test]
+    fn test_timer_huge_durations_clamp_instead_of_wrapping() {
+        let timer = Timer::new();
+        timer.record(Duration::MAX);
+        assert_eq!(timer.max(), Duration::from_nanos(u64::MAX));
+        assert_eq!(duration_to_nanos(Duration::MAX), u64::MAX);
+        assert_eq!(duration_from_nanos_u128(u128::MAX).as_secs(), u64::MAX);
+    }
+
+    #[test]
+    fn test_timer_try_record_rejects_count_overflow() {
+        let timer = Timer::new();
+        timer.count.store(u64::MAX, Ordering::Relaxed);
+        assert_eq!(timer.try_record_ns(1), Err(MetricsError::Overflow));
+        assert_eq!(
+            timer.try_record(Duration::from_nanos(1)),
+            Err(MetricsError::Overflow)
         );
+        assert_eq!(
+            timer.try_record_batch(&[Duration::from_nanos(1)]),
+            Err(MetricsError::Overflow)
+        );
+        assert_eq!(timer.total_nanos(), 0);
     }
 
     #[test]
-    fn test_reset() {
+    fn test_timer_stats_and_formatting() {
         let timer = Timer::new();
-
-        timer.record(Duration::from_millis(100));
-        assert!(!timer.is_empty());
-
-        timer.reset();
-        assert!(timer.is_empty());
-        assert_eq!(timer.count(), 0);
-        assert_eq!(timer.total(), Duration::ZERO);
-        assert_eq!(timer.min(), Duration::ZERO);
-        assert_eq!(timer.max(), Duration::ZERO);
-    }
-
-    #[test]
-    fn test_statistics() {
-        let timer = Timer::new();
-
-        for i in 1..=10 {
-            timer.record(Duration::from_millis(i * 10));
-        }
-
+        timer.record(Duration::from_millis(5));
         let stats = timer.stats();
-        assert_eq!(stats.count, 10);
-        assert_eq!(stats.total, Duration::from_millis(550)); // Sum of 10+20+...+100
-        assert_eq!(stats.average, Duration::from_millis(55));
-        assert_eq!(stats.min, Duration::from_millis(10));
-        assert_eq!(stats.max, Duration::from_millis(100));
-        assert!(stats.rate_per_second > 0.0);
-        assert!(stats.age > Duration::from_nanos(0));
-    }
-
-    #[test]
-    fn test_high_concurrency() {
-        let timer = Arc::new(Timer::new());
-        let num_threads = 50;
-        let recordings_per_thread = 1000;
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|thread_id| {
-                let timer = Arc::clone(&timer);
-                thread::spawn(move || {
-                    for i in 0..recordings_per_thread {
-                        // Record varying durations
-                        let duration_ms = (thread_id * recordings_per_thread + i) % 100 + 1;
-                        timer.record(Duration::from_millis(duration_ms));
-                    }
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        let stats = timer.stats();
-        assert_eq!(stats.count, num_threads * recordings_per_thread);
-        assert!(stats.min > Duration::ZERO);
-        assert!(stats.max > Duration::ZERO);
-        assert!(stats.average > Duration::ZERO);
-        assert!(stats.rate_per_second > 0.0);
-    }
-
-    #[test]
-    fn test_concurrent_timing() {
-        let timer = Arc::new(Timer::new());
-        let num_threads = 20;
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|_| {
-                let timer = Arc::clone(&timer);
-                thread::spawn(move || {
-                    for _ in 0..100 {
-                        let _guard = timer.start();
-                        thread::sleep(Duration::from_micros(100)); // Very short sleep
-                    }
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        let stats = timer.stats();
-        assert_eq!(stats.count, num_threads * 100);
-        assert!(stats.average >= Duration::from_micros(50)); // Should be at least 50μs
-    }
-
-    #[test]
-    fn test_utility_functions() {
-        // Test time_fn
-        let (result, duration) = utils::time_fn(|| {
-            thread::sleep(Duration::from_millis(10));
-            42
-        });
-
-        assert_eq!(result, 42);
-        assert!(duration >= Duration::from_millis(9));
-
-        // Test time_and_record
-        let timer = Timer::new();
-        let result = utils::time_and_record(&timer, || {
-            thread::sleep(Duration::from_millis(5));
-            "hello"
-        });
-
-        assert_eq!(result, "hello");
-        assert_eq!(timer.count(), 1);
-        assert!(timer.average() >= Duration::from_millis(4));
-
-        // Test benchmark
-        let avg_duration = utils::benchmark("test_function", 10, || {
-            thread::sleep(Duration::from_millis(1));
-        });
-
-        assert!(avg_duration >= Duration::from_millis(1));
-    }
-
-    #[test]
-    fn test_macros() {
-        let timer = Timer::new();
-
-        // Test time_block macro
-        let result = time_block!(timer, {
-            thread::sleep(Duration::from_millis(5));
-            "result"
-        });
-
-        assert_eq!(result, "result");
-        assert_eq!(timer.count(), 1);
-
-        // Test time_fn macro
-        let (result, duration) = time_fn!({
-            thread::sleep(Duration::from_millis(2));
-            100
-        });
-
-        assert_eq!(result, 100);
-        assert!(duration >= Duration::from_millis(1));
-    }
-
-    #[test]
-    fn test_display_and_debug() {
-        let timer = Timer::new();
-        timer.record(Duration::from_millis(100));
-
-        let display_str = format!("{timer}");
-        assert!(display_str.contains("Timer"));
-        assert!(display_str.contains("count: 1"));
-
-        let debug_str = format!("{timer:?}");
-        assert!(debug_str.contains("Timer"));
-        assert!(debug_str.contains("count"));
-        assert!(debug_str.contains("average"));
-    }
-
-    #[test]
-    fn test_record_batch_saturates_on_overflow_without_panic() {
-        // 0.9.2 regression: record_batch summed batch nanoseconds with `+=`,
-        // which panicked in debug builds on overflow. It now uses
-        // `saturating_add` so adversarial input cannot crash the recorder.
-        let timer = Timer::new();
-        let huge = Duration::from_nanos(u64::MAX / 2);
-        // Three of these would overflow u64; expect saturating behavior, no panic.
-        timer.record_batch(&[huge, huge, huge]);
-        assert_eq!(timer.count(), 3);
-        // total_nanos saturated at u64::MAX
-        assert_eq!(timer.total().as_nanos() as u64, u64::MAX);
-    }
-
-    #[test]
-    fn test_empty_batch_handling() {
-        let timer = Timer::new();
-        timer.record_batch(&[]);
-        assert!(timer.is_empty());
-
-        assert!(timer.try_record_batch(&[]).is_ok());
-        assert!(timer.is_empty());
-    }
-
-    #[test]
-    fn test_nested_timers_and_rate() {
-        let timer = Timer::new();
-
-        {
-            let _outer = timer.start();
-            thread::sleep(Duration::from_millis(2));
-            {
-                let _inner = timer.start();
-                thread::sleep(Duration::from_millis(2));
-            } // inner drop -> record
-        } // outer drop -> record
-
-        // Two recordings (outer + inner)
-        assert_eq!(timer.count(), 2);
-
-        // Non-zero rate per second (age should be > 0)
-        let rate = timer.rate_per_second();
-        assert!(rate >= 0.0);
-
-        // stats.rate_per_second should mirror rate_per_second()
-        let stats = timer.stats();
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.average, Duration::from_millis(5));
         assert!(stats.rate_per_second >= 0.0);
-    }
-}
-
-#[cfg(all(test, feature = "bench-tests", not(tarpaulin), not(coverage)))]
-#[allow(unused_imports)]
-mod benchmarks {
-    use super::*;
-    use std::time::Instant;
-
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
-    #[test]
-    fn bench_timer_record() {
-        let timer = Timer::new();
-        let duration = Duration::from_nanos(1000);
-        let iterations = 1_000_000;
-
-        let start = Instant::now();
-        for _ in 0..iterations {
-            timer.record(duration);
-        }
-        let elapsed = start.elapsed();
-
-        println!(
-            "Timer record: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check; Criterion is the regression detector.
-        assert_eq!(timer.count(), iterations);
+        assert!(timer.rate_per_second() >= 0.0);
+        assert!(format!("{timer}").contains("count: 1"));
+        assert!(format!("{timer:?}").contains("Timer"));
+        assert!(Timer::default().is_empty());
     }
 
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
-    fn bench_running_timer() {
+    fn test_timer_utils_and_macros() {
         let timer = Timer::new();
-        let iterations = 100_000;
-
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let guard = timer.start();
-            // Do minimal work
-            let _ = guard.elapsed();
-            guard.stop();
+        let (v, d) = utils::time_fn(|| 5);
+        assert_eq!(v, 5);
+        assert!(d < Duration::from_secs(5));
+        assert_eq!(utils::time_and_record(&timer, || 7), 7);
+        {
+            let _g = utils::scoped_timer(&timer);
         }
-        let elapsed = start.elapsed();
-
-        println!(
-            "Running timer: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-
-        // Throughput-only smoke check; Criterion is the regression detector.
-        assert_eq!(timer.count(), iterations);
+        let x = crate::time_block!(timer, { 1 + 1 });
+        assert_eq!(x, 2);
+        let (y, _) = crate::time_fn!(3 * 3);
+        assert_eq!(y, 9);
+        assert_eq!(timer.count(), 3);
     }
 
-    #[cfg_attr(not(feature = "bench-tests"), ignore)]
     #[test]
-    fn bench_timer_stats() {
-        let timer = Timer::new();
+    fn test_timer_concurrent_recordings_are_exact() {
+        let timer = Arc::new(Timer::new());
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8u64)
+            .map(|t| {
+                let timer = Arc::clone(&timer);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let _ = barrier.wait();
+                    for i in 1..=10_000u64 {
+                        timer.record_ns(t * 100_000 + i);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(timer.count(), 80_000);
+        let expected: u128 = (0..8u128)
+            .map(|t| (1..=10_000u128).map(|i| t * 100_000 + i).sum::<u128>())
+            .sum();
+        assert_eq!(timer.total_nanos(), expected);
+        assert_eq!(timer.min(), Duration::from_nanos(1));
+        assert_eq!(timer.max(), Duration::from_nanos(710_000));
+    }
 
-        // Fill timer with data
-        for i in 0..1000 {
-            timer.record(Duration::from_nanos(i * 1000));
+    proptest! {
+        #[test]
+        fn prop_total_is_exact_sum(values in proptest::collection::vec(any::<u64>(), 0..50)) {
+            let timer = Timer::new();
+            for v in &values {
+                timer.record_ns(*v);
+            }
+            let expected: u128 = values.iter().map(|v| u128::from(*v)).sum();
+            prop_assert_eq!(timer.total_nanos(), expected);
+            prop_assert_eq!(timer.count(), values.len() as u64);
+            if let (Some(min), Some(max)) = (values.iter().min(), values.iter().max()) {
+                prop_assert_eq!(timer.min(), Duration::from_nanos(*min));
+                prop_assert_eq!(timer.max(), Duration::from_nanos(*max));
+            }
         }
 
-        let iterations = 1_000_000;
-        let start = Instant::now();
-
-        for _ in 0..iterations {
-            let _ = timer.stats();
+        #[test]
+        fn prop_batch_equals_individual(values in proptest::collection::vec(any::<u64>(), 1..30)) {
+            let one = Timer::new();
+            let batch = Timer::new();
+            let durations: Vec<Duration> = values.iter().map(|v| Duration::from_nanos(*v)).collect();
+            for d in &durations {
+                one.record(*d);
+            }
+            batch.record_batch(&durations);
+            prop_assert_eq!(one.total_nanos(), batch.total_nanos());
+            prop_assert_eq!(one.count(), batch.count());
+            prop_assert_eq!(one.min(), batch.min());
+            prop_assert_eq!(one.max(), batch.max());
         }
-
-        let elapsed = start.elapsed();
-        println!(
-            "Timer stats: {:.2} ns/op",
-            elapsed.as_nanos() as f64 / iterations as f64
-        );
-        // Throughput-only smoke check; Criterion is the regression detector.
     }
 }

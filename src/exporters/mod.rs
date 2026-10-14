@@ -1,35 +1,28 @@
-//! Built-in exporters for emitting metrics to popular telemetry backends.
+//! Exporters that turn a [`Registry`](crate::Registry) into a wire format.
 //!
-//! Each exporter renders the current state of a [`crate::Registry`] (plus the
-//! associated [`crate::MetricMetadata`]) into a backend-specific format.
-//! Exporters are stateless: callers control sampling cadence, transport, and
-//! buffer reuse.
-//!
-//! | Exporter | Feature flag | Output |
+//! | Exporter | Feature | Output |
 //! |---|---|---|
-//! | `prometheus` | (always on) | Prometheus text exposition format (`String`) |
-//! | `openmetrics` | (always on) | OpenMetrics text format (`String`) |
-//! | `json` | `serde` | `serde_json::Value` snapshot |
-//! | `statsd` | `statsd` | UDP push, individual lines per metric |
-//! | `otlp` | `otlp` | OTLP/HTTP+JSON payload (`String`) |
+//! | [`prometheus`] | always | Prometheus text format 0.0.4 |
+//! | [`openmetrics`] | always | OpenMetrics 1.0 text format |
+//! | `json` | `serde` | JSON snapshot of every series |
+//! | `statsd` | `statsd` | StatsD / `DogStatsD` lines over UDP |
+//! | `otlp` | `otlp` | OTLP metrics as HTTP+JSON or protobuf |
+//! | `http` | `http` | `/metrics` server and Pushgateway client |
 //!
-//! All exporters share a render policy:
-//! - Metric **names** are emitted verbatim (callers are expected to choose
-//!   identifiers that satisfy the backend's naming rules — most often
-//!   `[a-zA-Z_:][a-zA-Z0-9_:]*` for Prometheus / OpenMetrics).
-//! - Metric **values** are escaped per the backend's rules.
-//! - Labels are rendered via [`crate::LabelSet`]'s per-backend helpers.
-//! - When metadata is missing for a metric, exporters emit reasonable
-//!   defaults (kind inferred from the metric type; empty help; no unit).
+//! All exporters read the same validated registry, so no exporter has to
+//! trust names or labels: names are `[A-Za-z0-9_.]` (the text formats render
+//! `.` as `_`), label keys are `[A-Za-z0-9_]`, and every label value is
+//! escaped or sanitised for the target format. The text formats additionally
+//! guarantee one `# TYPE` per family and no sample-name clashes.
 
-pub mod openmetrics;
-pub mod prometheus;
-
+#[cfg(feature = "http")]
+pub mod http;
 #[cfg(feature = "serde")]
 pub mod json;
-
-#[cfg(feature = "statsd")]
-pub mod statsd;
-
+pub mod openmetrics;
 #[cfg(feature = "otlp")]
 pub mod otlp;
+pub mod prometheus;
+#[cfg(feature = "statsd")]
+pub mod statsd;
+mod text;

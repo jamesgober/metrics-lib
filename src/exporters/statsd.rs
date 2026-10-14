@@ -1,434 +1,484 @@
-//! StatsD (DogStatsD-compatible) UDP exporter (behind the `statsd` feature).
+//! StatsD / `DogStatsD` UDP exporter (feature `statsd`).
 //!
-//! Push-style exporter that serialises the registry into the StatsD wire
-//! format (`<metric>:<value>|<type>|#tag:value,tag:value`) and ships it over
-//! UDP. The DogStatsD tag extension is always used so [`LabelSet`]s round-trip
-//! into native StatsD tags; vanilla StatsD agents that ignore unknown
-//! suffixes still accept the lines.
+//! [`StatsdSink`] renders the registry as StatsD lines
+//! (`name:value|type|#tag:value,…`) and pushes them over UDP, batching lines
+//! into datagrams no larger than the configured packet size. Labels become
+//! `DogStatsD` tags; vanilla StatsD servers that do not understand tags must
+//! not be fed labeled series.
 //!
-//! # Value mapping
+//! # Counters
 //!
-//! StatsD counter (`|c`) semantics are *delta* — `name:1|c` means "increment
-//! by 1". The metrics-lib registry stores cumulative values, so emitting
-//! deltas would require tracking `prev_value` state across exports. To keep
-//! the exporter stateless, every metric is published as a **gauge** (`|g`),
-//! which StatsD accepts as an absolute reading. Downstream agents that
-//! prefer counter semantics can configure aggregation rules accordingly.
+//! StatsD counters (`|c`) carry *increments*, while the registry holds
+//! running totals. With [`CounterMode::Delta`] (the default) the sink
+//! remembers the value sent last time for each series and sends the
+//! difference, which is what StatsD aggregation expects; a counter that went
+//! backwards (it was reset) sends its full value. [`CounterMode::Gauge`]
+//! sends running totals as gauges instead (stateless, but the server must be
+//! told not to sum them).
 //!
-//! - **Counter** → `name:VALUE|g` (cumulative total).
-//! - **Gauge** → `name:VALUE|g`.
-//! - **Timer** → four series: `name.count`, `name.sum_seconds`,
-//!   `name.min_seconds`, `name.max_seconds`, all `|g`.
-//! - **RateMeter** → two series: `name.total`, `name.per_second`, both `|g`.
-//! - **Histogram** → `name.count`, `name.sum`, `name.p50`, `name.p95`,
-//!   `name.p99`, all `|g`. Quantiles come from
-//!   [`Histogram::quantile`](crate::Histogram::quantile).
+//! # Mapping
+//!
+//! | Registry kind | Lines |
+//! |---|---|
+//! | counter | `name:Δ|c` (or `name:total|g`) |
+//! | up/down counter, gauge | `name:value|g` |
+//! | timer | `name.count` (counter rule), `name.sum_seconds`, `name.min_seconds`, `name.max_seconds` as `|g` |
+//! | rate meter | `name.total` (counter rule), `name.per_second|g` |
+//! | histogram | `name.count` (counter rule), `name.sum`, `name.p50`, `name.p95`, `name.p99` as `|g` |
+//! | summary | `name.count` (counter rule), `name.sum` and one `name.pNN` per quantile as `|g` |
+//!
+//! A negative gauge is sent as `name:0|g` followed by `name:-x|g`: in the
+//! StatsD protocol a leading sign means "adjust by", so a bare `name:-5|g`
+//! would subtract 5 instead of setting -5. NaN and infinite gauges are
+//! skipped (StatsD cannot represent them).
 //!
 //! # Example
 //!
 //! ```no_run
 //! # #[cfg(feature = "count")]
 //! # {
-//! use metrics_lib::{init, metrics, LabelSet};
+//! use metrics_lib::{LabelSet, MetricsCore};
 //! use metrics_lib::exporters::statsd::StatsdSink;
 //!
-//! init();
-//! metrics().counter_with("requests", &LabelSet::from([("status", "200")])).inc();
+//! let core = MetricsCore::new();
+//! core.counter_with("requests", &LabelSet::from([("status", "200")])).inc();
 //!
-//! let sink = StatsdSink::new("127.0.0.1:8125").expect("bind UDP");
-//! sink.send(metrics().registry()).expect("statsd push");
+//! let sink = StatsdSink::new("127.0.0.1:8125")?.with_prefix("myapp.");
+//! sink.send(core.registry())?;
 //! # }
+//! # Ok::<(), std::io::Error>(())
 //! ```
 
+use crate::labels::push_statsd_safe;
+use crate::registry::Handle;
 use crate::{LabelSet, Registry};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::{Mutex, PoisonError};
 
-/// Conservative MTU budget for UDP datagrams. Picked to fit comfortably
-/// inside the typical 1500-byte Ethernet MTU minus IP/UDP headers.
-const DEFAULT_PACKET_SIZE: usize = 1432;
+/// Default datagram payload budget: fits a 1500-byte Ethernet MTU after IP
+/// and UDP headers.
+pub const DEFAULT_PACKET_SIZE: usize = 1432;
+/// Smallest accepted packet size.
+pub const MIN_PACKET_SIZE: usize = 64;
 
-/// Push-style StatsD UDP exporter.
+/// How counters are sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CounterMode {
+    /// Send the increase since the previous export as `|c`.
+    #[default]
+    Delta,
+    /// Send the running total as `|g`.
+    Gauge,
+}
+
+/// StatsD UDP exporter.
 pub struct StatsdSink {
     socket: UdpSocket,
     target: SocketAddr,
-    prefix: Option<String>,
+    prefix: String,
     packet_size: usize,
+    counter_mode: CounterMode,
+    /// Last total sent per counter line, for [`CounterMode::Delta`].
+    previous: Mutex<HashMap<(String, LabelSet), u64>>,
 }
 
 impl StatsdSink {
-    /// Bind a local UDP socket and prepare to push to `addr`.
+    /// Bind an ephemeral local UDP socket and target `addr`.
     ///
-    /// The local bind is `0.0.0.0:0` (any free ephemeral port). Use
-    /// [`StatsdSink::with_socket`] for explicit control over the local
-    /// binding.
+    /// # Errors
+    ///
+    /// Returns the error from resolving `addr` (or an `InvalidInput` error
+    /// when it resolves to nothing) or from binding the socket.
     pub fn new(addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let target = addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty SocketAddr list"))?;
+        let target = addr.to_socket_addrs()?.next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "address resolved to nothing")
+        })?;
         let bind = if target.is_ipv6() {
             "[::]:0"
         } else {
             "0.0.0.0:0"
         };
-        let socket = UdpSocket::bind(bind)?;
-        Ok(Self {
-            socket,
-            target,
-            prefix: None,
-            packet_size: DEFAULT_PACKET_SIZE,
-        })
+        Ok(Self::with_socket(UdpSocket::bind(bind)?, target))
     }
 
-    /// Construct from an explicit pre-bound socket + target address.
+    /// Use an already bound socket.
+    #[must_use]
     pub fn with_socket(socket: UdpSocket, target: SocketAddr) -> Self {
         Self {
             socket,
             target,
-            prefix: None,
+            prefix: String::new(),
             packet_size: DEFAULT_PACKET_SIZE,
+            counter_mode: CounterMode::Delta,
+            previous: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Set a global prefix prepended to every metric name (e.g.
-    /// `"myapp."`). The exporter does NOT insert a separator — include
-    /// trailing `.` in `prefix` if you want one.
+    /// Prefix every metric name (no separator is added; include the trailing
+    /// `.` yourself). Characters StatsD reserves are replaced by `_`.
     #[must_use]
-    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.prefix = Some(prefix.into());
+    pub fn with_prefix(mut self, prefix: impl AsRef<str>) -> Self {
+        self.prefix.clear();
+        push_statsd_safe(&mut self.prefix, prefix.as_ref());
         self
     }
 
-    /// Set the maximum UDP datagram payload size used when batching lines.
-    /// Defaults to 1432 (typical Ethernet-safe).
+    /// Maximum datagram payload (at least [`MIN_PACKET_SIZE`]).
     #[must_use]
     pub fn with_packet_size(mut self, size: usize) -> Self {
-        self.packet_size = size.max(64);
+        self.packet_size = size.max(MIN_PACKET_SIZE);
         self
     }
 
-    /// Render every metric in `registry` and push to the configured target.
-    /// Returns the total number of bytes sent across all datagrams.
-    pub fn send(&self, registry: &Registry) -> io::Result<usize> {
-        let body = self.render(registry);
-        self.flush_lines(&body)
+    /// Choose how counters are sent.
+    #[must_use]
+    pub fn with_counter_mode(mut self, mode: CounterMode) -> Self {
+        self.counter_mode = mode;
+        self
     }
 
-    /// Render the registry to a single newline-separated string in StatsD
-    /// wire format. Useful for unit tests, dry runs, or piping into a
-    /// different transport.
+    /// Render `registry` and send it. Returns the number of bytes sent.
+    ///
+    /// In [`CounterMode::Delta`] the counter baselines advance even if a
+    /// send fails part-way, so increments in a failed datagram are lost
+    /// rather than double-counted later.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first socket error.
+    pub fn send(&self, registry: &Registry) -> io::Result<usize> {
+        let body = self.render(registry);
+        self.send_lines(&body)
+    }
+
+    /// Render `registry` as newline-separated StatsD lines without sending.
+    ///
+    /// In [`CounterMode::Delta`] this advances the counter baselines, exactly
+    /// like [`StatsdSink::send`].
     #[must_use]
     pub fn render(&self, registry: &Registry) -> String {
         let mut out = String::with_capacity(2048);
-        let prefix = self.prefix.as_deref().unwrap_or("");
-
-        #[cfg(feature = "count")]
-        for (name, labels, c) in registry.counter_entries() {
-            emit_gauge_line(&mut out, prefix, &name, &labels, c.get() as f64);
+        let mut previous = self.previous.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut seen: HashMap<(String, LabelSet), u64> = HashMap::with_capacity(previous.len());
+        let mut w = Writer {
+            out: &mut out,
+            prefix: &self.prefix,
+            mode: self.counter_mode,
+            previous: &previous,
+            seen: &mut seen,
+        };
+        for family in registry.collect() {
+            for s in &family.series {
+                w.series(&family.name, &s.labels, &s.handle);
+            }
         }
-        #[cfg(feature = "gauge")]
-        for (name, labels, g) in registry.gauge_entries() {
-            emit_gauge_line(&mut out, prefix, &name, &labels, g.get());
-        }
-        #[cfg(feature = "timer")]
-        for (name, labels, t) in registry.timer_entries() {
-            let count = t.count();
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.count"),
-                &labels,
-                count as f64,
-            );
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.sum_seconds"),
-                &labels,
-                t.total().as_secs_f64(),
-            );
-            let min_s = if count == 0 {
-                0.0
-            } else {
-                t.min().as_secs_f64()
-            };
-            let max_s = if count == 0 {
-                0.0
-            } else {
-                t.max().as_secs_f64()
-            };
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.min_seconds"),
-                &labels,
-                min_s,
-            );
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.max_seconds"),
-                &labels,
-                max_s,
-            );
-        }
-        #[cfg(feature = "meter")]
-        for (name, labels, r) in registry.rate_meter_entries() {
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.total"),
-                &labels,
-                r.total() as f64,
-            );
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.per_second"),
-                &labels,
-                r.rate(),
-            );
-        }
-        #[cfg(feature = "histogram")]
-        for (name, labels, h) in registry.histogram_entries() {
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.count"),
-                &labels,
-                h.count() as f64,
-            );
-            emit_gauge_line(&mut out, prefix, &format!("{name}.sum"), &labels, h.sum());
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.p50"),
-                &labels,
-                h.quantile(0.50),
-            );
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.p95"),
-                &labels,
-                h.quantile(0.95),
-            );
-            emit_gauge_line(
-                &mut out,
-                prefix,
-                &format!("{name}.p99"),
-                &labels,
-                h.quantile(0.99),
-            );
-        }
+        *previous = seen;
         out
     }
 
-    /// Split `body` into MTU-bounded datagrams and send each one.
-    fn flush_lines(&self, body: &str) -> io::Result<usize> {
-        let mut total_sent = 0usize;
-        let mut buf = String::with_capacity(self.packet_size);
-        for line in body.split('\n').filter(|l| !l.is_empty()) {
-            // +1 for the separating newline if buf is non-empty.
-            let needed = line.len() + if buf.is_empty() { 0 } else { 1 };
-            if !buf.is_empty() && buf.len() + needed > self.packet_size {
-                total_sent += self.socket.send_to(buf.as_bytes(), self.target)?;
-                buf.clear();
+    fn send_lines(&self, body: &str) -> io::Result<usize> {
+        let mut sent = 0;
+        let mut packet = String::with_capacity(self.packet_size);
+        for line in body.lines().filter(|l| !l.is_empty()) {
+            let needed = line.len() + usize::from(!packet.is_empty());
+            if !packet.is_empty() && packet.len() + needed > self.packet_size {
+                sent += self.socket.send_to(packet.as_bytes(), self.target)?;
+                packet.clear();
             }
-            if !buf.is_empty() {
-                buf.push('\n');
+            if !packet.is_empty() {
+                packet.push('\n');
             }
-            buf.push_str(line);
+            packet.push_str(line);
         }
-        if !buf.is_empty() {
-            total_sent += self.socket.send_to(buf.as_bytes(), self.target)?;
+        if !packet.is_empty() {
+            sent += self.socket.send_to(packet.as_bytes(), self.target)?;
         }
-        Ok(total_sent)
+        Ok(sent)
     }
 }
 
-fn emit_gauge_line(out: &mut String, prefix: &str, name: &str, labels: &LabelSet, value: f64) {
-    let value_str = if value.is_nan() {
-        "0".to_string()
-    } else if value == f64::INFINITY {
-        f64::MAX.to_string()
-    } else if value == f64::NEG_INFINITY {
-        f64::MIN.to_string()
-    } else {
-        format!("{value}")
-    };
-    write!(out, "{prefix}{name}:{value_str}|g").unwrap();
-    if !labels.is_empty() {
-        out.push_str(&labels.to_statsd());
+impl std::fmt::Debug for StatsdSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StatsdSink")
+            .field("target", &self.target)
+            .field("prefix", &self.prefix)
+            .field("packet_size", &self.packet_size)
+            .field("counter_mode", &self.counter_mode)
+            .finish_non_exhaustive()
     }
-    out.push('\n');
+}
+
+struct Writer<'a> {
+    out: &'a mut String,
+    prefix: &'a str,
+    mode: CounterMode,
+    previous: &'a HashMap<(String, LabelSet), u64>,
+    seen: &'a mut HashMap<(String, LabelSet), u64>,
+}
+
+impl Writer<'_> {
+    fn line(&mut self, name: &str, value: &str, kind: &str, labels: &LabelSet) {
+        let _ = write!(self.out, "{}{name}:{value}|{kind}", self.prefix);
+        labels.write_statsd(self.out);
+        self.out.push('\n');
+    }
+
+    fn gauge(&mut self, name: &str, value: f64, labels: &LabelSet) {
+        if !value.is_finite() {
+            return;
+        }
+        if value < 0.0 {
+            self.line(name, "0", "g", labels);
+        }
+        self.line(name, &value.to_string(), "g", labels);
+    }
+
+    fn gauge_i64(&mut self, name: &str, value: i64, labels: &LabelSet) {
+        if value < 0 {
+            self.line(name, "0", "g", labels);
+        }
+        self.line(name, &value.to_string(), "g", labels);
+    }
+
+    fn counter(&mut self, name: &str, total: u64, labels: &LabelSet) {
+        match self.mode {
+            CounterMode::Gauge => self.line(name, &total.to_string(), "g", labels),
+            CounterMode::Delta => {
+                let key = (name.to_owned(), labels.clone());
+                let delta = match self.previous.get(&key) {
+                    Some(prev) if *prev <= total => total - prev,
+                    _ => total,
+                };
+                let _ = self.seen.insert(key, total);
+                if delta > 0 {
+                    self.line(name, &delta.to_string(), "c", labels);
+                }
+            }
+        }
+    }
+
+    #[allow(unused_variables)]
+    fn series(&mut self, name: &str, labels: &LabelSet, handle: &Handle) {
+        match handle {
+            #[cfg(feature = "count")]
+            Handle::Counter(c) => self.counter(name, c.get(), labels),
+            #[cfg(feature = "count")]
+            Handle::ShardedCounter(c) => self.counter(name, c.get(), labels),
+            #[cfg(feature = "count")]
+            Handle::UpDownCounter(c) => self.gauge_i64(name, c.get(), labels),
+            #[cfg(feature = "gauge")]
+            Handle::Gauge(g) => self.gauge(name, g.get(), labels),
+            #[cfg(feature = "timer")]
+            Handle::Timer(t) => {
+                let count = t.count();
+                self.counter(&format!("{name}.count"), count, labels);
+                #[allow(clippy::cast_precision_loss)] // seconds as f64 is the contract
+                let sum = t.total_nanos() as f64 / 1e9;
+                self.gauge(&format!("{name}.sum_seconds"), sum, labels);
+                if count > 0 {
+                    self.gauge(
+                        &format!("{name}.min_seconds"),
+                        t.min().as_secs_f64(),
+                        labels,
+                    );
+                    self.gauge(
+                        &format!("{name}.max_seconds"),
+                        t.max().as_secs_f64(),
+                        labels,
+                    );
+                }
+            }
+            #[cfg(feature = "meter")]
+            Handle::Rate(r) => {
+                self.counter(&format!("{name}.total"), r.total(), labels);
+                self.gauge(&format!("{name}.per_second"), r.rate(), labels);
+            }
+            #[cfg(feature = "histogram")]
+            Handle::Histogram(h) => {
+                let count = h.count();
+                self.counter(&format!("{name}.count"), count, labels);
+                self.gauge(&format!("{name}.sum"), h.sum(), labels);
+                if count > 0 {
+                    for (suffix, q) in [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)] {
+                        self.gauge(&format!("{name}.{suffix}"), h.quantile(q), labels);
+                    }
+                }
+            }
+            #[cfg(feature = "histogram")]
+            Handle::Summary(s) => {
+                let snap = s.snapshot();
+                self.counter(&format!("{name}.count"), snap.count, labels);
+                self.gauge(&format!("{name}.sum"), snap.sum, labels);
+                for (q, v) in &snap.quantiles {
+                    self.gauge(&format!("{name}.{}", quantile_suffix(*q)), *v, labels);
+                }
+            }
+            #[cfg(not(any(
+                feature = "count",
+                feature = "gauge",
+                feature = "timer",
+                feature = "meter",
+                feature = "histogram"
+            )))]
+            _ => match *handle {},
+        }
+    }
+}
+
+/// `0.5` → `p50`, `0.999` → `p99_9`.
+#[cfg_attr(not(feature = "histogram"), allow(dead_code))]
+fn quantile_suffix(q: f64) -> String {
+    let pct = (q * 1000.0).round() / 10.0;
+    let text = pct.to_string();
+    format!("p{}", text.replace('.', "_"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Registry;
+    use std::time::Duration;
 
-    fn loopback_sink() -> (StatsdSink, std::net::SocketAddr) {
-        // Bind both ends to ephemeral ports on loopback. The sink "sends" to
-        // a receiver we also own so tests don't rely on an external StatsD.
+    fn loopback() -> (StatsdSink, UdpSocket) {
         let recv = UdpSocket::bind("127.0.0.1:0").unwrap();
+        recv.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let target = recv.local_addr().unwrap();
         let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        (StatsdSink::with_socket(send, target), target)
+        (StatsdSink::with_socket(send, target), recv)
     }
 
-    #[test]
-    fn render_emits_gauge_lines_for_counters_and_gauges() {
-        let r = Registry::new();
-        #[cfg(feature = "count")]
-        r.get_or_create_counter("hits").add(5);
-        #[cfg(feature = "gauge")]
-        r.get_or_create_gauge("temp_c").set(21.5);
-
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
-        let body = sink.render(&r);
-
-        #[cfg(feature = "count")]
-        assert!(body.contains("hits:5|g\n"), "{body}");
-        #[cfg(feature = "gauge")]
-        assert!(body.contains("temp_c:21.5|g\n"), "{body}");
-    }
-
-    #[test]
     #[cfg(feature = "count")]
-    fn labels_render_as_tags() {
+    #[test]
+    fn test_counters_send_deltas_and_handle_resets() {
+        let (sink, _recv) = loopback();
         let r = Registry::new();
-        let labels = LabelSet::from([("region", "us"), ("env", "prod")]);
-        r.get_or_create_counter_with("requests", &labels).inc();
-
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
-        let body = sink.render(&r);
-        // labels sort alphabetically: env, region.
-        assert!(
-            body.contains("requests:1|g|#env:prod,region:us\n"),
-            "{body}"
-        );
+        let c = r.counter("hits");
+        c.add(5);
+        assert_eq!(sink.render(&r), "hits:5|c\n");
+        c.add(3);
+        assert_eq!(sink.render(&r), "hits:3|c\n");
+        assert_eq!(sink.render(&r), "", "no increase, no line");
+        c.reset();
+        c.add(2);
+        assert_eq!(sink.render(&r), "hits:2|c\n");
+        // Gauge mode sends totals.
+        let gauges = loopback().0.with_counter_mode(CounterMode::Gauge);
+        assert_eq!(gauges.render(&r), "hits:2|g\n");
     }
 
+    #[cfg(feature = "count")]
     #[test]
-    fn prefix_is_prepended() {
+    fn test_delta_state_is_pruned_for_removed_series() {
+        let (sink, _recv) = loopback();
         let r = Registry::new();
-        #[cfg(feature = "gauge")]
-        r.get_or_create_gauge("temp").set(42.0);
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sink =
-            StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap()).with_prefix("svc.");
-        let body = sink.render(&r);
-        #[cfg(feature = "gauge")]
-        assert!(body.contains("svc.temp:42|g\n"), "{body}");
-        let _ = body;
+        r.counter("gone").add(5);
+        let _ = sink.render(&r);
+        assert!(r.remove("gone"));
+        let _ = sink.render(&r);
+        assert!(sink.previous.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn send_writes_at_least_one_datagram() {
-        let r = Registry::new();
-        #[cfg(feature = "count")]
-        r.get_or_create_counter("hits").inc();
-        let (sink, _target) = loopback_sink();
-        // Even when nothing is to send, this is fine. With content, expect > 0 bytes.
-        let sent = sink.send(&r).unwrap();
-        #[cfg(feature = "count")]
-        assert!(sent > 0);
-        let _ = sent;
-    }
-
-    #[test]
-    #[cfg(feature = "timer")]
-    fn timer_renders_four_gauge_lines() {
-        let r = Registry::new();
-        let t = r.get_or_create_timer("rpc");
-        t.record(std::time::Duration::from_millis(2));
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
-        let body = sink.render(&r);
-        assert!(body.contains("rpc.count:1|g\n"), "{body}");
-        assert!(body.contains("rpc.sum_seconds:"), "{body}");
-        assert!(body.contains("rpc.min_seconds:"), "{body}");
-        assert!(body.contains("rpc.max_seconds:"), "{body}");
-    }
-
-    #[test]
-    #[cfg(feature = "meter")]
-    fn rate_meter_renders_two_gauge_lines() {
-        let r = Registry::new();
-        r.get_or_create_rate_meter("qps").tick_n(3);
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
-        let body = sink.render(&r);
-        assert!(body.contains("qps.total:3|g\n"), "{body}");
-        assert!(body.contains("qps.per_second:"), "{body}");
-    }
-
-    #[test]
-    #[cfg(feature = "histogram")]
-    fn histogram_renders_count_sum_and_three_quantiles() {
-        let r = Registry::new();
-        let h = r.get_or_create_histogram("rtt");
-        for v in &[0.001, 0.002, 0.005, 0.01, 0.02] {
-            h.observe(*v);
-        }
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
-        let body = sink.render(&r);
-        assert!(body.contains("rtt.count:5|g\n"), "{body}");
-        assert!(body.contains("rtt.sum:"), "{body}");
-        assert!(body.contains("rtt.p50:"), "{body}");
-        assert!(body.contains("rtt.p95:"), "{body}");
-        assert!(body.contains("rtt.p99:"), "{body}");
-    }
-
-    #[test]
     #[cfg(feature = "gauge")]
-    fn non_finite_gauge_value_renders_safely() {
+    #[test]
+    fn test_negative_gauges_are_absolute_regression_ml019() {
+        // ML-019: `neg:-5|g` is a relative decrement in StatsD.
+        let (sink, _recv) = loopback();
         let r = Registry::new();
-        let g = r.get_or_create_gauge("temp");
-        g.set(f64::INFINITY);
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sink = StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap());
-        let body = sink.render(&r);
-        // Saturates to f64::MAX rather than emitting "inf" / "NaN".
-        assert!(body.starts_with("temp:"), "{body}");
-        assert!(!body.contains("Inf"), "{body}");
-        assert!(!body.contains("NaN"), "{body}");
+        r.gauge("neg").set(-5.0);
+        r.gauge("nan").set(f64::NAN);
+        r.gauge("pos").set(1.5);
+        assert_eq!(sink.render(&r), "neg:0|g\nneg:-5|g\npos:1.5|g\n");
     }
 
+    #[cfg(feature = "count")]
     #[test]
-    fn with_packet_size_floor_is_enforced() {
-        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
-        // Tiny request gets clamped up to the minimum of 64.
-        let sink =
-            StatsdSink::with_socket(send, "127.0.0.1:0".parse().unwrap()).with_packet_size(8);
+    fn test_up_down_counter_negative_is_absolute() {
+        let (sink, _recv) = loopback();
         let r = Registry::new();
-        #[cfg(feature = "count")]
-        r.get_or_create_counter("x").inc();
-        // Should not panic even with the tiny budget — small packets are sent
-        // one line at a time.
-        let _ = sink.send(&r);
+        r.up_down_counter("level").add(-3);
+        assert_eq!(sink.render(&r), "level:0|g\nlevel:-3|g\n");
     }
 
+    #[cfg(feature = "count")]
     #[test]
-    fn send_packetises_long_bodies() {
+    fn test_tags_and_prefix_are_sanitised_regression_ml009() {
+        let (sink, _recv) = loopback();
+        let sink = sink.with_prefix("app|x.");
         let r = Registry::new();
-        #[cfg(feature = "count")]
-        {
-            for i in 0..200 {
-                r.get_or_create_counter(&format!("metric_{i}"))
-                    .add(i as u64);
-            }
+        r.counter_with("hits", &LabelSet::from([("bad\"key}\n", "v|#@\n")]))
+            .inc();
+        let out = sink.render(&r);
+        assert_eq!(out.lines().count(), 1, "{out:?}");
+        assert!(out.starts_with("app_x.hits:1|c|#"), "{out:?}");
+    }
+
+    #[cfg(all(feature = "timer", feature = "meter", feature = "histogram"))]
+    #[test]
+    fn test_every_type_renders() {
+        let (sink, _recv) = loopback();
+        let r = Registry::new();
+        r.timer("t").record_ns(2_000_000_000);
+        r.rate_meter("r").tick_n(4);
+        r.histogram("h").observe(0.2);
+        r.summary("s").observe(0.2);
+        r.sharded_counter("sc").add(2);
+        let out = sink.render(&r);
+        for needle in [
+            "t.count:1|c",
+            "t.sum_seconds:2|g",
+            "t.min_seconds:2|g",
+            "t.max_seconds:2|g",
+            "r.total:4|c",
+            "r.per_second:",
+            "h.count:1|c",
+            "h.sum:0.2|g",
+            "h.p50:",
+            "s.count:1|c",
+            "s.p50:",
+            "s.p99:",
+            "sc:2|c",
+        ] {
+            assert!(out.contains(needle), "{needle} missing in {out}");
         }
-        let (sink, _) = loopback_sink();
-        let sink = sink.with_packet_size(256); // small MTU to force splitting
+    }
+
+    #[test]
+    fn test_quantile_suffix() {
+        assert_eq!(quantile_suffix(0.5), "p50");
+        assert_eq!(quantile_suffix(0.99), "p99");
+        assert_eq!(quantile_suffix(0.999), "p99_9");
+        assert_eq!(quantile_suffix(1.0), "p100");
+    }
+
+    #[cfg(feature = "count")]
+    #[test]
+    fn test_send_batches_into_packets() {
+        let (sink, recv) = loopback();
+        let sink = sink.with_packet_size(64);
+        let r = Registry::new();
+        for i in 0..20 {
+            r.counter(&format!("counter_number_{i:02}")).inc();
+        }
         let sent = sink.send(&r).unwrap();
-        let _ = sent;
+        let mut received = 0;
+        let mut buf = [0u8; 2048];
+        while received < sent {
+            let n = recv.recv(&mut buf).unwrap();
+            assert!(n <= 64, "packet of {n} bytes");
+            received += n;
+        }
+        assert_eq!(received, sent);
+        assert!(format!("{sink:?}").contains("StatsdSink"));
+    }
+
+    #[test]
+    fn test_new_resolves_and_binds() {
+        let sink = StatsdSink::new("127.0.0.1:8125").unwrap();
+        assert_eq!(sink.target.port(), 8125);
+        assert_eq!(sink.with_packet_size(1).packet_size, MIN_PACKET_SIZE);
+        assert!(StatsdSink::new(Vec::<SocketAddr>::new().as_slice()).is_err());
     }
 }

@@ -1,387 +1,311 @@
-//! JSON snapshot exporter (behind the `serde` Cargo feature).
+//! JSON snapshot exporter (feature `serde`).
 //!
-//! Captures the entire registry as a single serializable [`RegistrySnapshot`]
-//! value. The struct is `#[derive(serde::Serialize)]` so callers can route it
-//! to any `serde`-compatible writer (`serde_json`, `simd-json`, `rmp-serde`,
-//! …).
+//! [`snapshot`] captures every series as a [`RegistrySnapshot`], which
+//! implements `serde::Serialize`, so it can go through any serde format;
+//! [`render`] and [`render_pretty`] produce JSON text directly. Useful for
+//! `/debug/metrics` endpoints, periodic dumps and test fixtures.
 //!
-//! For convenience, [`render`] returns a JSON `String` directly via
-//! `serde_json`. The structure is stable, diff-friendly, and suitable for:
-//!
-//! - HTTP `/debug/metrics` endpoints.
-//! - Periodic disk snapshots (config hot-reload, post-mortem diagnostics).
-//! - Test-fixture comparisons.
+//! JSON has no NaN or infinity, so non-finite gauge values and quantile
+//! estimates are written as the strings `"NaN"`, `"+Inf"` and `"-Inf"`, and
+//! the last histogram bucket bound as `"+Inf"`.
 //!
 //! # Example
 //!
 //! ```
 //! # #[cfg(feature = "count")]
 //! # {
-//! use metrics_lib::{init, metrics, LabelSet};
+//! use metrics_lib::{LabelSet, MetricsCore};
 //! use metrics_lib::exporters::json;
 //!
-//! init();
-//! metrics().counter("hits").inc();
-//! metrics().counter_with("hits", &LabelSet::from([("status", "200")])).inc();
+//! let core = MetricsCore::new();
+//! core.counter("hits").inc();
+//! core.counter_with("hits", &LabelSet::from([("status", "200")])).inc();
 //!
-//! let snap = json::snapshot(metrics().registry());
-//! assert_eq!(snap.counters.len(), 2);
-//!
-//! // Render as JSON text via serde_json.
-//! let body = json::render(metrics().registry());
-//! assert!(body.contains("\"counters\""));
+//! let snap = json::snapshot(core.registry());
+//! assert_eq!(snap.series.len(), 2);
+//! let body = json::render(core.registry()).unwrap();
+//! assert!(body.contains(r#""type":"counter""#));
 //! # }
 //! ```
 
-use crate::{LabelSet, MetricMetadata, Registry};
+use crate::registry::Handle;
+use crate::{LabelSet, MetricKind, Registry, Unit};
+use serde::{Serialize, Serializer};
 
-/// A single counter series snapshot.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CounterSeries {
-    /// Metric name.
-    pub name: String,
-    /// Label set; serialised as a JSON object.
-    pub labels: LabelSet,
-    /// Current counter value.
-    pub value: u64,
-    /// Optional metadata (help / unit / kind).
-    pub metadata: Option<MetricMetadata>,
-}
+/// Version of the JSON shape. Bumped on incompatible changes (1.x wrote
+/// version 1, with one list per metric type).
+pub const SCHEMA_VERSION: u32 = 2;
 
-/// A single gauge series snapshot.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct GaugeSeries {
-    /// Metric name.
-    pub name: String,
-    /// Label set.
-    pub labels: LabelSet,
-    /// Current gauge value.
-    pub value: f64,
-    /// Optional metadata.
-    pub metadata: Option<MetricMetadata>,
-}
-
-/// A single timer series snapshot.
-#[cfg(feature = "timer")]
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TimerSeries {
-    /// Metric name.
-    pub name: String,
-    /// Label set.
-    pub labels: LabelSet,
-    /// Timer statistics.
-    pub stats: crate::TimerStats,
-    /// Optional metadata.
-    pub metadata: Option<MetricMetadata>,
-}
-
-/// A single rate-meter series snapshot.
-#[cfg(feature = "meter")]
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RateSeries {
-    /// Metric name.
-    pub name: String,
-    /// Label set.
-    pub labels: LabelSet,
-    /// Rate statistics.
-    pub stats: crate::RateStats,
-    /// Optional metadata.
-    pub metadata: Option<MetricMetadata>,
-}
-
-/// A single histogram series snapshot.
-#[cfg(feature = "histogram")]
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct HistogramSeries {
-    /// Metric name.
-    pub name: String,
-    /// Label set.
-    pub labels: LabelSet,
-    /// Histogram snapshot (cumulative buckets + sum + count).
-    pub histogram: crate::HistogramSnapshot,
-    /// Optional metadata.
-    pub metadata: Option<MetricMetadata>,
-}
-
-/// Top-level snapshot of every metric in the registry.
-///
-/// Feature-gated sections of the struct (`timers`, `rate_meters`,
-/// `histograms`) are present only when the corresponding metric-type feature
-/// is enabled.
-#[derive(Debug, Clone, serde::Serialize)]
+/// Every series in a registry.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct RegistrySnapshot {
-    /// Schema version of this snapshot format. Bumps when the JSON shape
-    /// changes in a breaking way.
+    /// [`SCHEMA_VERSION`] of this snapshot.
     pub schema_version: u32,
-    /// All counter series.
-    pub counters: Vec<CounterSeries>,
-    /// All gauge series.
-    pub gauges: Vec<GaugeSeries>,
-    /// All timer series.
-    #[cfg(feature = "timer")]
-    pub timers: Vec<TimerSeries>,
-    /// All rate-meter series.
-    #[cfg(feature = "meter")]
-    pub rate_meters: Vec<RateSeries>,
-    /// All histogram series.
-    #[cfg(feature = "histogram")]
-    pub histograms: Vec<HistogramSeries>,
-    /// Cardinality counter snapshot (`current`, `cap`, `overflows`).
+    /// Series sorted by name, then labels.
+    pub series: Vec<JsonSeries>,
+    /// Registry limits and counters.
     pub cardinality: CardinalitySnapshot,
 }
 
-/// Cardinality state at snapshot time.
-#[derive(Debug, Clone, serde::Serialize)]
+/// One series.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct JsonSeries {
+    /// Registered name.
+    pub name: String,
+    /// Family kind.
+    pub kind: MetricKind,
+    /// Labels, serialised as a JSON object.
+    pub labels: LabelSet,
+    /// Help text, when the family was described.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    /// Unit, when the family was described with one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<Unit>,
+    /// The value, tagged by `"type"`.
+    pub value: JsonValue,
+}
+
+/// Value of one series, tagged by metric type.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum JsonValue {
+    /// Counter or sharded counter.
+    Counter {
+        /// Current value.
+        value: u64,
+    },
+    /// Up/down counter.
+    UpDownCounter {
+        /// Current value.
+        value: i64,
+    },
+    /// Gauge.
+    Gauge {
+        /// Current value (`"NaN"`/`"+Inf"`/`"-Inf"` when non-finite).
+        #[serde(serialize_with = "finite_or_string")]
+        value: f64,
+    },
+    /// Timer.
+    #[cfg(feature = "timer")]
+    Timer(crate::TimerStats),
+    /// Rate meter.
+    #[cfg(feature = "meter")]
+    Rate(crate::RateStats),
+    /// Histogram.
+    #[cfg(feature = "histogram")]
+    Histogram(crate::HistogramSnapshot),
+    /// Summary.
+    #[cfg(feature = "histogram")]
+    Summary {
+        /// Number of observations.
+        count: u64,
+        /// Sum of observations.
+        sum: f64,
+        /// `[quantile, estimate]` pairs (`"NaN"` estimates when empty).
+        quantiles: Vec<QuantileValue>,
+    },
+}
+
+/// One quantile estimate of a summary.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[non_exhaustive]
+pub struct QuantileValue {
+    /// Quantile in `[0, 1]`.
+    pub quantile: f64,
+    /// Estimate (`"NaN"` when the summary is empty).
+    #[serde(serialize_with = "finite_or_string")]
+    pub value: f64,
+}
+
+/// Registry limits and counters at snapshot time.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct CardinalitySnapshot {
-    /// Current count of unique `(name, labels)` tuples.
+    /// Cap slots in use.
     pub current: usize,
     /// Configured cap.
     pub cap: usize,
     /// Lifetime overflow events.
     pub overflows: u64,
+    /// Lifetime repaired names/labels.
+    pub invalid_inputs: u64,
+    /// Lifetime kind conflicts.
+    pub kind_conflicts: u64,
 }
 
-const SCHEMA_VERSION: u32 = 1;
+#[allow(clippy::trivially_copy_pass_by_ref)] // signature required by serde
+fn finite_or_string<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+    if v.is_finite() {
+        s.serialize_f64(*v)
+    } else if v.is_nan() {
+        s.serialize_str("NaN")
+    } else if *v > 0.0 {
+        s.serialize_str("+Inf")
+    } else {
+        s.serialize_str("-Inf")
+    }
+}
 
-/// Build a [`RegistrySnapshot`] containing every metric in `registry`.
-///
-/// Series are sorted by `(name, labels)` for deterministic, diff-friendly
-/// output. Snapshot is point-in-time; updates after the call are not
-/// reflected.
+fn value_of(handle: &Handle) -> JsonValue {
+    match handle {
+        #[cfg(feature = "count")]
+        Handle::Counter(c) => JsonValue::Counter { value: c.get() },
+        #[cfg(feature = "count")]
+        Handle::ShardedCounter(c) => JsonValue::Counter { value: c.get() },
+        #[cfg(feature = "count")]
+        Handle::UpDownCounter(c) => JsonValue::UpDownCounter { value: c.get() },
+        #[cfg(feature = "gauge")]
+        Handle::Gauge(g) => JsonValue::Gauge { value: g.get() },
+        #[cfg(feature = "timer")]
+        Handle::Timer(t) => JsonValue::Timer(t.stats()),
+        #[cfg(feature = "meter")]
+        Handle::Rate(r) => JsonValue::Rate(r.stats()),
+        #[cfg(feature = "histogram")]
+        Handle::Histogram(h) => JsonValue::Histogram(h.snapshot()),
+        #[cfg(feature = "histogram")]
+        Handle::Summary(s) => {
+            let snap = s.snapshot();
+            JsonValue::Summary {
+                count: snap.count,
+                sum: snap.sum,
+                quantiles: snap
+                    .quantiles
+                    .iter()
+                    .map(|(q, v)| QuantileValue {
+                        quantile: *q,
+                        value: *v,
+                    })
+                    .collect(),
+            }
+        }
+        #[cfg(not(any(
+            feature = "count",
+            feature = "gauge",
+            feature = "timer",
+            feature = "meter",
+            feature = "histogram"
+        )))]
+        _ => match *handle {},
+    }
+}
+
+/// Capture every series of `registry`.
 #[must_use]
 pub fn snapshot(registry: &Registry) -> RegistrySnapshot {
-    let mut counters = Vec::new();
-    #[cfg(feature = "count")]
-    {
-        for (name, labels, c) in registry.counter_entries() {
-            let metadata = registry.metadata(&name);
-            counters.push(CounterSeries {
-                name,
-                labels,
-                value: c.get(),
-                metadata,
+    let mut series = Vec::new();
+    for family in registry.collect() {
+        let help = family.help.as_deref().map(str::to_owned);
+        let unit = (family.unit != Unit::None).then_some(family.unit);
+        for s in family.series {
+            series.push(JsonSeries {
+                name: family.name.clone(),
+                kind: family.kind,
+                labels: s.labels,
+                help: help.clone(),
+                unit,
+                value: value_of(&s.handle),
             });
         }
-        counters.sort_by(|a, b| (a.name.as_str(), &a.labels).cmp(&(b.name.as_str(), &b.labels)));
     }
-
-    let mut gauges = Vec::new();
-    #[cfg(feature = "gauge")]
-    {
-        for (name, labels, g) in registry.gauge_entries() {
-            let metadata = registry.metadata(&name);
-            gauges.push(GaugeSeries {
-                name,
-                labels,
-                value: g.get(),
-                metadata,
-            });
-        }
-        gauges.sort_by(|a, b| (a.name.as_str(), &a.labels).cmp(&(b.name.as_str(), &b.labels)));
-    }
-
-    #[cfg(feature = "timer")]
-    let mut timers = Vec::new();
-    #[cfg(feature = "timer")]
-    {
-        for (name, labels, t) in registry.timer_entries() {
-            let metadata = registry.metadata(&name);
-            timers.push(TimerSeries {
-                name,
-                labels,
-                stats: t.stats(),
-                metadata,
-            });
-        }
-        timers.sort_by(|a, b| (a.name.as_str(), &a.labels).cmp(&(b.name.as_str(), &b.labels)));
-    }
-
-    #[cfg(feature = "meter")]
-    let mut rate_meters = Vec::new();
-    #[cfg(feature = "meter")]
-    {
-        for (name, labels, r) in registry.rate_meter_entries() {
-            let metadata = registry.metadata(&name);
-            rate_meters.push(RateSeries {
-                name,
-                labels,
-                stats: r.stats(),
-                metadata,
-            });
-        }
-        rate_meters.sort_by(|a, b| (a.name.as_str(), &a.labels).cmp(&(b.name.as_str(), &b.labels)));
-    }
-
-    #[cfg(feature = "histogram")]
-    let mut histograms = Vec::new();
-    #[cfg(feature = "histogram")]
-    {
-        for (name, labels, h) in registry.histogram_entries() {
-            let metadata = registry.metadata(&name);
-            histograms.push(HistogramSeries {
-                name,
-                labels,
-                histogram: h.snapshot(),
-                metadata,
-            });
-        }
-        histograms.sort_by(|a, b| (a.name.as_str(), &a.labels).cmp(&(b.name.as_str(), &b.labels)));
-    }
-
     RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
-        counters,
-        gauges,
-        #[cfg(feature = "timer")]
-        timers,
-        #[cfg(feature = "meter")]
-        rate_meters,
-        #[cfg(feature = "histogram")]
-        histograms,
+        series,
         cardinality: CardinalitySnapshot {
             current: registry.cardinality_count(),
             cap: registry.cardinality_cap(),
             overflows: registry.cardinality_overflows(),
+            invalid_inputs: registry.invalid_inputs(),
+            kind_conflicts: registry.kind_conflicts(),
         },
     }
 }
 
-/// Snapshot + serialise to a JSON `String` via `serde_json`.
+/// Snapshot `registry` and serialise it as compact JSON.
 ///
-/// Equivalent to `serde_json::to_string(&snapshot(registry)).unwrap()`. The
-/// snapshot contains only finite primitives and owned strings, so
-/// serialisation cannot fail under normal conditions; the `unwrap` is sound.
-#[must_use]
-pub fn render(registry: &Registry) -> String {
-    serde_json::to_string(&snapshot(registry)).expect("RegistrySnapshot serialises to JSON")
+/// # Errors
+///
+/// Returns the `serde_json` error if serialisation fails. The snapshot only
+/// holds strings, integers and finite floats (non-finite values are written
+/// as strings), so this does not happen in practice.
+pub fn render(registry: &Registry) -> serde_json::Result<String> {
+    serde_json::to_string(&snapshot(registry))
 }
 
-/// Same as [`render`] but pretty-printed (newlines + indentation).
-#[must_use]
-pub fn render_pretty(registry: &Registry) -> String {
-    serde_json::to_string_pretty(&snapshot(registry)).expect("RegistrySnapshot serialises to JSON")
+/// Like [`render`] but indented.
+///
+/// # Errors
+///
+/// See [`render`].
+pub fn render_pretty(registry: &Registry) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(&snapshot(registry))
 }
 
 #[cfg(test)]
+#[cfg(all(feature = "count", feature = "gauge"))]
 mod tests {
     use super::*;
 
     #[test]
-    fn empty_registry_snapshot() {
+    fn test_json_snapshot_shape_and_order() {
         let r = Registry::new();
+        r.describe_counter("b_hits", "Hits", Unit::None).unwrap();
+        r.counter("b_hits").add(3);
+        r.counter_with("a_hits", &LabelSet::from([("k", "v")]))
+            .inc();
+        r.up_down_counter("c_level").add(-4);
+        r.gauge("d_temp").set(21.5);
         let snap = snapshot(&r);
         assert_eq!(snap.schema_version, SCHEMA_VERSION);
-        assert!(snap.counters.is_empty());
-        assert_eq!(snap.cardinality.current, 0);
-        assert!(snap.cardinality.cap > 0);
+        let names: Vec<_> = snap.series.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a_hits", "b_hits", "c_level", "d_temp"]);
+        let json = render(&r).unwrap();
+        assert!(json.contains(r#""labels":{"k":"v"}"#), "{json}");
+        assert!(json.contains(r#""help":"Hits""#));
+        assert!(json.contains(r#""type":"up_down_counter","value":-4"#));
+        assert!(json.contains(r#""type":"gauge","value":21.5"#));
+        assert!(render_pretty(&r).unwrap().contains('\n'));
+        assert_eq!(snap.cardinality.current, 4);
     }
 
     #[test]
-    #[cfg(feature = "count")]
-    fn counter_snapshot_includes_labels_and_value() {
+    fn test_json_non_finite_gauges_are_strings_regression_ml024() {
         let r = Registry::new();
-        r.describe_counter("hits", "Total hits", crate::Unit::Custom("hits"));
-        r.get_or_create_counter("hits").add(7);
-        let labels = LabelSet::from([("status", "200")]);
-        r.get_or_create_counter_with("hits", &labels).add(3);
-        let snap = snapshot(&r);
-        assert_eq!(snap.counters.len(), 2);
-        assert!(snap.counters.iter().any(|c| c.value == 7));
-        assert!(snap.counters.iter().any(|c| c.value == 3));
-        let labelled = snap.counters.iter().find(|c| !c.labels.is_empty()).unwrap();
-        assert_eq!(labelled.labels.get("status"), Some("200"));
-        assert!(labelled.metadata.is_some());
+        r.gauge("nan").set(f64::NAN);
+        r.gauge("pinf").set(f64::INFINITY);
+        r.gauge("ninf").set(f64::NEG_INFINITY);
+        let json = render(&r).unwrap();
+        assert!(json.contains(r#""value":"NaN""#));
+        assert!(json.contains(r#""value":"+Inf""#));
+        assert!(json.contains(r#""value":"-Inf""#));
+        assert!(!json.contains("null"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["series"].as_array().unwrap().len(), 3);
     }
 
+    #[cfg(all(feature = "timer", feature = "meter", feature = "histogram"))]
     #[test]
-    fn render_produces_valid_json() {
+    fn test_json_covers_every_type() {
         let r = Registry::new();
-        let body = render(&r);
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["schema_version"], 1);
-    }
-
-    #[test]
-    fn render_pretty_indents() {
-        let r = Registry::new();
-        let body = render_pretty(&r);
-        assert!(body.contains('\n'));
-    }
-
-    #[test]
-    #[cfg(feature = "gauge")]
-    fn gauge_snapshot_renders() {
-        let r = Registry::new();
-        r.get_or_create_gauge("temp").set(21.5);
-        r.get_or_create_gauge_with("temp", &LabelSet::from([("zone", "a")]))
-            .set(18.0);
-        let snap = snapshot(&r);
-        assert_eq!(snap.gauges.len(), 2);
-        // Sort order: empty labels first, then labeled.
-        assert!(snap
-            .gauges
-            .iter()
-            .any(|g| g.labels.is_empty() && g.value == 21.5));
-        assert!(snap
-            .gauges
-            .iter()
-            .any(|g| !g.labels.is_empty() && g.value == 18.0));
-    }
-
-    #[test]
-    #[cfg(feature = "timer")]
-    fn timer_snapshot_includes_stats() {
-        let r = Registry::new();
-        let t = r.get_or_create_timer("rpc");
-        t.record(std::time::Duration::from_millis(7));
-        let snap = snapshot(&r);
-        assert_eq!(snap.timers.len(), 1);
-        assert_eq!(snap.timers[0].stats.count, 1);
-        let body = render(&r);
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["timers"][0]["name"], "rpc");
-    }
-
-    #[test]
-    #[cfg(feature = "meter")]
-    fn rate_meter_snapshot_includes_stats() {
-        let r = Registry::new();
-        r.get_or_create_rate_meter("qps").tick_n(5);
-        let snap = snapshot(&r);
-        assert_eq!(snap.rate_meters.len(), 1);
-        assert_eq!(snap.rate_meters[0].stats.total_events, 5);
-    }
-
-    #[test]
-    fn cardinality_snapshot_reports_cap_and_overflows() {
-        let r = Registry::new();
-        r.set_cardinality_cap(1);
-        #[cfg(feature = "count")]
-        {
-            let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "1")]));
-            let _ = r.get_or_create_counter_with("c", &LabelSet::from([("k", "2")]));
-            // overflow
+        r.timer("t").record_ns(1_000);
+        r.rate_meter("r").tick();
+        r.histogram("h").observe(0.3);
+        r.summary("s").observe(0.3);
+        let _ = r.summary("s_empty");
+        r.sharded_counter("sc").inc();
+        let json = render(&r).unwrap();
+        for needle in [
+            r#""type":"timer""#,
+            r#""type":"rate""#,
+            r#""type":"histogram""#,
+            r#""type":"summary""#,
+            r#""upper_bound":"+Inf""#,
+            r#""value":"NaN""#,
+        ] {
+            assert!(json.contains(needle), "{needle} missing from {json}");
         }
-        let snap = snapshot(&r);
-        assert_eq!(snap.cardinality.cap, 1);
-        #[cfg(feature = "count")]
-        {
-            assert_eq!(snap.cardinality.current, 1);
-            assert!(snap.cardinality.overflows >= 1);
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "histogram")]
-    fn histogram_snapshot_round_trips() {
-        let r = Registry::new();
-        r.configure_histogram("rtt", [0.01, 0.05]);
-        let h = r.get_or_create_histogram("rtt");
-        h.observe(0.005);
-        h.observe(0.03);
-        let body = render(&r);
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["histograms"][0]["name"], "rtt");
-        assert_eq!(v["histograms"][0]["histogram"]["count"], 2);
     }
 }
