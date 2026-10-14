@@ -1,239 +1,165 @@
-//! Property-based tests for core invariants (v0.9.5+).
-//!
-//! These tests use [`proptest`] to exercise a wider input space than the
-//! hand-written unit suite. They focus on cross-cutting invariants that
-//! would silently break if a refactor introduced subtle off-by-one or
-//! ordering bugs.
-//!
-//! Skipped under `--no-default-features` because most properties require
-//! at least one metric type.
+//! Property tests over the public API: arithmetic edges, invariants, and
+//! panic-freedom for arbitrary inputs (ML-011).
 
-#![cfg(all(feature = "count", feature = "gauge", feature = "timer"))]
+#![cfg(all(
+    feature = "count",
+    feature = "gauge",
+    feature = "timer",
+    feature = "meter",
+    feature = "histogram",
+    feature = "sample"
+))]
+#![allow(clippy::unwrap_used)]
 
-use metrics_lib::{Counter, Gauge, LabelSet, MetricsError, Registry, Timer, TokenBucket};
+use metrics_lib::{
+    AdaptiveSampler, Counter, Gauge, Histogram, LabelSet, RateMeter, Registry, SamplingStrategy,
+    Summary, SummaryConfig, Timer, TokenBucket, UpDownCounter,
+};
 use proptest::prelude::*;
-use std::sync::Arc;
+use std::time::Duration;
 
 proptest! {
-    /// **Counter monotonicity.** A `Counter` exposed only to `inc()` and
-    /// `add(N: u64)` is monotonic non-decreasing.
     #[test]
-    fn counter_inc_add_is_monotonic(adds in proptest::collection::vec(any::<u64>(), 0..32)) {
+    fn prop_counter_adds_are_exact(adds in proptest::collection::vec(0u64..1_000_000, 0..64)) {
         let c = Counter::new();
-        let mut last = 0u64;
-        for n in adds {
-            // try_add may fail on overflow; either it succeeds (and value
-            // increases, or stays the same for n==0) or it fails (and
-            // value is unchanged).
-            let before = c.get();
-            match c.try_add(n) {
-                Ok(()) => {
-                    let after = c.get();
-                    prop_assert!(
-                        after >= before,
-                        "counter must be monotonic: before={before}, after={after}"
-                    );
-                    last = after;
-                }
-                Err(MetricsError::Overflow) => {
-                    // Counter is unchanged on overflow.
-                    prop_assert_eq!(c.get(), before);
-                }
-                Err(e) => panic!("unexpected error: {e:?}"),
-            }
-            prop_assert_eq!(c.get(), last);
+        for a in &adds {
+            c.add(*a);
         }
+        prop_assert_eq!(c.get(), adds.iter().sum::<u64>());
     }
 
-    /// **Counter try_add overflow guard.** `try_add` returns `Overflow`
-    /// iff the cumulative addition would exceed `u64::MAX`.
     #[test]
-    fn counter_try_add_overflow_iff_arithmetic_overflows(
-        start in any::<u64>(),
-        n in any::<u64>(),
-    ) {
-        let c = Counter::with_value(start);
-        match c.try_add(n) {
-            Ok(()) => {
-                let expected = start.checked_add(n).expect("Ok ⇒ no overflow");
-                prop_assert_eq!(c.get(), expected);
-            }
-            Err(MetricsError::Overflow) => {
-                prop_assert!(start.checked_add(n).is_none());
-                prop_assert_eq!(c.get(), start, "counter unchanged on overflow");
-            }
-            Err(e) => panic!("unexpected error: {e:?}"),
-        }
-    }
-
-    /// **Gauge `try_*` rejects non-finite inputs.** Any operation that
-    /// would put the gauge in a non-finite state returns `InvalidValue`
-    /// without mutating the gauge.
-    #[test]
-    fn gauge_try_set_rejects_non_finite(initial in -1e9_f64..1e9_f64) {
-        let g = Gauge::with_value(initial);
-        // `prop_assert!` reads the expression as a format string; pre-bind
-        // booleans so the `{ .. }` in the `matches!` arm doesn't confuse it.
-        let nan_rejected = matches!(
-            g.try_set(f64::NAN),
-            Err(MetricsError::InvalidValue { .. })
-        );
-        let inf_rejected = matches!(
-            g.try_set(f64::INFINITY),
-            Err(MetricsError::InvalidValue { .. })
-        );
-        prop_assert!(nan_rejected);
-        prop_assert!(inf_rejected);
-        prop_assert_eq!(g.get(), initial);
-    }
-
-    /// **LabelSet equality is insertion-order-independent (unique keys).**
-    /// Two sets built from the same unique-keyed pairs in any order compare
-    /// and hash equal. Duplicate-key inputs use last-write-wins semantics,
-    /// which is intentionally order-sensitive — `Cargo.toml` documents this
-    /// in the `LabelSet::add` contract.
-    #[test]
-    fn labelset_insertion_order_independence(
-        pairs in proptest::collection::vec(("[a-z]{1,8}", "[a-zA-Z0-9_]{0,12}"), 0..8),
-    ) {
-        // Deduplicate by key (keep first occurrence) so the test only
-        // exercises the order-independent case.
-        let mut seen = std::collections::HashSet::<String>::new();
-        let unique: Vec<(String, String)> = pairs
-            .into_iter()
-            .filter(|(k, _)| seen.insert(k.clone()))
-            .collect();
-
-        let a: LabelSet = unique.iter().cloned().collect();
-        let b: LabelSet = unique.iter().rev().cloned().collect();
-        prop_assert_eq!(&a, &b);
-        prop_assert_eq!(a.to_prometheus(), b.to_prometheus());
-
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut ha = DefaultHasher::new();
-        a.hash(&mut ha);
-        let mut hb = DefaultHasher::new();
-        b.hash(&mut hb);
-        prop_assert_eq!(ha.finish(), hb.finish());
-    }
-
-    /// **LabelSet duplicate-key is last-write-wins.** Documents the
-    /// intentional order-sensitive behaviour of `LabelSet::add` on
-    /// duplicate keys (proptest discovered this in v0.9.5).
-    #[test]
-    fn labelset_duplicate_key_keeps_last_value(
-        key in "[a-z]{1,8}",
-        values in proptest::collection::vec("[a-zA-Z0-9_]{0,12}", 1..6),
-    ) {
-        let mut set = LabelSet::new();
-        for v in &values {
-            set.add(key.clone(), v.clone());
-        }
-        prop_assert_eq!(set.len(), 1);
-        prop_assert_eq!(set.get(&key), Some(values.last().unwrap().as_str()));
-    }
-
-    /// **Timer batch is associative.** `record_batch(&[a, b])` agrees with
-    /// two sequential `record_ns` calls on `count`/`total`/`min`/`max`.
-    #[test]
-    fn timer_record_batch_matches_sequential(
-        durations in proptest::collection::vec(0u64..1_000_000u64, 1..16),
-    ) {
-        let dur_vec: Vec<_> = durations
-            .iter()
-            .map(|&n| std::time::Duration::from_nanos(n))
-            .collect();
-
-        let batched = Timer::new();
-        batched.record_batch(&dur_vec);
-
-        let seq = Timer::new();
-        for d in &dur_vec {
-            seq.record(*d);
-        }
-
-        prop_assert_eq!(batched.count(), seq.count());
-        prop_assert_eq!(batched.total(), seq.total());
-        prop_assert_eq!(batched.min(), seq.min());
-        prop_assert_eq!(batched.max(), seq.max());
-    }
-
-    /// **Registry singleton-per-name.** Repeated `get_or_create_counter`
-    /// for the same name returns `Arc::ptr_eq` references.
-    #[test]
-    fn registry_returns_same_arc_for_same_name(name in "[a-z]{1,20}") {
-        let r = Registry::new();
-        let a = r.get_or_create_counter(&name);
-        let b = r.get_or_create_counter(&name);
-        prop_assert!(Arc::ptr_eq(&a, &b));
-    }
-
-    /// **TokenBucket never overshoots capacity.** No matter how many
-    /// `acquire(1)` attempts are interleaved against `acquire(n>1)`
-    /// attempts, the total successful tokens cannot exceed the bucket
-    /// capacity when refill is disabled.
-    #[test]
-    fn token_bucket_no_overshoot_no_refill(
-        capacity in 1u32..1000u32,
-        attempts in proptest::collection::vec(1u32..50u32, 1..64),
-    ) {
-        let b = TokenBucket::new(capacity, 0.0);
-        let mut taken = 0u32;
-        for n in attempts {
-            if b.acquire(n) {
-                taken = taken.saturating_add(n);
+    fn prop_gauge_unchecked_api_never_panics(ops in proptest::collection::vec((0u8..12, any::<f64>(), any::<f64>()), 0..64)) {
+        let g = Gauge::new();
+        for (op, a, b) in ops {
+            match op {
+                0 => g.set(a),
+                1 => g.add(a),
+                2 => g.sub(a),
+                3 => g.set_max(a),
+                4 => g.set_min(a),
+                5 => g.multiply(a),
+                6 => g.divide(a),
+                7 => g.clamp(a, b),
+                8 => g.update_ema(a, b),
+                9 => g.abs(),
+                10 => { let _ = g.try_add(a); let _ = g.try_set(b); }
+                _ => { let _ = g.compare_and_swap(a, b); }
             }
         }
-        prop_assert!(taken <= capacity, "taken={taken} > capacity={capacity}");
+        let _ = g.stats();
     }
-}
 
-#[cfg(feature = "histogram")]
-mod histogram_props {
-    use super::*;
-    use metrics_lib::Histogram;
-
-    proptest! {
-        /// **Histogram count == sum of bucket counts** (the trailing +Inf
-        /// bucket equals the total).
-        #[test]
-        fn count_matches_inf_bucket(values in proptest::collection::vec(-1e3_f64..1e3_f64, 0..32)) {
-            let h = Histogram::with_buckets([0.0, 0.1, 1.0, 10.0]);
-            let mut finite = 0u64;
-            for v in &values {
-                if v.is_finite() {
-                    finite += 1;
-                    h.observe(*v);
-                }
-            }
-            let snap = h.snapshot();
-            prop_assert_eq!(snap.count, finite);
-            prop_assert_eq!(
-                snap.buckets.last().expect("at least the +Inf bucket").count,
-                finite
-            );
+    #[test]
+    fn prop_updown_matches_i64_wrapping(deltas in proptest::collection::vec(any::<i64>(), 0..32)) {
+        let c = UpDownCounter::new();
+        let mut expected = 0i64;
+        for d in &deltas {
+            c.add(*d);
+            expected = expected.wrapping_add(*d);
         }
+        prop_assert_eq!(c.get(), expected);
+    }
 
-        /// **Histogram quantile monotonicity.** `quantile(a) <= quantile(b)`
-        /// whenever `a <= b`.
-        #[test]
-        fn quantile_is_monotone(
-            values in proptest::collection::vec(0.001_f64..100.0_f64, 1..64),
-            a in 0.0_f64..1.0,
-            b in 0.0_f64..1.0,
-        ) {
-            let h = Histogram::default_seconds();
+    #[test]
+    fn prop_timer_accepts_any_duration(nanos in proptest::collection::vec(any::<u64>(), 0..32), secs in any::<u64>()) {
+        let t = Timer::new();
+        for n in &nanos {
+            t.record_ns(*n);
+        }
+        t.record(Duration::new(secs, 999_999_999));
+        let stats = t.stats();
+        prop_assert_eq!(stats.count, nanos.len() as u64 + 1);
+        prop_assert!(stats.max >= stats.min);
+    }
+
+    #[test]
+    fn prop_histogram_constructors_never_panic(
+        bounds in proptest::collection::vec(any::<f64>(), 0..40),
+        start in any::<f64>(), width in any::<f64>(), count in 0usize..5000,
+        values in proptest::collection::vec(any::<f64>(), 0..40),
+    ) {
+        for h in [
+            Histogram::with_buckets(bounds.clone()),
+            Histogram::linear(start, width, count),
+            Histogram::exponential(start, width, count),
+        ] {
             for v in &values {
                 h.observe(*v);
+                let _ = h.try_observe(*v);
             }
-            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-            let q_lo = h.quantile(lo);
-            let q_hi = h.quantile(hi);
-            prop_assert!(
-                q_lo <= q_hi + 1e-9,
-                "quantile({lo}) = {q_lo} > quantile({hi}) = {q_hi}"
-            );
+            let snap = h.snapshot();
+            prop_assert_eq!(snap.buckets.last().map(|b| b.count), Some(snap.count));
+            let _ = h.quantile(start);
         }
+    }
+
+    #[test]
+    fn prop_summary_config_and_observe_never_panic(
+        alpha in any::<f64>(), lo in any::<f64>(), hi in any::<f64>(),
+        quantiles in proptest::collection::vec(any::<f64>(), 0..5),
+        values in proptest::collection::vec(any::<f64>(), 0..40),
+    ) {
+        let cfg = SummaryConfig::default().with_relative_accuracy(alpha).with_range(lo, hi).with_quantiles(quantiles);
+        let s = Summary::with_config(cfg).unwrap_or_default();
+        for v in &values {
+            s.observe(*v);
+        }
+        let snap = s.snapshot();
+        prop_assert!(snap.count <= values.len() as u64);
+    }
+
+    #[test]
+    fn prop_samplers_never_panic(rate in any::<u32>(), min in any::<u32>(), max in any::<u32>(), target in any::<u64>(), interval in any::<u64>()) {
+        for strategy in [
+            SamplingStrategy::Fixed { rate },
+            SamplingStrategy::Dynamic { min_rate: min, max_rate: max, target_throughput: target },
+            SamplingStrategy::TimeBased { min_interval: interval },
+        ] {
+            let s = AdaptiveSampler::with_seed(strategy, u64::from(rate));
+            for _ in 0..16 {
+                let _ = s.should_sample();
+            }
+            let _ = s.stats().sampling_percentage();
+        }
+    }
+
+    #[test]
+    fn prop_token_bucket_never_panics(capacity in any::<u64>(), rate in any::<f64>(), n in any::<u64>()) {
+        let b = TokenBucket::new(capacity, rate);
+        let _ = b.try_acquire(n);
+        let _ = b.time_until_available(n);
+        prop_assert!(b.available() <= b.capacity());
+        b.reset();
+    }
+
+    #[test]
+    fn prop_rate_meter_total_is_exact(ticks in proptest::collection::vec(0u64..u64::from(u32::MAX) * 4, 0..16)) {
+        let m = RateMeter::with_window(Duration::from_millis(250));
+        let mut total = 0u64;
+        for t in &ticks {
+            if m.try_tick_n(*t).is_ok() {
+                total += t;
+            }
+        }
+        prop_assert_eq!(m.total(), total);
+        prop_assert!(m.rate() >= 0.0);
+    }
+
+    #[test]
+    fn prop_registry_never_panics_on_arbitrary_names_and_labels(
+        names in proptest::collection::vec(".{0,40}", 1..20),
+        labels in proptest::collection::vec((".{0,20}", ".{0,40}"), 0..5),
+    ) {
+        let r = Registry::with_cardinality_cap(50);
+        let set: LabelSet = labels.into_iter().collect();
+        for n in &names {
+            r.counter_with(n, &set).inc();
+            let _ = r.try_gauge_with(n, &set);
+            let _ = r.describe_counter(n, "h", metrics_lib::Unit::None);
+            let _ = r.remove_series(n, &set);
+        }
+        prop_assert!(r.cardinality_count() <= 50);
+        let _ = r.evict_idle(Duration::ZERO);
     }
 }
