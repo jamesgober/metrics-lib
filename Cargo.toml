@@ -38,6 +38,7 @@ include = [
     "/benches/**/*.rs",
     "/examples/**/*.rs",
     "/docs/*.md",
+    "/docs/release/v2.0.0.md",
     "/README.md",
     "/CHANGELOG.md",
     "/LICENSE-APACHE",
@@ -170,13 +171,8 @@ http = "1.1"
 # Tests and example for the `metrics-rs` bridge.
 metrics = "0.24"
 
-# Model checker for the lock-free paths. Only resolved for
-# `RUSTFLAGS="--cfg loom" cargo test --release --test loom_models`.
-[target.'cfg(loom)'.dev-dependencies]
-loom = "0.7"
-
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(docsrs)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 
 

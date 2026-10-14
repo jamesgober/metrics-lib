@@ -19,12 +19,12 @@ const THRESHOLDS = {
     'timer.start_stop': 0.08,
     'rate.tick': 0.08,
     'rate.tick_n': 0.08,
-    'rate.tick_n.concurrent(4)': 0.10,
-    // noisy sub-ns
+    'registry_lookup.counter_unlabeled_hit': 0.10,
+    'registry_lookup.counter_labeled_hit': 0.10,
+    // Sub-ns gauge operations can be noisier; keep looser
     'gauge.set': 0.18,
     'gauge.set_max': 0.18,
-    'gauge.set_min': 0.18,
-    'gauge.access': 0.18,
+    'gauge.get': 0.18
   },
 };
 // Core benches considered most stable on CI
@@ -60,22 +60,12 @@ function extractJSON(text){
 }
 
 function friendlyName(name){
-  if(name === 'tick_n') return 'rate.tick_n';
-  if(name === 'tick') return 'rate.tick';
-  if(name === 'tick_n_concurrent_4_threads') return 'rate.tick_n.concurrent(4)';
-  if(name === 'increment') return 'counter.inc';
-  if(name === 'add') return 'counter.add';
-  if(name === 'get') return 'get';
-  if(name === 'set') return 'gauge.set';
-  if(name === 'set_max') return 'gauge.set_max';
-  if(name === 'set_min') return 'gauge.set_min';
-  if(name === 'counter_access') return 'counter.access';
-  if(name === 'gauge_access') return 'gauge.access';
-  if(name === 'record') return 'timer.record';
-  if(name === 'record_ns') return 'timer.record_ns';
-  if(name === 'start_stop') return 'timer.start_stop';
-  if(name === 'stats') return 'timer.stats';
-  return name;
+  // Aggregated names are '<group>/<function>[/<input>]' (Criterion 0.7 layout).
+  var n = String(name).split('/').join('.');
+  if(n.indexOf('rate_meter.')===0) return 'rate.'+n.slice('rate_meter.'.length);
+  var m = /^contended_increments\.(\w+)\.(\d+)$/.exec(n);
+  if(m) return 'threads:'+m[2]+' '+m[1];
+  return n;
 }
 
 function buildHistory(obj){
