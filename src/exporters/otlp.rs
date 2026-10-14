@@ -56,7 +56,7 @@ mod proto;
 use crate::registry::{FamilySnapshot, Handle};
 use crate::{LabelSet, MetricKind, Registry};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -191,8 +191,20 @@ impl OtlpExporter {
             next: &mut next,
         };
         let mut out = Vec::new();
+        // A derived name (`<rate>.per_second`) can equal another family's
+        // name; the first family in name order keeps it, as in the text
+        // exporters, and the clash is counted.
+        let mut claimed: HashSet<String> = HashSet::new();
+        let mut family_metrics = Vec::new();
         for family in registry.collect() {
-            ctx.family(&family, &mut out);
+            family_metrics.clear();
+            ctx.family(&family, &mut family_metrics);
+            if family_metrics.iter().any(|m| claimed.contains(&m.name)) {
+                registry.note_exposition_conflict();
+                continue;
+            }
+            claimed.extend(family_metrics.iter().map(|m| m.name.clone()));
+            out.append(&mut family_metrics);
         }
         *previous = next;
         out
@@ -959,6 +971,27 @@ mod tests {
             }
             _ => panic!("expected a sum"),
         }
+    }
+
+    #[cfg(all(feature = "meter", feature = "gauge"))]
+    #[test]
+    fn test_derived_name_collisions_are_skipped_regression_ml2_007() {
+        let r = Registry::new();
+        // The rate meter `q` emits `q.per_second`; the gauge clashes.
+        r.rate_meter("q").tick();
+        r.gauge("q.per_second").set(5.0);
+        let req = OtlpExporter::new("svc").build(&r);
+        let names: Vec<&str> = req.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["q", "q.per_second"]);
+        assert!(matches!(
+            metric_by_name(&req, "q.per_second").data,
+            MetricData::Gauge { .. }
+        ));
+        assert_eq!(r.exposition_conflicts(), 1);
     }
 
     #[test]

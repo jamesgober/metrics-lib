@@ -50,9 +50,9 @@
 //! ```
 
 use crate::labels::push_statsd_safe;
-use crate::registry::Handle;
-use crate::{LabelSet, Registry};
-use std::collections::HashMap;
+use crate::registry::{FamilySnapshot, Handle};
+use crate::{LabelSet, MetricKind, Registry};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -171,7 +171,18 @@ impl StatsdSink {
             previous: &previous,
             seen: &mut seen,
         };
+        // Derived names (`<timer>.count`, `<rate>.per_second`, …) can equal
+        // another family's name; the first family in name order keeps them,
+        // as in the text exporters, and the clash is counted. Delta baselines
+        // are therefore never shared between two series.
+        let mut claimed: HashSet<String> = HashSet::new();
         for family in registry.collect() {
+            let names = emitted_names(&family);
+            if names.iter().any(|n| claimed.contains(n)) {
+                registry.note_exposition_conflict();
+                continue;
+            }
+            claimed.extend(names);
             for s in &family.series {
                 w.series(&family.name, &s.labels, &s.handle);
             }
@@ -329,6 +340,37 @@ impl Writer<'_> {
     }
 }
 
+/// Every metric name `family` writes (before the sink prefix).
+fn emitted_names(family: &FamilySnapshot) -> Vec<String> {
+    let name = &family.name;
+    let derived = |suffixes: &[&str]| -> Vec<String> {
+        suffixes.iter().map(|s| format!("{name}.{s}")).collect()
+    };
+    match family.kind {
+        MetricKind::Timer => derived(&["count", "sum_seconds", "min_seconds", "max_seconds"]),
+        MetricKind::Rate => derived(&["total", "per_second"]),
+        MetricKind::Histogram => derived(&["count", "sum", "p50", "p95", "p99"]),
+        MetricKind::Summary => {
+            // Summaries only exist with `histogram`.
+            #[cfg_attr(not(feature = "histogram"), allow(unused_mut))]
+            let mut names = derived(&["count", "sum"]);
+            #[cfg(feature = "histogram")]
+            for s in &family.series {
+                if let Handle::Summary(summary) = &s.handle {
+                    for q in summary.quantile_targets() {
+                        let n = format!("{name}.{}", quantile_suffix(*q));
+                        if !names.contains(&n) {
+                            names.push(n);
+                        }
+                    }
+                }
+            }
+            names
+        }
+        _ => vec![name.clone()],
+    }
+}
+
 /// `0.5` → `p50`, `0.999` → `p99_9`.
 #[cfg_attr(not(feature = "histogram"), allow(dead_code))]
 fn quantile_suffix(q: f64) -> String {
@@ -367,6 +409,27 @@ mod tests {
         // Gauge mode sends totals.
         let gauges = loopback().0.with_counter_mode(CounterMode::Gauge);
         assert_eq!(gauges.render(&r), "hits:2|g\n");
+    }
+
+    #[cfg(all(feature = "count", feature = "timer"))]
+    #[test]
+    fn test_derived_name_collisions_are_skipped_regression_ml2_007() {
+        let (sink, _recv) = loopback();
+        let r = Registry::new();
+        // The timer `t` emits `t.count`; the counter `t.count` clashes.
+        r.timer("t").record_ns(1_000);
+        let clash = r.counter("t.count");
+        clash.add(10);
+        let first = sink.render(&r);
+        assert_eq!(first.matches("t.count:").count(), 1, "{first}");
+        assert!(first.contains("t.count:1|c"), "{first}");
+        assert_eq!(r.exposition_conflicts(), 1);
+        r.timer("t").record_ns(1_000);
+        clash.add(10);
+        // The timer's delta baseline is its own: one new sample.
+        let second = sink.render(&r);
+        assert!(second.contains("t.count:1|c"), "{second}");
+        assert_eq!(second.matches("t.count:").count(), 1, "{second}");
     }
 
     #[cfg(feature = "count")]
