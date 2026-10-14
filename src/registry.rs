@@ -217,6 +217,7 @@ macro_rules! registry_metric {
                 Handle::$variant(metric)
             }
             #[allow(unreachable_patterns)]
+            #[inline]
             fn unwrap(handle: &Handle) -> Option<&Arc<Self>> {
                 match handle {
                     Handle::$variant(m) => Some(m),
@@ -459,19 +460,20 @@ fn unix_nanos_now() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// Constant-time shard selection from the length and the edges of the name.
-/// Shard quality only affects contention, never correctness.
+/// Constant-time shard selection from the length and four sampled bytes of
+/// the name (no copies, no calls). Shard quality only affects contention,
+/// never correctness.
 #[inline]
 fn shard_index(name: &str) -> usize {
     let bytes = name.as_bytes();
-    let mut head = [0u8; 8];
-    let mut tail = [0u8; 8];
-    let n = bytes.len().min(8);
-    head[..n].copy_from_slice(&bytes[..n]);
-    tail[..n].copy_from_slice(&bytes[bytes.len() - n..]);
-    let mixed = (u64::from_le_bytes(head) ^ u64::from_le_bytes(tail).rotate_left(29))
-        .wrapping_add(bytes.len() as u64)
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let len = bytes.len();
+    let at = |i: usize| u64::from(bytes.get(i).copied().unwrap_or(0));
+    let sampled = at(0)
+        | (at(len / 2) << 8)
+        | (at(len.wrapping_sub(2)) << 16)
+        | (at(len.wrapping_sub(1)) << 24)
+        | ((len as u64) << 32);
+    let mixed = sampled.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     #[allow(clippy::cast_possible_truncation)] // only the top bits are used
     let index = (mixed >> 60) as usize;
     index & (SHARDS - 1)
@@ -610,6 +612,7 @@ impl Registry {
         T::unwrap(&series.handle).cloned()
     }
 
+    #[inline]
     pub(crate) fn lookup<T: RegistryMetric>(&self, name: &str, labels: &LabelSet) -> Arc<T> {
         if let Some(found) = self.find::<T>(name, labels) {
             return found;
