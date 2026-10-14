@@ -1,6 +1,55 @@
-//! Small time and rate helpers shared by every metric type.
+//! Small time, rate and atomic helpers shared by every metric type.
 
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// Read-modify-write through a compare-and-swap loop.
+///
+/// Same contract as the standard `fetch_update`: `f` is called with the
+/// current value until it returns `None` (the update is abandoned and the
+/// current value returned as `Err`) or the swap succeeds (the previous value
+/// is returned as `Ok`). The standard method was renamed `try_update` after
+/// the MSRV, and the old name is deprecated on current compilers, so the
+/// crate uses this one name on every supported toolchain.
+pub(crate) trait CasUpdate {
+    /// The integer type held by the atomic.
+    type Value: Copy;
+
+    /// See the trait documentation.
+    fn cas_update(
+        &self,
+        set_order: Ordering,
+        fetch_order: Ordering,
+        f: impl FnMut(Self::Value) -> Option<Self::Value>,
+    ) -> Result<Self::Value, Self::Value>;
+}
+
+macro_rules! cas_update_impl {
+    ($($atomic:ty => $value:ty),* $(,)?) => {$(
+        impl CasUpdate for $atomic {
+            type Value = $value;
+
+            #[inline]
+            fn cas_update(
+                &self,
+                set_order: Ordering,
+                fetch_order: Ordering,
+                mut f: impl FnMut($value) -> Option<$value>,
+            ) -> Result<$value, $value> {
+                let mut prev = self.load(fetch_order);
+                while let Some(next) = f(prev) {
+                    match self.compare_exchange_weak(prev, next, set_order, fetch_order) {
+                        Ok(previous) => return Ok(previous),
+                        Err(actual) => prev = actual,
+                    }
+                }
+                Err(prev)
+            }
+        }
+    )*};
+}
+
+cas_update_impl!(AtomicU64 => u64, AtomicI64 => i64, AtomicUsize => usize);
 
 /// Clamp a `Duration` to whole nanoseconds in `u64`.
 #[inline]

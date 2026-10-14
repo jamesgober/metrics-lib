@@ -37,6 +37,7 @@
 //! assert!((p99 - 0.099).abs() / 0.099 <= 0.02);
 //! ```
 
+use crate::util::CasUpdate;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -415,7 +416,7 @@ impl Summary {
 
 #[inline]
 fn update_f64(cell: &AtomicU64, f: impl Fn(f64) -> Option<f64>) {
-    let _ = cell.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+    let _ = cell.cas_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
         f(f64::from_bits(bits)).map(f64::to_bits)
     });
 }

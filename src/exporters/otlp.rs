@@ -1095,7 +1095,7 @@ mod tests {
         let g = fields(&bytes(&gauge, 5)[0]);
         let gp = fields(&bytes(&g, 1)[0]);
         assert_eq!(one(&gp, 4), Value::Fixed64(1.5f64.to_bits()));
-        assert!(!render_protobuf(&r, "svc").is_empty());
+        assert_ne!(render_protobuf(&r, "svc").len(), 0);
     }
 
     #[cfg(all(feature = "timer", feature = "meter", feature = "histogram"))]

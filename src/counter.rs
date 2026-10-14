@@ -19,6 +19,7 @@
 //! operation uses `Relaxed` ordering and does not order any other memory
 //! access.
 
+use crate::util::CasUpdate;
 use crate::util::per_second;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -153,7 +154,7 @@ impl Counter {
     #[inline]
     pub fn try_fetch_add(&self, amount: u64) -> Result<u64> {
         self.value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(amount)
             })
             .map_err(|_| MetricsError::Overflow)
@@ -252,7 +253,7 @@ impl Counter {
     pub fn saturating_add(&self, amount: u64) {
         let _ = self
             .value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 let next = current.saturating_add(amount);
                 (next != current).then_some(next)
             });
@@ -282,7 +283,7 @@ impl Counter {
     #[inline]
     pub fn inc_max(&self, max_value: u64) -> bool {
         self.value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 (current < max_value).then(|| current + 1)
             })
             .is_ok()

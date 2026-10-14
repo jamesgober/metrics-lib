@@ -862,7 +862,10 @@ mod tests {
         assert!((0.0..=100.0).contains(&snap.health_score));
         assert!(health.cpu_free() <= 100.0);
         assert!(health.process_cpu_used() >= 0.0);
-        assert!(health.quick_check() == HealthStatus::from_score(health.health_score()));
+        assert_eq!(
+            health.quick_check(),
+            HealthStatus::from_score(health.health_score())
+        );
         assert!(format!("{health}").contains("SystemHealth"));
         assert!(format!("{health:?}").contains("SystemHealth"));
         assert_eq!(health.config(), &HealthConfig::default());

@@ -43,6 +43,7 @@
 //! assert!(bucket.acquire(5));
 //! ```
 
+use crate::util::CasUpdate;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -215,7 +216,7 @@ impl TokenBucket {
         match self.mode {
             Mode::Static => self
                 .state
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                .cas_update(Ordering::AcqRel, Ordering::Acquire, |left| {
                     left.checked_sub(n)
                 })
                 .map(|_| ())
@@ -229,7 +230,7 @@ impl TokenBucket {
                     return Err(MetricsError::WouldBlock);
                 }
                 self.state
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |tat| {
+                    .cas_update(Ordering::AcqRel, Ordering::Acquire, |tat| {
                         let next = u128::from(tat.max(now)) + cost;
                         let ahead = next - u128::from(now);
                         if ahead > u128::from(tolerance_ns) {

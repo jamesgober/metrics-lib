@@ -32,6 +32,7 @@
 //!   can overshoot the limit by up to `threads − 1` events. For strict
 //!   admission use [`TokenBucket`](crate::TokenBucket).
 
+use crate::util::CasUpdate;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -264,7 +265,7 @@ impl RateMeter {
         }
         let _ = self
             .total
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| t.checked_add(n))
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |t| t.checked_add(n))
             .map_err(|_| MetricsError::Overflow)?;
         self.record_windows(self.now_ns(), n);
         Ok(())

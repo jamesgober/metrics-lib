@@ -58,6 +58,7 @@
 //! ```
 
 use crate::name::{sanitize_metric_name, validate_metric_name};
+use crate::util::CasUpdate;
 use crate::{LabelSet, MetricKind, MetricMetadata, MetricsError, Result, Unit};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -583,7 +584,7 @@ impl Registry {
         }
         let cap = self.cardinality_cap();
         self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .cas_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(slots).filter(|next| *next <= cap)
             })
             .map(|_| ())
@@ -597,7 +598,7 @@ impl Registry {
         if slots > 0 {
             let _ = self
                 .used
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                .cas_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                     Some(used.saturating_sub(slots))
                 });
         }
@@ -1960,7 +1961,7 @@ mod tests {
         let keys: Vec<_> = entries.iter().map(|e| (e.0.as_str(), e.1.len())).collect();
         assert_eq!(keys, vec![("a", 0), ("a", 1), ("b", 0)]);
         assert_eq!(r.counter_names(), vec!["a", "b"]);
-        assert!(r.gauge_names().is_empty());
+        assert_eq!(r.gauge_names().len(), 0);
         assert!(format!("{r:?}").contains("Registry"));
     }
 
@@ -1990,7 +1991,7 @@ mod tests {
         assert!(http.try_gauge_with("g3", &LabelSet::EMPTY).is_ok());
         assert!(http.try_gauge("g4").is_ok());
         assert!(http.try_timer_with("t5", &LabelSet::EMPTY).is_ok());
-        assert!(std::ptr::eq(http.registry(), &r));
+        assert!(std::ptr::eq(http.registry(), std::ptr::from_ref(&r)));
         http.describe_gauge("g", "", Unit::None).unwrap();
         http.describe_timer("t9", "", Unit::None).unwrap();
         http.describe_rate("r9", "", Unit::None).unwrap();

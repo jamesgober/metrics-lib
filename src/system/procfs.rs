@@ -240,7 +240,8 @@ intr 12345\nctxt 999\nbtime 1700000000\nprocesses 4242\n";
                 24 => 250,
                 n => n,
             };
-            s.push_str(&format!(" {value}"));
+            s.push(' ');
+            s.push_str(&value.to_string());
         }
         s.push('\n');
         s

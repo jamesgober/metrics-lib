@@ -17,6 +17,7 @@
 //!   in those cases. The `try_*` variants report the same situations as
 //!   errors.
 
+use crate::util::CasUpdate;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -118,7 +119,7 @@ impl Gauge {
     #[inline]
     fn update(&self, f: impl Fn(f64) -> Option<f64>) -> bool {
         self.bits
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
                 f(f64::from_bits(bits)).map(f64::to_bits)
             })
             .is_ok()

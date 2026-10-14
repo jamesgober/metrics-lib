@@ -5,6 +5,7 @@
 //! claimed by one thread with a compare-and-swap on a timestamp, so callers
 //! never wait on each other.
 
+use crate::util::CasUpdate;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -166,7 +167,7 @@ impl AdaptiveSampler {
     fn sample_time_based(&self, now: u64, min_interval: u64) -> bool {
         let keep = self
             .last_sample_ns
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |last| {
+            .cas_update(Ordering::AcqRel, Ordering::Acquire, |last| {
                 (last == u64::MAX || now.saturating_sub(last) >= min_interval).then_some(now)
             })
             .is_ok();
@@ -485,7 +486,7 @@ impl MetricCircuitBreaker {
     fn admit_half_open(&self) -> bool {
         let max = self.config.half_open_max_calls;
         self.half_open_calls
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+            .cas_update(Ordering::AcqRel, Ordering::Acquire, |c| {
                 (c < max).then(|| c + 1)
             })
             .is_ok()
@@ -602,7 +603,7 @@ impl BackpressureController {
         let max = self.max_pending;
         if self
             .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |p| {
+            .cas_update(Ordering::AcqRel, Ordering::Acquire, |p| {
                 (p < max).then(|| p + 1)
             })
             .is_ok()

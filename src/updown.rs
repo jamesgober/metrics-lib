@@ -6,6 +6,7 @@
 //! [`Counter`](crate::Counter) it may decrease. Exporters render it as a
 //! gauge (Prometheus/OpenMetrics) or a non-monotonic sum (OTLP).
 
+use crate::util::CasUpdate;
 use crate::{MetricsError, Result};
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -89,7 +90,7 @@ impl UpDownCounter {
     /// ```
     pub fn try_add(&self, delta: i64) -> Result<()> {
         self.value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 v.checked_add(delta)
             })
             .map(|_| ())
@@ -112,7 +113,7 @@ impl UpDownCounter {
     /// error.
     pub fn try_sub(&self, delta: i64) -> Result<()> {
         self.value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 v.checked_sub(delta)
             })
             .map(|_| ())

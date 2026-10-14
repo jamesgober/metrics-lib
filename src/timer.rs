@@ -32,6 +32,7 @@
 //! accumulated time and the wrap counter multiplies that by another 2^64.
 //! Durations longer than `u64::MAX` nanoseconds are clamped.
 
+use crate::util::CasUpdate;
 use crate::{MetricsError, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -178,7 +179,7 @@ impl Timer {
         // step, so concurrent callers cannot push it past u64::MAX.
         let _ = self
             .count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_add(1))
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_add(1))
             .map_err(|_| MetricsError::Overflow)?;
         self.add_total(duration_ns);
         self.update_min(duration_ns);
@@ -227,7 +228,7 @@ impl Timer {
         let n = u64::try_from(durations.len()).map_err(|_| MetricsError::Overflow)?;
         let _ = self
             .count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_add(n))
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |c| c.checked_add(n))
             .map_err(|_| MetricsError::Overflow)?;
         let (sum, min, max) = summarize(durations);
         self.add_total_u128(sum);
@@ -793,7 +794,7 @@ mod tests {
             .sum();
         assert_eq!(timer.total_nanos(), expected);
         assert_eq!(timer.min(), Duration::from_nanos(1));
-        assert_eq!(timer.max(), Duration::from_nanos(710_000));
+        assert_eq!(timer.max(), Duration::from_micros(710));
     }
 
     proptest! {

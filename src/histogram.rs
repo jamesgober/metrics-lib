@@ -41,6 +41,7 @@
 //! assert!(latency.quantile(0.5) > 0.0);
 //! ```
 
+use crate::util::CasUpdate;
 use crate::{LabelSet, MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError, TryLockError};
@@ -374,7 +375,7 @@ impl Histogram {
         let _ = self.total.fetch_add(1, Ordering::Relaxed);
         let _ = self
             .sum_bits
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
                 let next = f64::from_bits(bits) + value;
                 // Leave the sum untouched rather than store ±∞; the bucket
                 // and count updates above still stand.
