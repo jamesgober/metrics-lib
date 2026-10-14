@@ -141,9 +141,11 @@ impl Timer {
     #[inline]
     pub fn record_ns(&self, duration_ns: u64) {
         self.add_total(duration_ns);
-        let _ = self.count.fetch_add(1, Ordering::Relaxed);
         self.update_min(duration_ns);
         self.update_max(duration_ns);
+        // Published last (release), so a reader that sees the new count
+        // (acquire) also sees the extremes it includes.
+        let _ = self.count.fetch_add(1, Ordering::Release);
     }
 
     /// Record a duration, refusing when the sample count would overflow.
@@ -195,12 +197,12 @@ impl Timer {
         }
         let (sum, min, max) = summarize(durations);
         self.add_total_u128(sum);
-        let _ = self.count.fetch_add(
-            u64::try_from(durations.len()).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
         self.update_min(min);
         self.update_max(max);
+        let _ = self.count.fetch_add(
+            u64::try_from(durations.len()).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
     }
 
     /// [`Timer::record_batch`] that refuses when the sample count would
@@ -260,7 +262,9 @@ impl Timer {
     #[inline]
     #[must_use]
     pub fn count(&self) -> u64 {
-        self.count.load(Ordering::Relaxed)
+        // Acquire pairs with the release in `record_ns`: the extremes and the
+        // sum of every counted sample are visible to the caller.
+        self.count.load(Ordering::Acquire)
     }
 
     /// Sum of recorded durations in nanoseconds, as a 128-bit value.
@@ -300,11 +304,14 @@ impl Timer {
     }
 
     /// Smallest recorded duration, or `Duration::ZERO` when empty.
+    ///
+    /// The "no minimum yet" sentinel is never returned, even to a reader
+    /// racing with a `reset`, so exporters cannot report a 584-year minimum.
     #[inline]
     #[must_use]
     pub fn min(&self) -> Duration {
         match self.min_nanos.load(Ordering::Relaxed) {
-            u64::MAX if self.count() == 0 => Duration::ZERO,
+            u64::MAX => Duration::ZERO,
             ns => Duration::from_nanos(ns),
         }
     }
@@ -617,6 +624,17 @@ macro_rules! time_fn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_min_never_reports_the_unset_sentinel_regression_ml2_009() {
+        // The state a reader can observe while racing a first recording or
+        // a reset: a counted sample whose minimum is not published yet.
+        let t = Timer::new();
+        t.count.store(1, Ordering::Relaxed);
+        assert_eq!(t.min(), Duration::ZERO);
+        t.record_ns(7);
+        assert_eq!(t.min(), Duration::from_nanos(7));
+    }
     use proptest::prelude::*;
     use std::sync::Barrier;
     use std::thread;
