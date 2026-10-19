@@ -1,4 +1,4 @@
-//! Windows sampler: five documented kernel32 calls on the current process
+//! Windows sampler: six documented kernel32 calls on the current process
 //! and the host, declared here directly (no binding crate).
 //!
 //! Every call writes fixed-size structures through pointers to local values

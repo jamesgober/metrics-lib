@@ -14,7 +14,7 @@
 //! # Platform support
 //!
 //! Linux, Windows and macOS are read directly, with no dependency: `/proc`
-//! on Linux, five kernel32 calls on Windows, and libSystem (`getrusage`,
+//! on Linux, six kernel32 calls on Windows, and libSystem (`getrusage`,
 //! `proc_pidinfo`, Mach host statistics, `sysctl`) on macOS. A process
 //! sample takes microseconds there. Other targets (FreeBSD and the other
 //! BSDs, …) use the `sysinfo` crate, which is compiled only for them.

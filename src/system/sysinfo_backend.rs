@@ -74,15 +74,7 @@ impl Platform {
     }
 }
 
-/// Windows has no load average; `sysinfo` emulates one with a background
-/// performance-counter thread, which a metrics library must not start
-/// behind the caller's back. Report it as unavailable instead.
-#[cfg(windows)]
-fn load_average() -> Option<f64> {
-    None
-}
-
-#[cfg(not(windows))]
+/// One-minute load average from `getloadavg` (through `sysinfo`).
 fn load_average() -> Option<f64> {
     let one = System::load_average().one;
     (one.is_finite() && one >= 0.0).then_some(one)

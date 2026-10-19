@@ -70,6 +70,7 @@ struct ProcTaskInfo {
 
 /// `struct proc_bsdinfo` (`PROC_PIDTBSDINFO`).
 #[repr(C)]
+#[derive(Default)]
 #[allow(dead_code)] // mirrors the C layout; not every field is read
 struct ProcBsdInfo {
     ids: [u32; 12],
@@ -188,20 +189,48 @@ fn c_size<T>() -> c_int {
     c_int::try_from(size_of::<T>()).unwrap_or(c_int::MAX)
 }
 
-/// `proc_pidinfo` into a value of type `T`; `None` unless it was filled.
-fn pid_info<T>(pid: c_int, flavor: c_int, out: &mut T) -> Option<()> {
+/// A `proc_pidinfo` result structure.
+///
+/// # Safety
+///
+/// Implementors must be the `#[repr(C)]` mirror of the kernel structure
+/// returned for `FLAVOR`, made only of integer fields and arrays of them, so
+/// that any bytes the kernel writes form a valid value.
+unsafe trait PidInfo: Default {
+    /// The `PROC_PID*` flavor that fills this structure.
+    const FLAVOR: c_int;
+}
+
+// SAFETY: `ProcTaskInfo` mirrors `struct proc_taskinfo` (layout asserted
+// above), integers only, and is what `PROC_PIDTASKINFO` returns.
+unsafe impl PidInfo for ProcTaskInfo {
+    const FLAVOR: c_int = PROC_PIDTASKINFO;
+}
+
+// SAFETY: `ProcBsdInfo` mirrors `struct proc_bsdinfo` (layout asserted
+// above), integers and byte arrays only, and is what `PROC_PIDTBSDINFO`
+// returns.
+unsafe impl PidInfo for ProcBsdInfo {
+    const FLAVOR: c_int = PROC_PIDTBSDINFO;
+}
+
+/// `proc_pidinfo` of flavor `T::FLAVOR`; `None` unless the kernel filled the
+/// whole structure.
+fn pid_info<T: PidInfo>(pid: c_int) -> Option<T> {
+    let mut out = T::default();
     // SAFETY: `out` is a live, aligned `T` and `buffersize` is its exact
-    // size, so the kernel writes at most `size_of::<T>()` bytes into it.
+    // size, so the kernel writes at most `size_of::<T>()` bytes into it; by
+    // the `PidInfo` contract those bytes form a valid `T` for `T::FLAVOR`.
     let written = unsafe {
         proc_pidinfo(
             pid,
-            flavor,
+            T::FLAVOR,
             0,
-            std::ptr::from_mut(out).cast(),
+            std::ptr::from_mut(&mut out).cast(),
             c_size::<T>(),
         )
     };
-    (written == c_size::<T>()).then_some(())
+    (written == c_size::<T>()).then_some(out)
 }
 
 fn open_fd_count(pid: c_int) -> Option<u64> {
@@ -267,20 +296,11 @@ impl Platform {
             return Err(last_error("getrusage"));
         }
         let seconds = |t: TimeVal| t.sec as f64 + f64::from(t.usec) / 1e6;
-        let mut task = ProcTaskInfo::default();
-        pid_info(self.pid, PROC_PIDTASKINFO, &mut task)
-            .ok_or_else(|| last_error("proc_pidinfo(PROC_PIDTASKINFO)"))?;
-        let mut bsd = ProcBsdInfo {
-            ids: [0; 12],
-            comm: [0; 16],
-            name: [0; 32],
-            counts: [0; 6],
-            start_tvsec: 0,
-            start_tvusec: 0,
-        };
-        let start_time_seconds = pid_info(self.pid, PROC_PIDTBSDINFO, &mut bsd)
-            .filter(|()| bsd.start_tvsec > 0)
-            .map(|()| bsd.start_tvsec as f64 + bsd.start_tvusec as f64 / 1e6);
+        let task: ProcTaskInfo =
+            pid_info(self.pid).ok_or_else(|| last_error("proc_pidinfo(PROC_PIDTASKINFO)"))?;
+        let start_time_seconds = pid_info::<ProcBsdInfo>(self.pid)
+            .filter(|bsd| bsd.start_tvsec > 0)
+            .map(|bsd| bsd.start_tvsec as f64 + bsd.start_tvusec as f64 / 1e6);
         let mut limit = RLimit::default();
         // SAFETY: `limit` is a live `struct rlimit` the call only writes.
         let max_fds = (unsafe { getrlimit(RLIMIT_NOFILE, &raw mut limit) } == 0

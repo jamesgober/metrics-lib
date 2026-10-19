@@ -25,13 +25,32 @@
 //! With [`Temporality::Cumulative`] (the default) every point's
 //! `start_time_unix_nano` is the wall-clock time its series was created, so
 //! it is stable across exports as the specification requires (1.x reset it
-//! on every export). When a counter, histogram, timer or summary is reset
-//! between two exports (its count goes down), the exporter starts a new
-//! series: the start time becomes the previous export time, so consumers
-//! see a reset instead of a negative rate. With [`Temporality::Delta`] the exporter remembers the
+//! on every export). With [`Temporality::Delta`] the exporter remembers the
 //! previous export: sums and histograms report the change since then, with
 //! the previous export time as the start. Gauges and summaries have no
 //! temporality and always report the current value.
+//!
+//! # Resets
+//!
+//! Metric types do not record that they were reset, so the exporter infers
+//! it: when a counter's or rate meter's total, or a histogram's, timer's or
+//! summary's count, is lower than at this exporter's previous export, the
+//! series is treated as restarted. Its start time becomes the previous
+//! export time (cumulative) or the delta is the new value (delta), so
+//! consumers see a reset instead of a negative rate. The inference has
+//! limits:
+//!
+//! - It needs memory of the previous export, so it works only across
+//!   exports of the same [`OtlpExporter`]; the one-shot [`render`] and
+//!   [`render_protobuf`] functions never detect resets.
+//! - A reset followed, before the next export, by growth back to or past
+//!   the previously exported value is not detected: the series keeps its
+//!   old start time and the events lost in the reset go unreported.
+//! - Up/down counters and gauges are not monotonic, so their resets cannot
+//!   be told from ordinary decreases and are not detected.
+//!
+//! To avoid all three, do not call `reset()` on registered metrics that are
+//! exported over OTLP; register a new series instead.
 //!
 //! # Example
 //!
