@@ -71,9 +71,10 @@ and its replacement is listed in
   `/health` endpoint with Prometheus/OpenMetrics content negotiation) and a
   Pushgateway client (`push`, `push_add`, `delete`). The server serves each
   connection on its own short-lived thread (at most `MAX_CONNECTIONS` = 16
-  at once). When all are taken, a new connection evicts the oldest one
-  still waiting for its request, so idle connections cannot lock scrapers
-  out; only when every slot is writing a response is it answered 503. Every
+  at once). When all are taken, a new connection evicts a connection still
+  waiting for its request (the oldest one of the address holding the most
+  such connections), so idle connections cannot lock scrapers out; only
+  when every slot is writing a response is it answered 503. Every
   client gets a total deadline to send its request head
   (`REQUEST_TIMEOUT`, 2 s, then 408) and to read the response
   (`RESPONSE_TIMEOUT`, 10 s), and heads over `MAX_REQUEST_HEAD` (8 KiB) are
@@ -301,8 +302,10 @@ release (ML2 IDs):
 Found by the final verification and fixed before release:
 
 - F-1: 16 idle connections re-opened continuously could keep every scrape
-  at 503. A new connection now evicts the oldest connection still waiting
-  for its request, and the request-head deadline is 2 s (was 5 s).
+  at 503. A new connection now evicts a connection still waiting for its
+  request, the oldest one of the address holding the most such
+  connections, so a flooding client evicts its own connections first; the
+  request-head deadline is 2 s (was 5 s).
 - F-2: the per-platform meaning of host "used" memory is documented in
   `docs/MIGRATION-2.0.md` and the release notes.
 - F-3: the release notes say which platforms are run in CI and which are

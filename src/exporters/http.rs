@@ -91,10 +91,11 @@ const DEFAULT_LIMITS: Limits = Limits {
 /// [`RESPONSE_TIMEOUT`] to read the response; both are total deadlines, not
 /// per-read timeouts, so a client dripping bytes is cut off too. When every
 /// slot is taken, a new connection evicts the oldest connection still
-/// waiting for its request, so idle connections cannot lock scrapers out.
-/// A client that opens connections faster than the server reads requests
-/// (more than [`MAX_CONNECTIONS`] while one scrape is in flight) can still
-/// push others out; keep the endpoint on a network you control.
+/// waiting for its request, taken from the address holding the most such
+/// connections, so idle connections cannot lock scrapers out and a client
+/// flooding the server evicts its own connections first. Clients sharing one
+/// address with an attacker (behind the same NAT or proxy) are not told
+/// apart; keep the endpoint on a network you control.
 pub struct MetricsServer {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -194,6 +195,8 @@ impl Drop for Slot {
 /// One served connection: the worker's handle on the shared table.
 struct Conn {
     id: u64,
+    /// The client's address, for fair eviction.
+    peer: IpAddr,
     /// Still reading the request head (may be evicted).
     reading: bool,
     /// A second handle on the socket, used to shut down an evicted client.
@@ -231,13 +234,37 @@ impl Drop for ConnGuard {
     }
 }
 
-/// Register `stream`, evicting the oldest connection still reading its
-/// request when the table is full. `None` when every slot is serving.
-fn admit(conns: &Arc<Mutex<Conns>>, stream: &TcpStream, max: usize) -> Option<ConnGuard> {
+/// Register `stream` (from `peer`). When the table is full, evict a
+/// connection still reading its request: the oldest one of the address that
+/// holds the most such connections, so one client flooding the server pushes
+/// out its own connections before anybody else's. `None` when every slot is
+/// writing a response.
+fn admit(
+    conns: &Arc<Mutex<Conns>>,
+    stream: &TcpStream,
+    peer: IpAddr,
+    max: usize,
+) -> Option<ConnGuard> {
     let mut table = conns.lock().unwrap_or_else(PoisonError::into_inner);
     if table.list.len() >= max {
-        let oldest_idle = table.list.iter().position(|c| c.reading)?;
-        let evicted = table.list.remove(oldest_idle);
+        let reading_from = |ip: IpAddr| {
+            table
+                .list
+                .iter()
+                .filter(|c| c.reading && c.peer == ip)
+                .count()
+        };
+        // `list` is oldest first and `max_by_key` keeps the last maximum, so
+        // walk it newest first to land on the oldest of the busiest peer.
+        let victim = table
+            .list
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, c)| c.reading)
+            .max_by_key(|(_, c)| reading_from(c.peer))
+            .map(|(i, _)| i)?;
+        let evicted = table.list.remove(victim);
         // Its worker sees the read fail and exits; nothing to report to a
         // client that never sent a request.
         let _ = evicted.stream.shutdown(Shutdown::Both);
@@ -247,6 +274,7 @@ fn admit(conns: &Arc<Mutex<Conns>>, stream: &TcpStream, max: usize) -> Option<Co
     table.next_id += 1;
     table.list.push(Conn {
         id,
+        peer,
         reading: true,
         stream: handle,
     });
@@ -264,7 +292,7 @@ fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBoo
         if stop.load(Ordering::Acquire) {
             return;
         }
-        let Ok((stream, _)) = accepted else {
+        let Ok((stream, peer)) = accepted else {
             // Accept errors (for example a reset during the handshake or a
             // full descriptor table) only affect that connection; back off
             // briefly so a persistent error cannot spin the thread.
@@ -272,7 +300,7 @@ fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBoo
             continue;
         };
         let accepted_at = Instant::now();
-        let Some(guard) = admit(&conns, &stream, limits.max_connections) else {
+        let Some(guard) = admit(&conns, &stream, peer.ip(), limits.max_connections) else {
             // Every slot is writing a response. Answer 503 off the accept
             // thread, with its own bound; past it the connection is closed.
             if refusing.fetch_add(1, Ordering::AcqRel) < limits.max_connections {
@@ -870,42 +898,62 @@ mod tests {
         };
         let server = MetricsServer::spawn_with("127.0.0.1:0", core, limits).unwrap();
         let addr = server.local_addr();
-        // The re-audit's scenario: as many idle connections as the server
-        // has slots, each re-opened as soon as the server drops it.
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&stop);
-        let attacker = thread::spawn(move || {
-            let open = || {
-                let s = TcpStream::connect(addr).unwrap();
-                s.set_nonblocking(true).unwrap();
-                s
-            };
-            let mut held: Vec<TcpStream> = (0..limits.max_connections).map(|_| open()).collect();
-            let mut buf = [0u8; 64];
-            while !flag.load(Ordering::Acquire) {
-                for s in &mut held {
-                    // Closed (evicted or timed out): open a fresh one.
-                    let open_still = matches!(
-                        s.read(&mut buf),
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock
-                    );
-                    if !open_still {
-                        *s = open();
-                    }
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-        });
-        // Let the idle connections fill every slot.
+        // The re-audit's scenario: every slot is held by an idle connection
+        // (before this fix, every scrape got 503 until they timed out).
+        let idle: Vec<TcpStream> = (0..limits.max_connections)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
         thread::sleep(Duration::from_millis(200));
-        for _ in 0..20 {
+        for _ in 0..limits.max_connections + 4 {
             let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
             assert!(response.ends_with("ok\n"), "{response}");
-            thread::sleep(Duration::from_millis(20));
         }
-        stop.store(true, Ordering::Release);
-        attacker.join().unwrap();
+        // The first scrape had to evict the oldest idle connection.
+        let mut first = &idle[0];
+        first
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0u8; 1];
+        assert!(matches!(first.read(&mut buf), Ok(0) | Err(_)));
+        drop(idle);
         server.shutdown();
+    }
+
+    #[test]
+    fn test_admission_evicts_from_the_peer_holding_the_most_idle_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pair = || {
+            let client = TcpStream::connect(addr).unwrap();
+            let (server_side, _) = listener.accept().unwrap();
+            (client, server_side)
+        };
+        let scraper = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let flooder = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let conns = Arc::new(Mutex::new(Conns::default()));
+        // The scraper's connection is the oldest; the flooder holds the rest.
+        let (mut scraper_client, s) = pair();
+        let _gs = admit(&conns, &s, scraper, 3).unwrap();
+        let (_a, a) = pair();
+        let (_b, b) = pair();
+        let _ga = admit(&conns, &a, flooder, 3).unwrap();
+        let _gb = admit(&conns, &b, flooder, 3).unwrap();
+        // Ten more flooder connections never evict the scraper's.
+        let mut keep = Vec::new();
+        for _ in 0..10 {
+            let (c, server_side) = pair();
+            keep.push((c, admit(&conns, &server_side, flooder, 3).unwrap()));
+        }
+        scraper_client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut buf = [0u8; 1];
+        assert!(
+            scraper_client.read(&mut buf).is_err(),
+            "the scraper's connection must still be open"
+        );
+        let table = conns.lock().unwrap();
+        assert_eq!(table.list.iter().filter(|c| c.peer == scraper).count(), 1);
     }
 
     #[test]
@@ -920,11 +968,12 @@ mod tests {
         let conns = Arc::new(Mutex::new(Conns::default()));
         let (mut first_client, first) = pair();
         let (_c2, second) = pair();
-        let g1 = admit(&conns, &first, 2).unwrap();
-        let g2 = admit(&conns, &second, 2).unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let g1 = admit(&conns, &first, ip, 2).unwrap();
+        let g2 = admit(&conns, &second, ip, 2).unwrap();
         // Full: the next connection evicts the oldest one still reading.
         let (_c3, third) = pair();
-        let g3 = admit(&conns, &third, 2).unwrap();
+        let g3 = admit(&conns, &third, ip, 2).unwrap();
         let mut buf = [0u8; 1];
         first_client
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -935,7 +984,7 @@ mod tests {
         g2.serving();
         g3.serving();
         let (_c4, fourth) = pair();
-        assert!(admit(&conns, &fourth, 2).is_none());
+        assert!(admit(&conns, &fourth, ip, 2).is_none());
         // Guards remove their entries; the evicted one is already gone.
         drop((g1, g2, g3));
         assert_eq!(conns.lock().unwrap().list.len(), 0);
