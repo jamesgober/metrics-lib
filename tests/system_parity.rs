@@ -101,23 +101,69 @@ fn test_host_memory_matches_sysinfo() {
     health.update();
     let mut sys = System::new();
     sys.refresh_memory();
-    let total_mb = sys.total_memory() as f64 / (1024.0 * 1024.0);
-    let used_mb = sys.used_memory() as f64 / (1024.0 * 1024.0);
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    let total_mb = mb(sys.total_memory());
     assert!(
         (health.mem_total_mb() - total_mb).abs() <= total_mb * 0.01,
         "total: ours {} MB vs sysinfo {total_mb} MB",
         health.mem_total_mb()
     );
-    // Windows uses the same definition (total - available); macOS counts
-    // Activity Monitor's "Memory Used", which sysinfo approximates
-    // differently, so allow a wider band there.
-    let band = if cfg!(windows) { 0.05 } else { 0.35 };
+    let ours = health.mem_used_mb();
+    assert!(ours > 0.0 && ours <= health.mem_total_mb());
+    if cfg!(windows) {
+        // Same definition on both sides: total minus available physical
+        // memory (GlobalMemoryStatusEx). Allow for drift between samples.
+        let used_mb = mb(sys.used_memory());
+        assert!(
+            (ours - used_mb).abs() <= total_mb * 0.05,
+            "used: ours {ours} MB vs sysinfo {used_mb} MB (total {total_mb} MB)"
+        );
+    } else {
+        // macOS: ours is app + wired + compressed memory (Activity Monitor's
+        // "Memory Used"); sysinfo 0.36 counts every active page, file cache
+        // included, plus speculative pages, so the two differ by the file
+        // cache (gigabytes on CI runners) and cannot be compared directly.
+        // What must hold: used memory never exceeds what is not free.
+        let not_free_mb = total_mb - mb(sys.free_memory());
+        assert!(
+            ours <= not_free_mb + total_mb * 0.05,
+            "used: ours {ours} MB vs total minus free {not_free_mb} MB (total {total_mb} MB)"
+        );
+    }
+}
+
+/// macOS: recompute "Memory Used" from `vm_stat`'s output (an independent
+/// reader of the same kernel counters) and compare. This checks the FFI
+/// struct layout, the counters picked and the page size.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_host_memory_matches_vm_stat() {
+    fn field(text: &str, name: &str) -> f64 {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.trim().trim_end_matches('.').parse().ok())
+            .unwrap_or_else(|| panic!("{name} missing in vm_stat output:\n{text}"))
+    }
+    let health = SystemHealth::manual();
+    health.update();
+    let ours = health.mem_used_mb();
+    let output = std::process::Command::new("vm_stat").output().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let page: f64 = text
+        .split("page size of ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    let pages = field(&text, "Anonymous pages:") - field(&text, "Pages purgeable:")
+        + field(&text, "Pages wired down:")
+        + field(&text, "Pages occupied by compressor:");
+    let theirs = pages * page / (1024.0 * 1024.0);
+    let total_mb = health.mem_total_mb();
     assert!(
-        (health.mem_used_mb() - used_mb).abs() <= total_mb * band,
-        "used: ours {} MB vs sysinfo {used_mb} MB (total {total_mb} MB)",
-        health.mem_used_mb()
+        (ours - theirs).abs() <= total_mb * 0.03,
+        "used: ours {ours} MB vs vm_stat {theirs} MB (total {total_mb} MB, page {page})"
     );
-    assert!(health.mem_used_mb() > 0.0 && health.mem_used_mb() <= health.mem_total_mb());
 }
 
 #[test]

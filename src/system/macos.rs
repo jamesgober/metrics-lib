@@ -157,6 +157,7 @@ unsafe extern "C" {
         buffersize: c_int,
     ) -> c_int;
     fn mach_host_self() -> u32;
+    fn host_page_size(host: u32, page_size: *mut usize) -> c_int;
     fn mach_port_deallocate(task: u32, name: u32) -> c_int;
     fn host_statistics(host: u32, flavor: c_int, info: *mut c_int, count: *mut u32) -> c_int;
     fn host_statistics64(host: u32, flavor: c_int, info: *mut c_int, count: *mut u32) -> c_int;
@@ -216,6 +217,22 @@ fn open_fd_count(pid: c_int) -> Option<u64> {
     u64::try_from(written / PROC_FDINFO_SIZE).ok()
 }
 
+/// Size of the pages `host_statistics64` counts in: the host's VM page size
+/// (16 KiB on Apple silicon, 4 KiB on Intel), from `host_page_size`, with
+/// `sysconf(_SC_PAGESIZE)` as the fallback.
+fn vm_page_size(host: &HostPort) -> u64 {
+    let mut size = 0usize;
+    // SAFETY: `size` is a live `vm_size_t` (`usize`) the call only writes;
+    // `host.0` is a host port right owned by `host`.
+    let rc = unsafe { host_page_size(host.0, &raw mut size) };
+    if rc == KERN_SUCCESS && size > 0 {
+        return u64::try_from(size).unwrap_or(4096);
+    }
+    // SAFETY: `sysconf` only reads a configuration value.
+    let page = unsafe { sysconf(SC_PAGESIZE) };
+    u64::try_from(page).ok().filter(|p| *p > 0).unwrap_or(4096)
+}
+
 fn last_error(context: &str) -> io::Error {
     let os = io::Error::last_os_error();
     io::Error::new(os.kind(), format!("{context}: {os}"))
@@ -233,12 +250,11 @@ impl Platform {
     pub(crate) fn new() -> Self {
         // SAFETY: `getpid` takes no arguments and cannot fail.
         let pid = unsafe { getpid() };
-        // SAFETY: `sysconf` only reads a configuration value.
-        let page = unsafe { sysconf(SC_PAGESIZE) };
+        let host = HostPort::new();
         Self {
             pid,
-            host: HostPort::new(),
-            page_size: u64::try_from(page).ok().filter(|p| *p > 0).unwrap_or(4096),
+            page_size: vm_page_size(&host),
+            host,
             prev_cpu: None,
         }
     }
@@ -312,8 +328,16 @@ impl Platform {
                 &raw mut count,
             )
         };
-        // "Memory Used" as Activity Monitor shows it: app memory (anonymous
-        // pages that are not purgeable), wired memory and compressed pages.
+        // Used memory is what cannot be handed to a new allocation without
+        // paging or compressing: app memory (anonymous pages that are not
+        // purgeable), wired memory and the pages the compressor occupies.
+        // This is Activity Monitor's "Memory Used", and the same meaning as
+        // `MemTotal - MemAvailable` on Linux and `total - available` on
+        // Windows. The file cache (file-backed and purgeable pages) and
+        // speculative read-ahead are not counted; `sysinfo` 0.36 instead
+        // counts all active pages (file-backed ones included) plus
+        // speculative ones, which reports much more on a machine with a
+        // large file cache.
         let used_pages = u64::from(vm.internal_page_count.saturating_sub(vm.purgeable_count))
             + u64::from(vm.wire_count)
             + u64::from(vm.compressor_page_count);

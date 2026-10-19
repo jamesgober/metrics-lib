@@ -31,6 +31,13 @@
 //! | thread count | `/proc/self/stat` | `proc_pidinfo` | not available (`None`) | where supported |
 //! | process start time | `/proc/self/stat` + `btime` | `proc_pidinfo` | `GetProcessTimes` | yes |
 //!
+//! "Used" host memory means memory that cannot be given to a new allocation
+//! without reclaiming or compressing something: `MemTotal - MemAvailable` on
+//! Linux, total minus available physical memory on Windows, and app memory
+//! plus wired plus compressed on macOS (Activity Monitor's "Memory Used").
+//! The file cache is not counted. (`sysinfo`, used on other targets, counts
+//! active file-backed pages too on macOS.)
+//!
 //! Values that a platform cannot provide are `None`, never a made-up
 //! constant, and the exporters omit the corresponding series.
 
