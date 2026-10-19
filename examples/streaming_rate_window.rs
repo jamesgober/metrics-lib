@@ -1,43 +1,27 @@
-//! Streaming Rate Window Demo
+//! Watch a rate meter's sliding windows while the event rate changes.
 //!
-//! Demonstrates a simple streaming workload updating a `RateMeter` and
-//! printing the observed rate periodically over a short window.
-//!
-//! Run with:
-//!   cargo run --example streaming_rate_window --release
+//! Run with: `cargo run --example streaming_rate_window --features meter`
 
-use metrics_lib::{init, metrics};
-use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::time::Duration;
+use metrics_lib::RateMeter;
+use std::time::{Duration, Instant};
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    init();
-
-    let r = metrics().rate("demo.stream.rps");
-    let mut rng = StdRng::seed_from_u64(42);
-
-    // Producer task: generate ticks with light burstiness
-    let producer = tokio::spawn(async move {
-        let mut t = tokio::time::interval(Duration::from_millis(10));
-        for _ in 0..400u32 {
-            // ~4 seconds
-            t.tick().await;
-            let n = 1 + (rng.gen::<u8>() % 5) as u32; // 1..=5 ticks
-            r.tick_n(n);
+fn main() {
+    // Primary window of 500 ms: `rate()` reports events/s over it.
+    let meter = RateMeter::with_window(Duration::from_millis(500));
+    let start = Instant::now();
+    for phase in [200u64, 1000, 50] {
+        let phase_start = Instant::now();
+        while phase_start.elapsed() < Duration::from_millis(600) {
+            meter.tick_n(phase / 50);
+            std::thread::sleep(Duration::from_millis(20));
         }
-    });
-
-    // Reporter: sample and print current rate
-    let reporter = tokio::spawn(async move {
-        let mut t = tokio::time::interval(Duration::from_millis(250));
-        for _ in 0..16 {
-            // ~4 seconds
-            t.tick().await;
-            let rate = metrics().rate("demo.stream.rps").rate();
-            println!("stream rate ~{rate:.2} events/sec");
-        }
-    });
-
-    let _ = tokio::join!(producer, reporter);
+        let stats = meter.stats();
+        println!(
+            "t={:>4}ms target~{phase:>4}/s  rate={:>7.1}/s  last_second={:>6.0}  total={}",
+            start.elapsed().as_millis(),
+            stats.rate,
+            stats.per_second,
+            stats.total_events
+        );
+    }
 }

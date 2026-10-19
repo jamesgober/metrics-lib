@@ -1,193 +1,316 @@
-//! Histogram metric: bucketed observations with sum/count and approximate
-//! quantile estimation.
+//! Bucketed distribution with sum, count, exemplars and estimated quantiles.
 //!
-//! Compatible with Prometheus and OpenMetrics histogram semantics:
-//! - Each bucket counts observations whose value is `<= upper_bound`.
-//! - Buckets are *cumulative* on export (Prometheus convention).
-//! - `+Inf` is an implicit final bucket equal to the total count.
-//! - `sum` and `count` are tracked separately for downstream `_sum` /
-//!   `_count` series.
+//! Prometheus / OpenMetrics semantics:
 //!
-//! Use [`Histogram::default_seconds`] for the standard Prometheus latency
-//! buckets, [`Histogram::linear`] / [`Histogram::exponential`] for
-//! parameterized layouts, or [`Histogram::with_buckets`] for explicit
-//! boundaries.
+//! - each bucket counts observations `<= upper_bound`;
+//! - buckets are reported *cumulatively*, ending with an implicit `+Inf`
+//!   bucket equal to the total count;
+//! - `sum` and `count` are tracked for the `_sum` / `_count` series.
+//!
+//! Build one with [`Histogram::default_seconds`] (the standard Prometheus
+//! latency buckets), [`Histogram::linear`] / [`Histogram::exponential`], or
+//! [`Histogram::with_buckets`] / [`Histogram::try_with_buckets`] for explicit
+//! bounds.
 //!
 //! # Concurrency
 //!
-//! All update operations are lock-free atomics on the hot path. `observe()`
-//! does a binary search to find the destination bucket (O(log B)), then three
-//! `Relaxed` operations (bucket counter +1, sum CAS-loop, count +1). The CAS
-//! loop on `sum` is the only retry path under contention.
+//! [`Histogram::observe`] is lock-free: a binary search for the bucket,
+//! two relaxed `fetch_add`s and one compare-and-swap loop on the `f64` sum.
+//! Snapshots read the buckets before the total, so a snapshot taken during
+//! concurrent writes is still monotonic (`le="+Inf"` is never below a lower
+//! bucket).
+//!
+//! # Exemplars
+//!
+//! [`Histogram::observe_with_exemplar`] additionally stores the observation's
+//! trace context (for example a trace or span id) in its bucket. The
+//! OpenMetrics exporter renders the latest exemplar of each bucket. Exemplar
+//! storage is allocated on first use; histograms that never see an exemplar
+//! pay nothing for it.
 //!
 //! # Example
 //!
 //! ```
 //! use metrics_lib::Histogram;
-//! let h = Histogram::default_seconds();
-//! h.observe(0.012);   // 12 ms
-//! h.observe(0.085);
-//! h.observe(0.250);
-//! assert_eq!(h.count(), 3);
-//! assert!(h.quantile(0.5) > 0.0);
+//!
+//! let latency = Histogram::default_seconds();
+//! latency.observe(0.012);
+//! latency.observe(0.085);
+//! latency.observe(0.250);
+//! assert_eq!(latency.count(), 3);
+//! assert!(latency.quantile(0.5) > 0.0);
 //! ```
 
-use crate::{MetricsError, Result};
+use crate::util::CasUpdate;
+use crate::{LabelSet, MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, OnceLock, PoisonError, TryLockError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Standard Prometheus latency buckets (seconds).
+/// Standard Prometheus latency buckets, in seconds.
 ///
-/// Equivalent to `prometheus::default_buckets()` and `DefaultObjectives` in
-/// the Go/Java client libraries. Suitable for HTTP request / RPC / DB query
-/// latency dashboards out of the box.
+/// The same bounds as `prometheus.DefBuckets` in the Go client, suitable for
+/// HTTP, RPC and database latencies.
 pub const DEFAULT_SECONDS_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
+/// Upper bound on the number of explicit buckets in one histogram.
+pub const MAX_HISTOGRAM_BUCKETS: usize = 1024;
+
+/// Upper bound on the combined length (in characters) of an exemplar's label
+/// names and values, as fixed by the OpenMetrics specification.
+pub const MAX_EXEMPLAR_LABEL_CHARS: usize = 128;
+
+/// A sample observation attached to a histogram bucket, carrying trace
+/// context.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct Exemplar {
+    /// Labels identifying the sample (for example `trace_id`).
+    pub labels: LabelSet,
+    /// The observed value.
+    pub value: f64,
+    /// When the observation was made, in seconds since the Unix epoch.
+    pub timestamp: f64,
+}
+
 /// Lock-free bucketed histogram.
-///
-/// Cache-line aligned to prevent false sharing between the
-/// frequently-touched `sum` / `count` fields and the colder bucket array.
 #[repr(align(64))]
 pub struct Histogram {
-    /// Bucket upper bounds, sorted ascending. The implicit `+Inf` bucket is
-    /// not stored here; it is reconstructed from the difference between
-    /// `count` and `bucket_counts.last()` at snapshot time.
+    /// Explicit upper bounds, ascending. The `+Inf` bucket is implicit.
     bucket_bounds: Box<[f64]>,
-    /// One atomic counter per explicit bucket. `bucket_counts[i]` counts
-    /// observations `<= bucket_bounds[i]` (non-cumulative storage — the
-    /// `snapshot()` API converts to cumulative form).
+    /// Non-cumulative count per explicit bucket.
     bucket_counts: Box<[AtomicU64]>,
-    /// Sum of all finite observations, stored as `f64::to_bits` for atomic
-    /// CAS updates.
+    /// Sum of observations as `f64` bits.
     sum_bits: AtomicU64,
-    /// Total number of observations recorded (finite + the implicit `+Inf`
-    /// bucket).
+    /// Total observations (explicit buckets plus `+Inf`).
     total: AtomicU64,
-    /// Creation timestamp (for `age()` / rate calculations).
+    /// One exemplar slot per bucket including `+Inf`, allocated on first use.
+    exemplars: OnceLock<Box<[Mutex<Option<Exemplar>>]>>,
     created_at: Instant,
 }
 
-/// Immutable snapshot of a [`Histogram`]'s state.
-///
-/// Suitable for passing to exporters. `buckets` is cumulative: each entry's
-/// `count` is the total number of observations `<= upper_bound`. A trailing
-/// entry with `upper_bound = f64::INFINITY` matches `count`.
+/// Immutable snapshot of a [`Histogram`].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct HistogramSnapshot {
-    /// Cumulative bucket counts. The final element always has
-    /// `upper_bound = +Inf` and `count = total`.
+    /// Cumulative buckets. The last one has `upper_bound = +Inf` and
+    /// `count = self.count`.
     pub buckets: Vec<HistogramBucket>,
-    /// Sum of all finite observations.
+    /// Sum of observations.
     pub sum: f64,
     /// Total number of observations.
     pub count: u64,
     /// Time since the histogram was created.
     pub age: Duration,
+    /// The most recent exemplar of each bucket, parallel to `buckets`.
+    ///
+    /// Empty (no allocation) when the histogram has never received an
+    /// exemplar, so histograms without exemplars pay nothing for them.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub exemplars: Vec<Option<Exemplar>>,
 }
 
-/// One row of a [`HistogramSnapshot::buckets`].
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+impl HistogramSnapshot {
+    /// The exemplar of bucket `index`, if one was recorded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::{Histogram, LabelSet};
+    ///
+    /// let h = Histogram::with_buckets([0.1, 1.0]);
+    /// h.observe_with_exemplar(0.05, &LabelSet::from([("trace_id", "4bf92f35")]));
+    /// let snap = h.snapshot();
+    /// assert_eq!(snap.exemplar(0).map(|e| e.value), Some(0.05));
+    /// assert!(snap.exemplar(1).is_none());
+    /// ```
+    #[must_use]
+    pub fn exemplar(&self, index: usize) -> Option<&Exemplar> {
+        self.exemplars.get(index).and_then(Option::as_ref)
+    }
+}
+
+/// One cumulative bucket of a [`HistogramSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct HistogramBucket {
-    /// Inclusive upper bound for this bucket. The final bucket has
-    /// `upper_bound = f64::INFINITY`.
+    /// Inclusive upper bound; `f64::INFINITY` for the last bucket. Serialised
+    /// as the string `"+Inf"` in that case, since JSON has no infinity.
     pub upper_bound: f64,
-    /// Cumulative number of observations `<= upper_bound`.
+    /// Number of observations `<= upper_bound`.
     pub count: u64,
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for HistogramBucket {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("HistogramBucket", 2)?;
+        if self.upper_bound.is_finite() {
+            s.serialize_field("upper_bound", &self.upper_bound)?;
+        } else {
+            s.serialize_field("upper_bound", "+Inf")?;
+        }
+        s.serialize_field("count", &self.count)?;
+        s.end()
+    }
+}
+
+/// Sort, de-duplicate and validate user-supplied bucket bounds.
+fn clean_bounds(bounds: impl IntoIterator<Item = f64>) -> Vec<f64> {
+    let mut cleaned: Vec<f64> = bounds.into_iter().filter(|b| b.is_finite()).collect();
+    cleaned.sort_by(f64::total_cmp);
+    cleaned.dedup_by(|a, b| a.to_bits() == b.to_bits() || (*a == 0.0 && *b == 0.0));
+    cleaned.truncate(MAX_HISTOGRAM_BUCKETS);
+    cleaned
+}
+
 impl Histogram {
-    /// Construct a histogram with the supplied explicit bucket upper bounds.
+    /// Build a histogram from explicit upper bounds.
     ///
-    /// `bounds` must be finite and strictly ascending. Duplicates and NaN
-    /// are silently dropped before validation; an empty result after
-    /// cleaning panics in debug builds and uses a single `1.0` bucket in
-    /// release builds. The implicit `+Inf` bucket is always present.
+    /// Non-finite bounds are dropped, the rest are sorted and de-duplicated,
+    /// and at most [`MAX_HISTOGRAM_BUCKETS`] are kept (the smallest ones).
+    /// When nothing is left, a single `1.0` bucket is used; call
+    /// [`Histogram::try_with_buckets`] to get an error instead. The implicit
+    /// `+Inf` bucket is always present.
+    #[must_use]
     pub fn with_buckets(bounds: impl IntoIterator<Item = f64>) -> Self {
-        let mut cleaned: Vec<f64> = bounds
-            .into_iter()
-            .filter(|b| b.is_finite())
-            .collect::<Vec<_>>();
-        cleaned.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        cleaned.dedup_by(|a, b| (*a - *b).abs() < f64::EPSILON);
+        let mut cleaned = clean_bounds(bounds);
         if cleaned.is_empty() {
-            debug_assert!(
-                false,
-                "Histogram::with_buckets requires at least one bucket"
-            );
             cleaned.push(1.0);
         }
+        Self::from_clean(cleaned)
+    }
+
+    /// Like [`Histogram::with_buckets`] but refuses an empty bucket list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetricsError::InvalidValue`] when no finite bound remains
+    /// after cleaning.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::Histogram;
+    ///
+    /// assert!(Histogram::try_with_buckets([0.1, 1.0]).is_ok());
+    /// assert!(Histogram::try_with_buckets([]).is_err());
+    /// assert!(Histogram::try_with_buckets([f64::NAN]).is_err());
+    /// ```
+    pub fn try_with_buckets(bounds: impl IntoIterator<Item = f64>) -> Result<Self> {
+        let cleaned = clean_bounds(bounds);
+        if cleaned.is_empty() {
+            return Err(MetricsError::InvalidValue {
+                reason: "a histogram needs at least one finite bucket bound",
+            });
+        }
+        Ok(Self::from_clean(cleaned))
+    }
+
+    /// Validate bucket bounds the way [`Histogram::try_with_buckets`] does and
+    /// return them cleaned.
+    pub(crate) fn validate_bounds(bounds: impl IntoIterator<Item = f64>) -> Result<Vec<f64>> {
+        let cleaned = clean_bounds(bounds);
+        if cleaned.is_empty() {
+            return Err(MetricsError::InvalidValue {
+                reason: "a histogram needs at least one finite bucket bound",
+            });
+        }
+        Ok(cleaned)
+    }
+
+    fn from_clean(cleaned: Vec<f64>) -> Self {
         let bucket_counts: Box<[AtomicU64]> = cleaned.iter().map(|_| AtomicU64::new(0)).collect();
         Self {
             bucket_bounds: cleaned.into_boxed_slice(),
             bucket_counts,
             sum_bits: AtomicU64::new(0.0_f64.to_bits()),
             total: AtomicU64::new(0),
+            exemplars: OnceLock::new(),
             created_at: Instant::now(),
         }
     }
 
-    /// Convenience: histogram with the standard Prometheus latency-seconds
-    /// buckets ([`crate::DEFAULT_SECONDS_BUCKETS`]).
+    /// Histogram with [`DEFAULT_SECONDS_BUCKETS`].
+    #[must_use]
     pub fn default_seconds() -> Self {
-        Self::with_buckets(DEFAULT_SECONDS_BUCKETS.iter().copied())
+        Self::from_clean(DEFAULT_SECONDS_BUCKETS.to_vec())
     }
 
-    /// Linear buckets: `start, start+width, …, start+(count-1)*width`.
+    /// Linear buckets: `start, start + width, …, start + (count - 1) * width`.
     ///
-    /// Returns an empty histogram (single `1.0` bucket) when `count == 0`,
-    /// `width <= 0.0`, or any computed boundary is non-finite.
+    /// Falls back to a single `1.0` bucket when `count == 0`, `width <= 0`,
+    /// or an input is non-finite.
+    #[must_use]
     pub fn linear(start: f64, width: f64, count: usize) -> Self {
         if count == 0 || !width.is_finite() || width <= 0.0 || !start.is_finite() {
-            return Self::with_buckets(std::iter::once(1.0));
+            return Self::with_buckets([1.0]);
         }
-        let bounds = (0..count).map(|i| start + width * (i as f64));
+        let count = count.min(MAX_HISTOGRAM_BUCKETS);
+        let mut bound = start;
+        let mut bounds = Vec::with_capacity(count);
+        for _ in 0..count {
+            bounds.push(bound);
+            bound += width;
+        }
         Self::with_buckets(bounds)
     }
 
-    /// Exponential buckets: `start, start*factor, …, start*factor^(count-1)`.
+    /// Exponential buckets: `start, start * factor, …, start * factor^(count - 1)`.
     ///
-    /// Returns a fallback single-bucket histogram when inputs are invalid
-    /// (`start <= 0`, `factor <= 1`, non-finite, `count == 0`).
+    /// Falls back to a single `1.0` bucket when `count == 0`, `start <= 0`,
+    /// `factor <= 1`, or an input is non-finite.
+    #[must_use]
     pub fn exponential(start: f64, factor: f64, count: usize) -> Self {
         if count == 0 || !start.is_finite() || !factor.is_finite() || start <= 0.0 || factor <= 1.0
         {
-            return Self::with_buckets(std::iter::once(1.0));
+            return Self::with_buckets([1.0]);
         }
-        let mut cur = start;
-        let bounds = (0..count).map(|i| {
-            let v = cur;
-            if i + 1 < count {
-                cur *= factor;
-            }
-            v
-        });
+        let count = count.min(MAX_HISTOGRAM_BUCKETS);
+        let mut bound = start;
+        let mut bounds = Vec::with_capacity(count);
+        for _ in 0..count {
+            bounds.push(bound);
+            bound *= factor;
+        }
         Self::with_buckets(bounds)
     }
 
-    /// Record one observation. Non-finite values are silently dropped; use
-    /// [`Self::try_observe`] to receive an explicit error instead.
-    ///
-    /// Hot-path semantics (v0.9.4):
-    /// - Single binary-search through bucket bounds (O(log B)).
-    /// - Three `Relaxed` atomic operations on the success path:
-    ///   one `fetch_add` on the matched bucket (skipped for the implicit
-    ///   `+Inf` bucket), one `fetch_add` on `total`, and one CAS on
-    ///   `sum_bits`. The CAS loop retries only under writer contention.
-    #[inline(always)]
-    pub fn observe(&self, value: f64) {
-        if !value.is_finite() {
-            return;
-        }
-        self.observe_finite(value);
+    /// The explicit upper bounds (without `+Inf`).
+    #[must_use]
+    pub fn bounds(&self) -> &[f64] {
+        &self.bucket_bounds
     }
 
-    /// Record one observation; rejects non-finite values.
+    /// Record one observation. NaN and ±∞ are ignored; use
+    /// [`Histogram::try_observe`] to be told.
+    #[inline]
+    pub fn observe(&self, value: f64) {
+        if value.is_finite() {
+            let _ = self.observe_finite(value);
+        }
+    }
+
+    /// Record a duration, in seconds.
+    #[inline]
+    pub fn observe_duration(&self, duration: Duration) {
+        self.observe(duration.as_secs_f64());
+    }
+
+    /// Record one observation, rejecting NaN and ±∞.
     ///
-    /// Returns `Err(MetricsError::InvalidValue)` for NaN / ±Inf.
+    /// # Errors
+    ///
+    /// Returns [`MetricsError::InvalidValue`] for a non-finite value; nothing
+    /// is recorded.
     #[inline]
     pub fn try_observe(&self, value: f64) -> Result<()> {
         if !value.is_finite() {
@@ -195,159 +318,248 @@ impl Histogram {
                 reason: "value is not finite",
             });
         }
-        self.observe_finite(value);
+        let _ = self.observe_finite(value);
         Ok(())
     }
 
-    #[inline(always)]
-    fn observe_finite(&self, value: f64) {
-        // Binary-search for the matching bucket. Anything larger than the
-        // last explicit bound lands in the implicit `+Inf` bucket — that
-        // bumps `total` but no `bucket_counts[i]`.
-        let idx = self.bucket_bounds.partition_point(|&b| b < value);
-        // `get(idx)` folds the bounds check and the index into one op
-        // (no panic path, no explicit `< len` branch).
-        if let Some(slot) = self.bucket_counts.get(idx) {
-            slot.fetch_add(1, Ordering::Relaxed);
-        }
-        self.total.fetch_add(1, Ordering::Relaxed);
+    /// Record one observation and attach `labels` as its exemplar.
+    ///
+    /// The exemplar replaces the previous one of the same bucket. It is
+    /// dropped (the observation is still recorded) when `labels` breaks the
+    /// label rules or exceeds [`MAX_EXEMPLAR_LABEL_CHARS`], or when another
+    /// thread is writing that bucket's exemplar at the same moment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::{Histogram, LabelSet};
+    ///
+    /// let h = Histogram::with_buckets([0.1, 1.0]);
+    /// h.observe_with_exemplar(0.05, &LabelSet::from([("trace_id", "4bf92f35")]));
+    /// let snap = h.snapshot();
+    /// assert_eq!(snap.exemplar(0).map(|e| e.value), Some(0.05));
+    /// ```
+    pub fn observe_with_exemplar(&self, value: f64, labels: &LabelSet) {
+        let _ = self.try_observe_with_exemplar(value, labels);
+    }
 
-        // Atomic-f64 sum update.
-        loop {
-            let prev_bits = self.sum_bits.load(Ordering::Relaxed);
-            let new = f64::from_bits(prev_bits) + value;
-            if !new.is_finite() {
-                // Overflow to ±Inf — leave sum unchanged rather than poison
-                // the stored value. The bucket+count updates above stand.
-                return;
+    /// Like [`Histogram::observe_with_exemplar`] but reports why an exemplar
+    /// was not stored.
+    ///
+    /// # Errors
+    ///
+    /// - [`MetricsError::InvalidValue`] for a non-finite value (nothing is
+    ///   recorded).
+    /// - [`MetricsError::InvalidLabel`] when `labels` is invalid or too long
+    ///   (the observation is recorded, the exemplar is not).
+    /// - [`MetricsError::WouldBlock`] when another thread was storing an
+    ///   exemplar in the same bucket (the observation is recorded).
+    pub fn try_observe_with_exemplar(&self, value: f64, labels: &LabelSet) -> Result<()> {
+        if !value.is_finite() {
+            return Err(MetricsError::InvalidValue {
+                reason: "value is not finite",
+            });
+        }
+        let idx = self.observe_finite(value);
+        validate_exemplar_labels(labels)?;
+        let slots = self.exemplars.get_or_init(|| {
+            (0..=self.bucket_bounds.len())
+                .map(|_| Mutex::new(None))
+                .collect()
+        });
+        let Some(slot) = slots.get(idx) else {
+            return Ok(());
+        };
+        let exemplar = Exemplar {
+            labels: labels.clone(),
+            value,
+            timestamp: unix_seconds_now(),
+        };
+        match slot.try_lock() {
+            Ok(mut guard) => {
+                *guard = Some(exemplar);
+                Ok(())
             }
-            if self
-                .sum_bits
-                .compare_exchange_weak(
-                    prev_bits,
-                    new.to_bits(),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                return;
+            Err(TryLockError::Poisoned(poisoned)) => {
+                *poisoned.into_inner() = Some(exemplar);
+                Ok(())
             }
+            Err(TryLockError::WouldBlock) => Err(MetricsError::WouldBlock),
         }
     }
 
-    /// Number of recorded observations (across all buckets, including +Inf).
-    #[must_use]
+    /// Record a finite value and return its bucket index (`len` = `+Inf`).
     #[inline]
+    fn observe_finite(&self, value: f64) -> usize {
+        let idx = self.bucket_bounds.partition_point(|&b| b < value);
+        if let Some(slot) = self.bucket_counts.get(idx) {
+            let _ = slot.fetch_add(1, Ordering::Relaxed);
+        }
+        let _ = self.total.fetch_add(1, Ordering::Relaxed);
+        let _ = self
+            .sum_bits
+            .cas_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+                let next = f64::from_bits(bits) + value;
+                // Leave the sum untouched rather than store ±∞; the bucket
+                // and count updates above still stand.
+                next.is_finite().then(|| next.to_bits())
+            });
+        idx
+    }
+
+    /// Number of observations.
+    #[inline]
+    #[must_use]
     pub fn count(&self) -> u64 {
         self.total.load(Ordering::Relaxed)
     }
 
-    /// Sum of recorded observations.
-    #[must_use]
+    /// Sum of observations.
     #[inline]
+    #[must_use]
     pub fn sum(&self) -> f64 {
         f64::from_bits(self.sum_bits.load(Ordering::Relaxed))
     }
 
-    /// Mean of recorded observations. Returns `0.0` when `count == 0`.
-    #[must_use]
+    /// Mean observation, or `0.0` when empty.
     #[inline]
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // statistics: f64 precision is the contract
     pub fn mean(&self) -> f64 {
-        let c = self.count();
-        if c == 0 {
-            0.0
-        } else {
-            self.sum() / (c as f64)
+        match self.count() {
+            0 => 0.0,
+            c => self.sum() / c as f64,
         }
     }
 
     /// Time since the histogram was created.
-    #[must_use]
     #[inline]
+    #[must_use]
     pub fn age(&self) -> Duration {
         self.created_at.elapsed()
     }
 
-    /// Reset every bucket counter, the sum, and the total count.
+    /// Clear every bucket, the sum, the count and stored exemplars.
     pub fn reset(&self) {
-        for b in self.bucket_counts.iter() {
-            b.store(0, Ordering::SeqCst);
+        for b in &*self.bucket_counts {
+            b.store(0, Ordering::Relaxed);
         }
-        self.sum_bits.store(0.0_f64.to_bits(), Ordering::SeqCst);
-        self.total.store(0, Ordering::SeqCst);
+        self.sum_bits.store(0.0_f64.to_bits(), Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+        if let Some(slots) = self.exemplars.get() {
+            for slot in &**slots {
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            }
+        }
     }
 
-    /// Capture an immutable snapshot of the histogram's current state.
+    /// Capture a cumulative snapshot, including the latest exemplar of each
+    /// bucket when exemplars have been recorded.
     ///
-    /// `buckets` is rendered cumulatively: each entry's `count` is the total
-    /// observations `<= upper_bound`. A trailing `+Inf` bucket is appended
-    /// matching the total count.
+    /// Buckets are read before the total, and `count` is raised to the
+    /// cumulative bucket sum if a concurrent writer had bumped a bucket but
+    /// not yet the total, so the snapshot always satisfies
+    /// `bucket[i] <= bucket[i + 1] <= count`.
+    #[must_use]
     pub fn snapshot(&self) -> HistogramSnapshot {
-        let count = self.count();
-        let sum = self.sum();
+        let mut snap = self.snapshot_counts();
+        if let Some(slots) = self.exemplars.get() {
+            snap.exemplars = slots
+                .iter()
+                .map(|slot| slot.lock().unwrap_or_else(PoisonError::into_inner).clone())
+                .collect();
+        }
+        snap
+    }
+
+    /// Snapshot without exemplars, for exporters that cannot carry them.
+    pub(crate) fn snapshot_counts(&self) -> HistogramSnapshot {
         let mut buckets = Vec::with_capacity(self.bucket_bounds.len() + 1);
         let mut cumulative: u64 = 0;
-        for (bound, counter) in self.bucket_bounds.iter().zip(self.bucket_counts.iter()) {
-            cumulative = cumulative.saturating_add(counter.load(Ordering::Relaxed));
-            buckets.push(HistogramBucket {
-                upper_bound: *bound,
-                count: cumulative,
-            });
-        }
-        // Implicit +Inf bucket holds count - cumulative observations.
+        // `extend` over zipped slices writes without per-element capacity
+        // checks.
+        buckets.extend(
+            self.bucket_bounds
+                .iter()
+                .zip(self.bucket_counts.iter())
+                .map(|(bound, counter)| {
+                    cumulative = cumulative.saturating_add(counter.load(Ordering::Relaxed));
+                    HistogramBucket {
+                        upper_bound: *bound,
+                        count: cumulative,
+                    }
+                }),
+        );
+        let count = self.count().max(cumulative);
         buckets.push(HistogramBucket {
             upper_bound: f64::INFINITY,
             count,
         });
         HistogramSnapshot {
             buckets,
-            sum,
+            sum: self.sum(),
             count,
             age: self.age(),
+            exemplars: Vec::new(),
         }
     }
 
-    /// Approximate quantile via bucket interpolation.
+    /// Estimate the `q`-quantile by linear interpolation inside buckets.
     ///
-    /// `q` is clamped to `0.0..=1.0`. Returns `0.0` when the histogram is
-    /// empty. The estimate assumes a uniform distribution of observations
-    /// within each bucket; for the implicit `+Inf` bucket the largest
-    /// explicit upper bound is returned.
+    /// `q` is clamped to `0.0..=1.0` (NaN is treated as `0.5`). Returns `0.0`
+    /// when empty. The lower edge of the first bucket is taken as
+    /// `min(0, first bound)`; a quantile falling into the `+Inf` bucket
+    /// returns the largest explicit bound.
     #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )] // rank arithmetic on counts
     pub fn quantile(&self, q: f64) -> f64 {
-        let q = q.clamp(0.0, 1.0);
+        let q = if q.is_nan() { 0.5 } else { q.clamp(0.0, 1.0) };
         let count = self.count();
         if count == 0 {
             return 0.0;
         }
-        let target = (q * count as f64).ceil() as u64;
+        let target = ((q * count as f64).ceil() as u64).max(1);
         let mut cumulative: u64 = 0;
-        let mut prev_bound = 0.0;
-        for (i, (bound, counter)) in self
-            .bucket_bounds
-            .iter()
-            .zip(self.bucket_counts.iter())
-            .enumerate()
-        {
-            let bucket_count = counter.load(Ordering::Relaxed);
-            let next_cum = cumulative.saturating_add(bucket_count);
-            if next_cum >= target {
-                if bucket_count == 0 {
-                    return *bound;
-                }
-                // Linear interpolation inside the bucket.
-                let lower = if i == 0 { 0.0 } else { prev_bound };
-                let within = (target - cumulative) as f64 / bucket_count as f64;
+        let mut lower = self.bucket_bounds.first().map_or(0.0, |b| b.min(0.0));
+        for (bound, counter) in self.bucket_bounds.iter().zip(self.bucket_counts.iter()) {
+            let in_bucket = counter.load(Ordering::Relaxed);
+            let next = cumulative.saturating_add(in_bucket);
+            if next >= target && in_bucket > 0 {
+                let within = (target - cumulative) as f64 / in_bucket as f64;
                 return lower + (bound - lower) * within;
             }
-            cumulative = next_cum;
-            prev_bound = *bound;
+            cumulative = next;
+            lower = *bound;
         }
-        // Quantile lies in the +Inf bucket; return the highest explicit
-        // bound rather than infinity.
-        self.bucket_bounds.last().copied().unwrap_or(f64::INFINITY)
+        self.bucket_bounds.last().copied().unwrap_or(0.0)
     }
+}
+
+/// Check exemplar labels against the label rules and the OpenMetrics length
+/// limit.
+fn validate_exemplar_labels(labels: &LabelSet) -> Result<()> {
+    labels.validate()?;
+    let chars: usize = labels
+        .iter()
+        .map(|(k, v)| k.chars().count() + v.chars().count())
+        .sum();
+    if chars > MAX_EXEMPLAR_LABEL_CHARS {
+        return Err(MetricsError::invalid_label(
+            "",
+            "exemplar labels exceed MAX_EXEMPLAR_LABEL_CHARS characters",
+        ));
+    }
+    Ok(())
+}
+
+fn unix_seconds_now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
 }
 
 impl Default for Histogram {
@@ -358,29 +570,24 @@ impl Default for Histogram {
 
 impl std::fmt::Debug for Histogram {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let snap = self.snapshot();
         f.debug_struct("Histogram")
-            .field("buckets", &snap.buckets.len())
-            .field("count", &snap.count)
-            .field("sum", &snap.sum)
-            .field(
-                "mean",
-                &(if snap.count > 0 {
-                    snap.sum / snap.count as f64
-                } else {
-                    0.0
-                }),
-            )
-            .finish()
+            .field("buckets", &(self.bucket_bounds.len() + 1))
+            .field("count", &self.count())
+            .field("sum", &self.sum())
+            .finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)] // exact comparisons of exactly representable values
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Barrier};
 
     #[test]
-    fn observe_increments_count_and_sum() {
+    fn test_histogram_observe_counts_and_sums() {
         let h = Histogram::with_buckets([0.1, 1.0, 10.0]);
         h.observe(0.5);
         h.observe(0.5);
@@ -388,115 +595,272 @@ mod tests {
         assert_eq!(h.count(), 3);
         assert!((h.sum() - 6.0).abs() < 1e-9);
         assert!((h.mean() - 2.0).abs() < 1e-9);
+        h.observe_duration(Duration::from_millis(500));
+        assert_eq!(h.count(), 4);
     }
 
     #[test]
-    fn cumulative_buckets_reported_correctly() {
+    fn test_histogram_cumulative_buckets() {
         let h = Histogram::with_buckets([1.0, 2.0, 3.0]);
-        h.observe(0.5); // → bucket[0]
-        h.observe(1.5); // → bucket[1]
-        h.observe(2.5); // → bucket[2]
-        h.observe(10.0); // → +Inf
+        for v in [0.5, 1.5, 2.5, 10.0, 1.0] {
+            h.observe(v);
+        }
         let snap = h.snapshot();
-        assert_eq!(snap.buckets.len(), 4);
-        assert_eq!(snap.buckets[0].upper_bound, 1.0);
-        assert_eq!(snap.buckets[0].count, 1); // ≤ 1.0
-        assert_eq!(snap.buckets[1].count, 2); // ≤ 2.0
-        assert_eq!(snap.buckets[2].count, 3); // ≤ 3.0
+        let counts: Vec<u64> = snap.buckets.iter().map(|b| b.count).collect();
+        assert_eq!(counts, vec![2, 3, 4, 5]);
         assert!(snap.buckets[3].upper_bound.is_infinite());
-        assert_eq!(snap.buckets[3].count, 4); // ≤ +Inf
-        assert_eq!(snap.count, 4);
+        assert_eq!(snap.count, 5);
     }
 
     #[test]
-    fn try_observe_rejects_non_finite() {
+    fn test_histogram_non_finite_inputs() {
         let h = Histogram::with_buckets([1.0]);
-        assert!(matches!(
-            h.try_observe(f64::NAN),
-            Err(MetricsError::InvalidValue { .. })
-        ));
-        assert!(matches!(
-            h.try_observe(f64::INFINITY),
-            Err(MetricsError::InvalidValue { .. })
-        ));
-        assert_eq!(h.count(), 0);
-    }
-
-    #[test]
-    fn observe_silently_drops_non_finite() {
-        let h = Histogram::with_buckets([1.0]);
+        assert!(h.try_observe(f64::NAN).is_err());
+        assert!(h.try_observe(f64::INFINITY).is_err());
         h.observe(f64::NAN);
-        h.observe(f64::INFINITY);
+        h.observe(f64::NEG_INFINITY);
         h.observe(2.0);
         assert_eq!(h.count(), 1);
+        assert!(h.try_observe(0.5).is_ok());
     }
 
     #[test]
-    fn quantile_zero_on_empty() {
+    fn test_histogram_sum_overflow_keeps_finite_sum() {
         let h = Histogram::with_buckets([1.0]);
-        assert_eq!(h.quantile(0.5), 0.0);
+        h.observe(f64::MAX);
+        h.observe(f64::MAX);
+        assert_eq!(h.count(), 2);
+        assert!(h.sum().is_finite());
     }
 
     #[test]
-    fn quantile_estimates_within_bucket() {
+    fn test_histogram_empty_bounds_do_not_panic_regression_ml011() {
+        // ML-011: `with_buckets([])` panicked in debug builds.
+        let h = Histogram::with_buckets(std::iter::empty());
+        assert_eq!(h.bounds(), &[1.0]);
+        assert!(Histogram::try_with_buckets(std::iter::empty()).is_err());
+        assert!(Histogram::try_with_buckets([f64::NAN, f64::INFINITY]).is_err());
+        assert!(Histogram::validate_bounds([]).is_err());
+        assert_eq!(
+            Histogram::validate_bounds([2.0, 1.0, 2.0]).unwrap(),
+            vec![1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn test_histogram_dedup_is_exact_not_epsilon() {
+        let h = Histogram::with_buckets([1e-17, 2e-17, 0.0, -0.0]);
+        assert_eq!(h.bounds().len(), 3);
+    }
+
+    #[test]
+    fn test_histogram_bucket_count_is_capped() {
+        let h = Histogram::with_buckets((0..5000).map(f64::from));
+        assert_eq!(h.bounds().len(), MAX_HISTOGRAM_BUCKETS);
+        let l = Histogram::linear(0.0, 1.0, 5000);
+        assert_eq!(l.bounds().len(), MAX_HISTOGRAM_BUCKETS);
+    }
+
+    #[test]
+    fn test_histogram_quantiles() {
         let h = Histogram::with_buckets([1.0, 2.0]);
+        assert_eq!(h.quantile(0.5), 0.0);
         for _ in 0..10 {
-            h.observe(0.5); // 10 obs in [0, 1.0]
+            h.observe(0.5);
+            h.observe(1.5);
         }
-        for _ in 0..10 {
-            h.observe(1.5); // 10 obs in (1.0, 2.0]
-        }
-        // p50 should land roughly mid-way in the first bucket.
         let p50 = h.quantile(0.5);
         assert!(p50 > 0.0 && p50 <= 1.0);
-        // p100 sits at the top explicit bound.
-        let p100 = h.quantile(1.0);
-        assert!((p100 - 2.0).abs() < 1e-9);
+        assert!((h.quantile(1.0) - 2.0).abs() < 1e-9);
+        assert!(h.quantile(f64::NAN) > 0.0);
+        assert!(h.quantile(0.0) > 0.0);
+        h.observe(100.0);
+        assert_eq!(h.quantile(1.0), 2.0);
     }
 
     #[test]
-    fn linear_and_exponential_constructors() {
+    fn test_histogram_quantile_with_negative_bounds() {
+        let h = Histogram::with_buckets([-10.0, -5.0, 0.0]);
+        for _ in 0..4 {
+            h.observe(-7.0);
+        }
+        let q = h.quantile(0.5);
+        assert!((-10.0..=-5.0).contains(&q), "{q}");
+    }
+
+    #[test]
+    fn test_histogram_constructors() {
         let l = Histogram::linear(0.0, 0.5, 5);
-        let snap = l.snapshot();
-        // 5 explicit + +Inf = 6
-        assert_eq!(snap.buckets.len(), 6);
-        assert_eq!(snap.buckets[0].upper_bound, 0.0);
-        assert_eq!(snap.buckets[1].upper_bound, 0.5);
-
+        assert_eq!(l.bounds(), &[0.0, 0.5, 1.0, 1.5, 2.0]);
         let e = Histogram::exponential(0.1, 2.0, 4);
-        let snap = e.snapshot();
-        assert_eq!(snap.buckets.len(), 5);
-        assert!((snap.buckets[0].upper_bound - 0.1).abs() < 1e-9);
-        assert!((snap.buckets[1].upper_bound - 0.2).abs() < 1e-9);
-        assert!((snap.buckets[2].upper_bound - 0.4).abs() < 1e-9);
-        assert!((snap.buckets[3].upper_bound - 0.8).abs() < 1e-9);
+        assert_eq!(e.bounds().len(), 4);
+        assert!((e.bounds()[3] - 0.8).abs() < 1e-12);
+        for h in [
+            Histogram::linear(0.0, -1.0, 5),
+            Histogram::linear(0.0, 1.0, 0),
+            Histogram::exponential(0.0, 2.0, 5),
+            Histogram::exponential(1.0, 1.0, 5),
+            Histogram::exponential(1.0, f64::NAN, 5),
+        ] {
+            assert_eq!(h.bounds(), &[1.0]);
+        }
+        assert_eq!(Histogram::default().bounds(), DEFAULT_SECONDS_BUCKETS);
     }
 
     #[test]
-    fn invalid_constructor_inputs_fall_back_to_single_bucket() {
-        let h = Histogram::linear(0.0, -1.0, 5);
-        assert_eq!(h.bucket_bounds.len(), 1);
-        let h = Histogram::exponential(0.0, 2.0, 5);
-        assert_eq!(h.bucket_bounds.len(), 1);
-        let h = Histogram::exponential(1.0, 1.0, 5);
-        assert_eq!(h.bucket_bounds.len(), 1);
-    }
-
-    #[test]
-    fn reset_clears_state() {
+    fn test_histogram_reset_clears_state_and_exemplars() {
         let h = Histogram::with_buckets([1.0]);
-        h.observe(0.5);
-        h.observe(0.5);
-        assert_eq!(h.count(), 2);
+        h.observe_with_exemplar(0.5, &LabelSet::from([("trace_id", "a")]));
         h.reset();
         assert_eq!(h.count(), 0);
         assert_eq!(h.sum(), 0.0);
+        assert!(h.snapshot().exemplars.iter().all(Option::is_none));
+        assert!(format!("{h:?}").contains("Histogram"));
     }
 
     #[test]
-    fn debug_impl_does_not_panic() {
-        let h = Histogram::default_seconds();
-        h.observe(0.5);
-        let _ = format!("{h:?}");
+    fn test_histogram_exemplars_land_in_matching_bucket() {
+        let h = Histogram::with_buckets([0.1, 1.0]);
+        let trace = LabelSet::from([("trace_id", "abc")]);
+        h.observe_with_exemplar(0.05, &trace);
+        h.observe_with_exemplar(0.5, &trace);
+        h.observe_with_exemplar(50.0, &trace);
+        let snap = h.snapshot();
+        let values: Vec<Option<f64>> = snap
+            .exemplars
+            .iter()
+            .map(|e| e.as_ref().map(|e| e.value))
+            .collect();
+        assert_eq!(values, vec![Some(0.05), Some(0.5), Some(50.0)]);
+        assert!(snap.exemplar(0).unwrap().timestamp > 0.0);
+        // Exporters that drop exemplars never copy them.
+        assert_eq!(h.snapshot_counts().exemplars.len(), 0);
+        // A histogram without exemplars allocates none.
+        let plain = Histogram::with_buckets([1.0]).snapshot();
+        assert_eq!(plain.exemplars.capacity(), 0);
+        assert_eq!(h.count(), 3);
+    }
+
+    #[test]
+    fn test_histogram_exemplar_validation() {
+        let h = Histogram::with_buckets([1.0]);
+        assert!(
+            h.try_observe_with_exemplar(f64::NAN, &LabelSet::EMPTY)
+                .is_err()
+        );
+        let long = LabelSet::from([("trace_id", "x".repeat(200))]);
+        assert!(matches!(
+            h.try_observe_with_exemplar(0.5, &long),
+            Err(MetricsError::InvalidLabel { .. })
+        ));
+        let bad = LabelSet::from([("bad key", "x")]);
+        assert!(h.try_observe_with_exemplar(0.5, &bad).is_err());
+        // The observations were still recorded.
+        assert_eq!(h.count(), 2);
+        assert!(h.snapshot().exemplar(0).is_none());
+    }
+
+    #[test]
+    fn test_histogram_snapshot_is_monotonic_under_concurrent_writes_regression_ml017() {
+        let h = Arc::new(Histogram::with_buckets([1.0, 2.0, 4.0, 8.0]));
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..4)
+            .map(|t| {
+                let h = Arc::clone(&h);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut i = 0u32;
+                    while !stop.load(Ordering::Relaxed) {
+                        h.observe(f64::from((i + t) % 10));
+                        i = i.wrapping_add(1);
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..20_000 {
+            let snap = h.snapshot();
+            for pair in snap.buckets.windows(2) {
+                assert!(pair[0].count <= pair[1].count);
+            }
+            assert_eq!(snap.buckets.last().map(|b| b.count), Some(snap.count));
+        }
+        stop.store(true, Ordering::Relaxed);
+        for w in writers {
+            w.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_histogram_concurrent_observations_are_exact() {
+        let h = Arc::new(Histogram::with_buckets([10.0, 100.0]));
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let h = Arc::clone(&h);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let _ = barrier.wait();
+                    for i in 0..10_000u32 {
+                        h.observe(f64::from(i % 200));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let snap = h.snapshot();
+        assert_eq!(snap.count, 80_000);
+        // Values 0..=10 land in the first bucket: 11 of every 200.
+        assert_eq!(snap.buckets[0].count, 8 * 50 * 11);
+        let expected_sum: f64 = 8.0 * 50.0 * (0..200).map(f64::from).sum::<f64>();
+        assert!((snap.sum - expected_sum).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_histogram_bucket_serializes_inf_as_string_regression_ml024() {
+        let h = Histogram::with_buckets([1.0]);
+        h.observe(5.0);
+        let json = serde_json::to_string(&h.snapshot().buckets).unwrap();
+        assert!(json.contains(r#""upper_bound":"+Inf""#), "{json}");
+        assert!(!json.contains("null,\"count\""));
+    }
+
+    proptest! {
+        #[test]
+        fn prop_snapshot_invariants(
+            bounds in proptest::collection::vec(-1e6f64..1e6, 0..20),
+            values in proptest::collection::vec(-2e6f64..2e6, 0..200)
+        ) {
+            let h = Histogram::with_buckets(bounds);
+            for v in &values {
+                h.observe(*v);
+            }
+            let snap = h.snapshot();
+            prop_assert_eq!(snap.count, values.len() as u64);
+            prop_assert_eq!(snap.buckets.last().map(|b| b.count), Some(snap.count));
+            for pair in snap.buckets.windows(2) {
+                prop_assert!(pair[0].count <= pair[1].count);
+                prop_assert!(pair[0].upper_bound < pair[1].upper_bound);
+            }
+            for b in &snap.buckets {
+                let expected = values.iter().filter(|v| **v <= b.upper_bound).count() as u64;
+                prop_assert_eq!(b.count, expected);
+            }
+        }
+
+        #[test]
+        fn prop_quantile_is_within_bounds(
+            values in proptest::collection::vec(0.0f64..100.0, 1..200),
+            q in any::<f64>()
+        ) {
+            let h = Histogram::linear(0.0, 10.0, 11);
+            for v in &values {
+                h.observe(*v);
+            }
+            let est = h.quantile(q);
+            prop_assert!((0.0..=100.0).contains(&est), "{}", est);
+        }
     }
 }

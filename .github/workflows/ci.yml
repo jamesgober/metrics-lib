@@ -2,442 +2,331 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, dev]
   pull_request:
-    branches: [ main ]
+    branches: [main, dev]
+  schedule:
+    # Weekly, for the latest-dependencies job (Mondays 06:00 UTC).
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# Least privilege: every job only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # Opt every JS action into Node.js 24 ahead of GitHub's June 2026 forced
-  # migration. Silences the "Node.js 20 actions are deprecated" runner
-  # warnings emitted by actions/checkout@v4, actions/cache@v4, etc.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
+
+# Toolchains: rust-toolchain.toml pins the stable used for formatting, lints
+# and docs. It overrides whatever a setup action installs, so every job sets
+# RUSTUP_TOOLCHAIN to the toolchain it claims to test (pinned stable, MSRV,
+# beta or nightly) and prints `rustc --version` first.
+#
+# dtolnay/rust-toolchain selects the toolchain through its input and only
+# moves a `v1`/`master` ref, so it is pinned to a commit SHA. Other actions
+# are pinned to their current major version.
 
 jobs:
+  fmt:
+    name: Format
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+          components: rustfmt
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo fmt --all -- --check
+
   test:
-    name: Tests (stable/beta/MSRV)
+    name: Test (${{ matrix.os }} / ${{ matrix.rust }})
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, beta, 1.70.0]
+        # The pinned stable and the MSRV.
+        rust: ["1.99.0", "1.85.0"]
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ matrix.rust }}
-        components: rustfmt, clippy
-    - name: Cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run tests (default features, no benches)
-      run: cargo test --verbose
-    - name: Run doc tests (default features)
-      run: cargo test --doc
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        shell: bash
+        run: |
+          rustc --version && cargo --version
+          rustc --version | grep -q "^rustc ${{ matrix.rust }} "
+      - name: Clippy (all features, all targets)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Clippy (no default features)
+        run: cargo clippy --locked --lib --no-default-features -- -D warnings
+      # Includes the doctests of README.md and every docs/*.md guide.
+      - name: Test (all features)
+        run: cargo test --locked --all-features
+      - name: Test (default features)
+        run: cargo test --locked --lib --tests
+      - name: Test (no default features)
+        run: cargo test --locked --lib --no-default-features
+      - name: Doc
+        run: cargo doc --locked --no-deps --all-features
 
-  clippy:
-    name: Clippy (stable)
+  # Every feature must build, lint and pass its unit tests on its own, with
+  # no default features (cargo-hack also runs the no-feature and default
+  # builds).
+  features:
+    name: Feature matrix (cargo-hack)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy
-    - name: Run clippy
-      run: cargo clippy --all-features -- -D warnings
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      # --no-dev-deps edits the manifest temporarily, which changes the lock,
+      # so this step cannot run --locked.
+      - name: Clippy, each feature alone
+        run: cargo hack clippy --lib --each-feature --no-dev-deps -- -D warnings
+      - name: Unit tests, each feature alone
+        run: cargo hack test --locked --lib --each-feature
 
-  fmt:
-    name: Rustfmt (stable)
+  # The `sysinfo` system backend serves targets without an in-house one;
+  # FreeBSD has no hosted runner, so lint it by cross-checking.
+  cross:
+    name: Cross-check (x86_64-unknown-freebsd)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt
-    - name: Run rustfmt
-      run: cargo fmt --all -- --check
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+          targets: x86_64-unknown-freebsd
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo clippy --locked --target x86_64-unknown-freebsd --lib --all-features -- -D warnings
+      - run: cargo clippy --locked --target x86_64-unknown-freebsd --lib --no-default-features --features system -- -D warnings
+
+  beta:
+    name: Test (ubuntu-latest / beta, allowed to fail)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      RUSTUP_TOOLCHAIN: beta
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: beta
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+
+  # What a consumer resolving today gets: the newest versions allowed by
+  # Cargo.toml, ignoring the committed lock and the MSRV filter. Runs weekly
+  # and on pull requests.
+  latest-deps:
+    name: Latest dependencies
+    if: github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - name: Update to the latest compatible versions
+        run: cargo update --verbose
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+      - name: Audit the updated lock
+        run: cargo audit --deny warnings
+
+  docs-rs:
+    name: docs.rs build (nightly, --cfg docsrs)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      RUSTDOCFLAGS: "--cfg docsrs -D warnings"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo doc --locked --no-deps --all-features
 
   coverage:
     name: Coverage (llvm-cov)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust (stable)
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: llvm-tools-preview
-    - name: Cache (cargo registry/git/target)
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@cargo-llvm-cov
-    - name: Generate coverage summary and enforce threshold (85%)
-      shell: bash
-      # `--cfg coverage` activates the `not(coverage)` gates on the
-      # timing-coupled `bench-tests` modules so they don't fire under
-      # llvm-cov instrumentation (where their `< Nns/op` assertions are
-      # unreliable). The functional code paths are still exercised by
-      # the regular unit tests and Criterion bench targets.
-      env:
-        RUSTFLAGS: "--cfg coverage"
-      run: |
-        set -euxo pipefail
-        cargo llvm-cov --summary-only --workspace --all-features \
-          --fail-under-lines 85 \
-          --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
-    - name: Generate LCOV report
-      shell: bash
-      env:
-        RUSTFLAGS: "--cfg coverage"
-      run: |
-        set -euxo pipefail
-        mkdir -p target/coverage
-        cargo llvm-cov --workspace --all-features --lcov --output-path target/coverage/lcov.info \
-          --ignore-filename-regex '^(dev/|docs/|benches/|examples/)'
-    - name: Upload LCOV artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: coverage-lcov
-        path: target/coverage/lcov.info
-
-  security:
-    name: Security audit
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Install cargo-audit
-      uses: taiki-e/install-action@cargo-audit
-    - name: Generate Cargo.lock (if missing)
-      run: cargo generate-lockfile
-    - name: Run cargo-audit
-      run: cargo audit
-
-  deny:
-    name: cargo-deny (advisories, bans, licenses, sources)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Install cargo-deny
-      uses: taiki-e/install-action@cargo-deny
-    - name: Run cargo-deny
-      # `--workspace` covers the crate; `check all` runs advisories + bans
-      # + licenses + sources. `deny.toml` configures the policy.
-      run: cargo deny --workspace check all
-
-  udeps:
-    name: cargo-udeps (unused dependencies)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust nightly (required by udeps)
-      uses: dtolnay/rust-toolchain@nightly
-    - name: Install cargo-udeps
-      uses: taiki-e/install-action@cargo-udeps
-    - name: Check for unused dependencies (all-features)
-      run: cargo +nightly udeps --workspace --all-features
-
-  miri:
-    name: Miri (async pin projection + unsafe blocks)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust nightly + miri
-      uses: dtolnay/rust-toolchain@nightly
-      with:
-        components: miri
-    - name: cargo miri test (selective, all features)
-      # Miri is slow; restrict to the `async_support` module (the only
-      # site with `unsafe` pin-projection blocks). `--all-features` is
-      # required so `AsyncMetricBatch::flush` — which touches every
-      # metric type — compiles.
-      env:
-        MIRIFLAGS: "-Zmiri-disable-isolation"
-      run: |
-        cargo miri setup
-        cargo miri test --all-features --lib async_support:: -- \
-          --skip ::benchmarks::
-
-  msrv:
-    name: MSRV (Rust 1.70.0)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust 1.70.0
-      uses: dtolnay/rust-toolchain@1.70.0
-      with:
-        components: rustfmt, clippy
-    - name: Cargo check (all-features)
-      run: cargo check --all-features
-    - name: Rustfmt check (MSRV)
-      run: cargo fmt --all -- --check
-    - name: Clippy (MSRV)
-      run: cargo clippy --all-features -- -D warnings
-
-  docs:
-    name: Docs (rustdoc warnings denied)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Build documentation
-      env:
-        RUSTDOCFLAGS: -D warnings
-      run: cargo doc --no-deps
-    - name: Upload docs artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: docs
-        path: target/doc
-
-  build-matrix:
-    name: Cross-Platform Compatibility
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        build: [default, all-features, no-default-features]
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Build (default features)
-      if: matrix.build == 'default'
-      run: cargo build --verbose
-    - name: Build (all features)
-      if: matrix.build == 'all-features'
-      run: cargo build --verbose --all-features
-    - name: Build (no default features)
-      if: matrix.build == 'no-default-features'
-      run: cargo build --verbose --no-default-features
-
-  publish-dry-run:
-    name: Publish (dry run)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Cargo package and publish dry-run
-      run: |
-        cargo package
-        cargo publish --dry-run
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - name: Line coverage with threshold
+        run: >-
+          cargo llvm-cov --locked --all-features --lib --tests --summary-only
+          --fail-under-lines 95
+          --ignore-filename-regex '(benches|examples)/'
+      - name: LCOV report
+        run: >-
+          cargo llvm-cov --locked --all-features --lib --tests --lcov
+          --output-path lcov.info
+          --ignore-filename-regex '(benches|examples)/'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 14
 
   examples:
-    name: Examples (build, lint, run quick_start)
+    name: Examples (build and run)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - name: Build every example
+        run: cargo build --locked --examples --all-features
+      - name: Run the non-blocking examples
+        run: bash tools/run_examples.sh
+
+  semver:
+    name: SemVer check (vs crates.io)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+
+  audit:
+    name: Security audit
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      # Audits the committed Cargo.lock.
+      - name: Audit
+        run: cargo audit --deny warnings
+
+  deny:
+    name: Dependency policy (cargo-deny)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Build examples
-      run: cargo build --examples
-    - name: Clippy (examples)
-      run: cargo clippy --examples -- -D warnings
-    - name: Run quick_start example
-      run: |
-        mkdir -p examples-out
-        cargo run --example quick_start --release | tee examples-out/quick_start.txt
-    - name: Run streaming_rate_window example
-      run: |
-        mkdir -p examples-out
-        cargo run --example streaming_rate_window --release | tee examples-out/streaming_rate_window.txt
-    - name: Upload example outputs
-      uses: actions/upload-artifact@v4
-      with:
-        name: example-outputs
-        path: examples-out
-        if-no-files-found: error
-        retention-days: 7
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
 
-  smoke-bench:
-    name: Benchmarks (smoke)
-    if: ${{ github.event_name == 'pull_request' }}
+  udeps:
+    name: Unused dependencies (cargo-udeps)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      RUSTFLAGS: ""
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: smoke-bench-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run Criterion (short)
-      run: |
-        # Shorten warmup/measurement for CI speed; pass through to Criterion
-        cargo bench -- -w 0.3 -m 1.0 -n 20
-    - name: Upload Criterion reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: criterion-reports
-        path: target/criterion
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-udeps
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo udeps --locked --all-targets --all-features
 
-  benchmark-regression:
-    name: Benchmark Regression (Criterion)
-    # Run on pushes to main and PRs; PRs will only compare without pushing data
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+  publish-dry-run:
+    name: Package (publish dry run)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      deployments: write
-      pull-requests: write
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: bench-regression-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Run Criterion benchmarks
-      run: |
-        # Run the explicit bench target to ensure benches execute
-        cargo bench --bench metrics_bench --all-features
-    - name: Inspect Criterion output (debug)
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "Listing target/criterion contents (if any):"
-        ls -R target/criterion || true
-        echo "Preview an estimates.json if present:"
-        first=$(ls target/criterion/*/new/estimates.json 2>/dev/null | head -n1 || true)
-        if [ -n "$first" ]; then
-          echo "Showing: $first"
-          head -n 50 "$first"
-        else
-          echo "No estimates.json files found yet."
-        fi
-    - name: Aggregate Criterion results to custom JSON (smaller is better)
-      shell: bash
-      id: aggregate
-      run: |
-        set -euo pipefail
-        OUT=criterion-summary.json
-        : > "$OUT"
-        shopt -s globstar nullglob
-        found=0
-        # Criterion v0.5 typically writes to target/criterion/**/new/estimates.json
-        # Older versions may write to target/criterion/**/estimates.json
-        echo '[' >> "$OUT"
-        first=true
-        for f in target/criterion/**/new/estimates.json target/criterion/**/estimates.json; do
-          [ -f "$f" ] || continue
-          found=1
-          if [[ "$f" == */new/estimates.json ]]; then
-            benchdir=$(dirname "$(dirname "$f")")
-            name=$(basename "$benchdir")
-          else
-            benchdir=$(dirname "$f")
-            name=$(basename "$benchdir")
-          fi
-          mean=$(jq -r '.mean.point_estimate' "$f")
-          # Fallback to 0 if parsing fails
-          if [ -z "$mean" ] || [ "$mean" = "null" ]; then
-            mean=0
-          fi
-          if [ "$first" = true ]; then
-            first=false
-          else
-            echo ',' >> "$OUT"
-          fi
-          printf '{"name":"%s","value":%s,"unit":"ns/op"}' "$name" "$mean" >> "$OUT"
-        done
-        echo ']' >> "$OUT"
-        if [ "$found" -eq 0 ]; then
-          echo "No Criterion estimates found under target/criterion/**/(new/)estimates.json" >&2
-          echo "Directory tree:" >&2
-          ls -R target/criterion >&2 || true
-          echo "found=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        else
-          echo "found=true" >> "$GITHUB_OUTPUT"
-        fi
-    - name: Upload Criterion summary artifact
-      if: steps.aggregate.outputs.found == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: criterion-summary
-        path: criterion-summary.json
-        if-no-files-found: error
-        retention-days: 7
-    - name: Upload raw Criterion reports (optional)
-      if: steps.aggregate.outputs.found == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: criterion-reports-raw
-        path: target/criterion
-        if-no-files-found: ignore
-        retention-days: 7
-    - name: Benchmark Regression Check
-      if: steps.aggregate.outputs.found == 'true'
-      uses: benchmark-action/github-action-benchmark@v1
-      continue-on-error: true
-      with:
-        name: Criterion
-        tool: 'customSmallerIsBetter'
-        # Path to aggregated Criterion summary in JSON array format
-        output-file-path: 'criterion-summary.json'
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        auto-push: ${{ github.ref == 'refs/heads/main' }}
-        # Store results on gh-pages branch under benchmark-data/
-        gh-pages-branch: 'gh-pages'
-        benchmark-data-dir-path: 'benchmark-data'
-        # Do not fail CI on alerts until baseline stabilizes
-        fail-on-alert: false
-        alert-threshold: '200%'
-
-    - name: Ensure benchmark viewer on gh-pages (main.js)
-      if: steps.aggregate.outputs.found == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        git fetch origin gh-pages:gh-pages || true
-        git fetch origin main:main || true
-        # Switch to gh-pages in-place
-        git switch gh-pages
-        changed=0
-        if [ ! -f main.js ]; then
-          # Pull the viewer from main branch to avoid here-doc quoting issues
-          git show origin/main:docs/benchmarks/main.js > main.js
-          git add main.js
-          git -c user.name="github-action-benchmark" -c user.email="github@users.noreply.github.com" commit -m "chore(bench): ensure viewer main.js present"
-          git push origin gh-pages:gh-pages --no-verify
-          changed=1
-        fi
-        # Switch back to the original ref if needed
-        git switch -
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master, 2026-10-09
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain in use
+        run: rustc --version && cargo --version
+      - run: cargo publish --dry-run --locked

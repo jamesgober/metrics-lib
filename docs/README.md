@@ -18,86 +18,57 @@
         <span>&nbsp;│&nbsp;</span>
         <a href="./API.md" title="API Reference"><b>API</b></a>
         <span>&nbsp;│&nbsp;</span>
-        <a href="./GUIDELINES.md" title="Developer Guidelines"><b>GUIDELINES</b></a>
+        <a href="./GUIDELINES.md" title="Guidelines"><b>GUIDELINES</b></a>
     </sup>
 </div>
 <br>
 
-## Overview
+## Guides
 
-Welcome to the metrics-lib documentation. This section is the entry point to the full documentation set, including the API reference, developer guidelines, performance notes, and change history.
+- [API reference](./API.md): every type and exporter with runnable examples.
+- [Migrating from 1.x to 2.0](./MIGRATION-2.0.md)
+- [Migrating from the `metrics` crate](./migrating-from-metrics-rs.md)
+- [Performance](./PERFORMANCE.md): measured figures and how they were taken.
+- [Performance tuning](./performance-tuning.md)
+- [Verifying the hot-path cost](./zero-overhead-proof.md)
+- [API stability](./STABILITY.md): the 2.x promise.
+- [Development guidelines](./GUIDELINES.md)
+- [Release notes](./release/)
+- [Changelog](../CHANGELOG.md)
 
-## Quick Links
+## Observability assets
 
-- API Reference: [`docs/API.md`](./API.md)
-- Developer Guidelines: [`docs/GUIDELINES.md`](./GUIDELINES.md)
-- Performance Review: [`docs/PERFORMANCE_REVIEW.md`](./PERFORMANCE_REVIEW.md)
-- Migrating from metrics-rs: [`docs/migrating-from-metrics-rs.md`](./migrating-from-metrics-rs.md)
-- Performance Tuning: [`docs/performance-tuning.md`](./performance-tuning.md)
-- Zero-Overhead Proof: [`docs/zero-overhead-proof.md`](./zero-overhead-proof.md)
-- API Stability Guarantees: [`docs/api-stability.md`](./api-stability.md)
-- Changelog: [`CHANGELOG.md`](../CHANGELOG.md)
-- License: [`LICENSE`](../LICENSE)
+Examples that match the metric names this crate exports:
 
-### Integration Examples & Observability Assets
-- Integration Examples: see [`API.md` → Integration Examples](./API.md#integration-examples)
-- Grafana dashboard (ready to import): [`observability/grafana-dashboard.json`](../observability/grafana-dashboard.json)
-- Prometheus recording rules: [`observability/recording-rules.yaml`](../observability/recording-rules.yaml)
-- Kubernetes Service: [`docs/k8s/service.yaml`](./k8s/service.yaml)
-- Prometheus Operator ServiceMonitor: [`docs/k8s/servicemonitor.yaml`](./k8s/servicemonitor.yaml)
-- Secured ServiceMonitor (TLS/Bearer): [`docs/k8s/servicemonitor-secured.yaml`](./k8s/servicemonitor-secured.yaml)
+- [Grafana dashboard](./observability/grafana-dashboard.json):
+  request rate and p95 latency from the `tower` middleware's
+  `http_requests_total` and `http_request_duration_seconds`.
+- [Prometheus recording rules](./observability/recording-rules.yaml)
+- Kubernetes: [Service](./k8s/service.yaml),
+  [ServiceMonitor](./k8s/servicemonitor.yaml),
+  [secured ServiceMonitor](./k8s/servicemonitor-secured.yaml), and a
+  [Helm chart fragment](./k8s/helm/) wiring both plus the rules.
 
-#### Quick Start Commands
-- Import Grafana dashboard (via UI): Dashboards → New → Import → Upload `grafana-dashboard.json`.
-- Import Grafana dashboard (via API):
+Validate the rules and import the dashboard:
+
 ```bash
-curl -X POST \
-  -H "Content-Type: application/json" \
+promtool check rules docs/observability/recording-rules.yaml
+curl -X POST -H "Content-Type: application/json" \
   -H "Authorization: Bearer <GRAFANA_API_TOKEN>" \
   http://<grafana-host>/api/dashboards/db \
-    -d @observability/grafana-dashboard.json
+  -d @docs/observability/grafana-dashboard.json
+kubectl apply -f docs/k8s/service.yaml -f docs/k8s/servicemonitor.yaml
 ```
 
-- Validate Prometheus recording rules locally:
-```bash
-promtool check rules observability/recording-rules.yaml
-```
+## Help
 
-- Apply Kubernetes Service and ServiceMonitor:
-```bash
-kubectl apply -f docs/k8s/service.yaml
-kubectl apply -f docs/k8s/servicemonitor.yaml
-# For secured endpoints:
-kubectl apply -f docs/k8s/servicemonitor-secured.yaml
-```
-
-## Table of Contents
-
-- Installation and Quick Start: see the top-level [`README.md`](../README.md#installation) and [`README.md#quick-start`](../README.md#quick-start)
-- Public APIs: [`Counter`](./API.md#counter), [`Gauge`](./API.md#gauge), [`Timer`](./API.md#timer), [`RateMeter`](./API.md#ratemeter), [`SystemHealth`](./API.md#systemhealth)
-- Async Support: [`AsyncTimerExt`, `AsyncMetricBatch`](./API.md#async-support)
-- Adaptive Controls: sampling, circuit breakers, backpressure in [`API.md`](./API.md#adaptive-controls)
-- Migration: [`Migrating from metrics-rs`](./migrating-from-metrics-rs.md)
-- Guides: [`Performance Tuning`](./performance-tuning.md), [`Zero-Overhead Proof`](./zero-overhead-proof.md)
-- Policies: [`API Stability Guarantees`](./api-stability.md)
-- Contributing: [`CONTRIBUTING.md`](../CONTRIBUTING.md) (if present) and [`GUIDELINES.md`](./GUIDELINES.md)
-
-## Getting Help
-
-- Open an issue: https://github.com/jamesgober/metrics-lib/issues
-- Discussions: https://github.com/jamesgober/metrics-lib/discussions
-
-## Version Compatibility
-
-- MSRV (Minimum Supported Rust Version): 1.70+
-- See [`Cargo.toml`](../Cargo.toml) for feature flags and defaults
-
+- Issues: <https://github.com/jamesgober/metrics-lib/issues>
+- MSRV: Rust 1.85. Feature flags: see the crate documentation or
+  [`Cargo.toml`](../Cargo.toml).
 
 <br>
 
-<!-- FOOT COPYRIGHT
-################################################# -->
 <div align="center">
   <h2></h2>
-  <sup>COPYRIGHT <small>&copy;</small> 2025 <strong>JAMES GOBER.</strong></sup>
+  <sup>COPYRIGHT <small>&copy;</small> 2026 <strong>JAMES GOBER.</strong></sup>
 </div>

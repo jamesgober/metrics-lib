@@ -1,52 +1,46 @@
-//! Demonstrates rendering an OTLP/HTTP+JSON payload for the current
-//! registry. The payload is suitable for POSTing to a collector endpoint
-//! such as `http://localhost:4318/v1/metrics`.
+//! Build OTLP payloads (JSON and protobuf) for a collector.
 //!
-//! Run with:
-//!   cargo run --example otlp_push --features otlp --release
+//! The exporter is transport-agnostic: POST the body to the collector's
+//! `/v1/metrics` with the matching content type. This example only prints
+//! the payloads.
 //!
-//! The example prints the JSON body to stdout; integrating an HTTP client
-//! (`reqwest` / `ureq` / `hyper`) is left to the consumer to keep this
-//! crate dependency-light.
+//! Run with: `cargo run --example otlp_push --features otlp,histogram`
 
-use metrics_lib::exporters::otlp;
-use metrics_lib::{init, metrics, LabelSet, Unit};
+use metrics_lib::exporters::otlp::{
+    JSON_CONTENT_TYPE, OtlpExporter, PROTOBUF_CONTENT_TYPE, Temporality,
+};
+use metrics_lib::{LabelSet, MetricsCore, Unit};
+use std::time::Duration;
 
-fn main() {
-    init();
-    let m = metrics();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let core = MetricsCore::new();
+    core.registry()
+        .describe_counter("orders", "Orders placed", Unit::None)?;
+    core.counter_with("orders", &LabelSet::from([("region", "eu")]))
+        .add(17);
+    core.gauge("queue_depth").set(4.0);
+    core.timer("checkout").record(Duration::from_millis(37));
+    core.histogram("payment_seconds").observe(0.12);
 
-    m.registry()
-        .describe_counter("requests_total", "Total HTTP requests", Unit::Custom("1"));
-    m.registry()
-        .describe_gauge("inflight_requests", "Requests in flight", Unit::Custom("1"));
-    m.registry()
-        .describe_histogram("request_duration_seconds", "Handler latency", Unit::Seconds);
+    // Keep one exporter per destination: in delta mode it remembers what it
+    // sent last time.
+    let exporter = OtlpExporter::new("checkout-service")
+        .with_resource_attribute("deployment.environment", "staging")
+        .with_temporality(Temporality::Delta);
 
-    m.counter("requests_total").add(7);
-    m.counter_with(
-        "requests_total",
-        &LabelSet::from([("method", "GET"), ("status", "200")]),
-    )
-    .add(15);
-    m.gauge("inflight_requests").set(3.0);
-
-    m.registry()
-        .configure_histogram("request_duration_seconds", [0.01, 0.05, 0.1, 0.5, 1.0]);
-    let h = m.histogram_with(
-        "request_duration_seconds",
-        &LabelSet::from([("route", "/search")]),
+    let json = exporter.render_json(core.registry())?;
+    println!(
+        "POST /v1/metrics ({JSON_CONTENT_TYPE}), {} bytes",
+        json.len()
     );
-    for v in &[0.005, 0.03, 0.07, 0.2, 0.45, 0.6, 2.0] {
-        h.observe(*v);
-    }
+    println!("{json}");
 
-    let body = otlp::render_pretty(m.registry(), "demo-service");
-    println!("===== OTLP/HTTP+JSON payload =====");
-    println!("{body}");
-    println!();
-    println!("Send via:");
-    println!("  curl -X POST -H 'Content-Type: application/json' \\");
-    println!("       --data-binary @payload.json \\");
-    println!("       http://localhost:4318/v1/metrics");
+    core.counter_with("orders", &LabelSet::from([("region", "eu")]))
+        .add(3);
+    let protobuf = exporter.render_protobuf(core.registry());
+    println!(
+        "POST /v1/metrics ({PROTOBUF_CONTENT_TYPE}), {} bytes (orders delta = 3)",
+        protobuf.len()
+    );
+    Ok(())
 }

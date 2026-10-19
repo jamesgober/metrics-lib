@@ -1,121 +1,68 @@
-# Zero-Overhead Proof
+# Verifying the Hot-Path Cost
 
-This document shows how to independently verify the zero-overhead claims for `metrics-lib` using assembly inspection, binary size analysis, and reproducible nanosecond benchmarks.
+How to check, on your own machine, what recording a metric costs and what
+the optional features add. The figures we publish are in
+[`PERFORMANCE.md`](./PERFORMANCE.md); this page is the method.
 
-## 1) Assembly Inspection (inlining and hot path)
+## 1. Inspect the generated code
 
-Goal: demonstrate that hot-path metric calls compile down to a handful of instructions with no function call overhead.
+The hot paths are small enough to read in assembly. With
+[`cargo-show-asm`](https://github.com/pacak/cargo-show-asm):
 
-Tools:
-- cargo-asm: https://github.com/gnzlbg/cargo-asm
-
-Install:
 ```bash
-cargo install cargo-asm
+cargo install cargo-show-asm
+cargo asm --release --lib "metrics_lib::counter::Counter::inc"
 ```
 
-Inspect a hot path (Counter::inc):
-```bash
-# Build in release
-cargo build --release
+What to expect on x86-64:
 
-# Show the assembly for Counter::inc (adapt the symbol if necessary)
-cargo asm metrics_lib::counter::Counter::inc --rust --target x86_64-unknown-linux-gnu \
-  | sed -n '1,120p'
-```
+- `Counter::inc` / `add`: one `lock xadd` (or `lock add`) and a return.
+- `Gauge::set`: one `mov` store. `Gauge::get`: one `mov` load.
+- `Timer::record_ns`: two `lock xadd` plus a compare against the current
+  minimum and maximum (a `lock cmpxchg` only when a new extreme is seen).
+- No calls to the allocator, the formatter or the registry.
 
-What to look for:
-- A single atomic RMW instruction (e.g., `lock xadd` or equivalent) or small CAS loop depending on architecture.
-- No calls to allocation or formatting.
-- No indirect jumps through registries or dispatchers.
+`ShardedCounter::inc` adds a thread-local load to pick the stripe.
 
-Repeat for Gauge::set and Timer::record_ns to verify minimal instruction sequences.
+## 2. Measure what features cost
 
-## 2) Binary Size Analysis
+Every optional component is behind a feature, and the system monitor is not
+started until first use, so an unused feature adds compile time and binary
+size but no runtime work. To see the size:
 
-Goal: demonstrate minimal code footprint and the impact of enabling features.
-
-Tools:
-- cargo-bloat: https://github.com/RazrFalcon/cargo-bloat
-
-Install:
 ```bash
 cargo install cargo-bloat
+cargo bloat --release --crates --example quick_start --no-default-features --features count,gauge,timer
+cargo bloat --release --crates --example quick_start --features full
 ```
 
-Measure size contributions (top symbols):
+To confirm nothing runs in the background, create a `MetricsCore` and check
+your thread count: no `metrics-lib-system-sampler` thread exists until
+`MetricsCore::system()` is called.
+
+```rust
+let core = metrics_lib::MetricsCore::new();
+core.counter("requests").inc();
+// No sampler thread, no system call so far. The first call starts it:
+let health = core.system();
+assert!(health.is_sampling());
+```
+
+## 3. Reproduce the benchmarks
+
 ```bash
-cargo bloat --release -n 50 --crates
+cargo bench --all-features --bench metrics_bench -- --warm-up-time 3 --measurement-time 5
+cargo bench --all-features --bench registry_bench -- --warm-up-time 3 --measurement-time 5
 ```
 
-Compare with features:
-```bash
-# Minimal
-cargo build --release
-cargo bloat --release -n 50 --crates
+Results land in `target/criterion/` (open `report/index.html`). Run on a
+quiet machine with a fixed CPU frequency, and report the environment with
+the numbers: CPU model, OS, `rustc -V`, target triple and the Criterion
+flags. Numbers measured on a loaded machine are upper bounds.
 
-# With async feature
-cargo build --release --features async
-cargo bloat --release -n 50 --crates --features async
-```
+## 4. Release profile
 
-What to look for:
-- Core metric types contribute a small, stable portion of total size.
-- Optional features add size only when enabled.
-
-## 3) Nanosecond Benchmarks (Reproducibility)
-
-Goal: reproduce the sub-nanosecond Gauge and multi-nanosecond Counter/Timer numbers with Criterion in a controlled environment.
-
-Methodology:
-- Fix CPU frequency (performance governor) and ensure a quiescent system.
-- Use Criterion with longer warmup/measurement to reduce variance.
-
-Commands:
-```bash
-# Stabilize results
-cargo bench --bench metrics_bench --features meter -- -w 3.0 -m 5.0 -n 100
-
-# Extract means
-python3 - << 'PY'
-import json,glob
-for f in glob.glob('target/criterion/**/new/estimates.json', recursive=True):
-    d=json.load(open(f))
-    m=d.get('mean',{}).get('point_estimate');
-    if m is not None:
-        print(f,m)
-PY
-```
-
-Interpreting results:
-- Gauge set should measure around sub-ns on modern CPUs.
-- Counter increment and Timer record should fall into low single-digit and low tens of ns respectively, depending on CPU.
-
-## 4) Environment Disclosure
-
-To ensure fair comparisons, document:
-- CPU model and MHz
-- Rust toolchain version
-- Target triple
-- Criterion flags
-
-Example:
-```
-CPU: Apple M1 Pro (Performance cores) @ 3.2 GHz
-rustc: 1.78.0 (stable)
-Target: aarch64-apple-darwin
-Criterion: -w 3.0 -m 5.0 -n 100
-```
-
-## 5) Optional: Codegen Units and LTO
-
-For maximum optimization:
-```toml
-# Cargo.toml (profile)
-[profile.release]
-codegen-units = 1
-lto = "thin"
-opt-level = 3
-```
-
-Rebuild and re-check assembly/bloat to observe any additional improvements.
+The repository's `[profile.release]` (used by `cargo bench`) sets
+`lto = "fat"` and `codegen-units = 1`. Your application's profile decides
+what you get in production; `codegen-units = 1` mainly helps cross-crate
+inlining of the small hot-path functions.

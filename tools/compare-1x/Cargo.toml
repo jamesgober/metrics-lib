@@ -1,0 +1,21 @@
+# Side-by-side timing of metrics-lib 1.0.0 and the working tree.
+# Not part of the published crate. Run from this directory:
+#   cargo run --release
+# Optional argument: a substring to select operations.
+[package]
+name = "compare-1x"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ml1 = { package = "metrics-lib", version = "=1.0.0", default-features = false, features = ["count", "gauge", "timer", "meter", "histogram"] }
+ml2 = { package = "metrics-lib", path = "../..", default-features = false, features = ["count", "gauge", "timer", "meter", "histogram"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Keep this crate out of any parent workspace.
+[workspace]

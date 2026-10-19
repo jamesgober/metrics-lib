@@ -1,100 +1,58 @@
-//! Demonstrates the `Histogram` type for latency distributions + percentile
-//! readouts.
+//! Latency distributions with `Histogram` (fixed buckets, aggregatable) and
+//! `Summary` (streaming quantiles with a relative-error bound).
 //!
-//! Run with:
-//!   cargo run --example histogram_latency --features histogram --release
+//! Run with: `cargo run --example histogram_latency --features histogram`
 
-use metrics_lib::{init, metrics, LabelSet, Unit};
-use std::time::Duration;
+use metrics_lib::{LabelSet, MetricsCore, Unit};
 
-fn main() {
-    init();
-    let m = metrics();
+/// Deterministic pseudo-random value in `[0, 1)`.
+fn next(state: &mut u64) -> f64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    #[allow(clippy::cast_precision_loss)]
+    let v = (*state >> 11) as f64 / (1u64 << 53) as f64;
+    v
+}
 
-    // Pre-configure latency buckets (Prometheus default range). The standard
-    // `DEFAULT_SECONDS_BUCKETS` works for most HTTP / RPC use cases.
-    m.registry().configure_histogram(
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let core = MetricsCore::new();
+    let registry = core.registry();
+    registry.describe_histogram("request_duration_seconds", "Handler latency", Unit::Seconds)?;
+
+    let fast = core.histogram_with(
         "request_duration_seconds",
-        [
-            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-        ],
+        &LabelSet::from([("route", "/healthz")]),
     );
-    m.registry().describe_histogram(
+    let slow = core.histogram_with(
         "request_duration_seconds",
-        "HTTP request handler latency",
-        Unit::Seconds,
+        &LabelSet::from([("route", "/search")]),
     );
+    let all = core.summary("request_duration_quantiles_seconds");
 
-    // Simulate two endpoints with different latency profiles.
-    let fast = LabelSet::from([("route", "/healthz")]);
-    let slow = LabelSet::from([("route", "/search")]);
-
+    let mut rng = 7u64;
     for _ in 0..1000 {
-        // /healthz: tight around 5–10 ms.
-        let v = 0.005 + (fastrand() * 0.005);
-        m.histogram_with("request_duration_seconds", &fast)
-            .observe(v);
+        let v = 0.005 + next(&mut rng) * 0.005;
+        fast.observe(v);
+        all.observe(v);
     }
     for _ in 0..200 {
-        // /search: spread across 100ms–2s.
-        let v = 0.1 + (fastrand() * 1.9);
-        m.histogram_with("request_duration_seconds", &slow)
-            .observe(v);
+        let v = 0.1 + next(&mut rng) * 1.9;
+        slow.observe(v);
+        all.observe(v);
     }
 
-    // Direct percentile readouts.
-    let h_fast = m.histogram_with("request_duration_seconds", &fast);
-    let h_slow = m.histogram_with("request_duration_seconds", &slow);
-    println!("Endpoint           p50         p95         p99         count");
-    println!(
-        "/healthz   {:>10}  {:>10}  {:>10}  {:>10}",
-        fmt_dur(h_fast.quantile(0.50)),
-        fmt_dur(h_fast.quantile(0.95)),
-        fmt_dur(h_fast.quantile(0.99)),
-        h_fast.count()
-    );
-    println!(
-        "/search    {:>10}  {:>10}  {:>10}  {:>10}",
-        fmt_dur(h_slow.quantile(0.50)),
-        fmt_dur(h_slow.quantile(0.95)),
-        fmt_dur(h_slow.quantile(0.99)),
-        h_slow.count()
-    );
-
-    println!();
-    println!("===== Prometheus exposition =====");
-    println!(
-        "{}",
-        metrics_lib::exporters::prometheus::render(m.registry())
-    );
-}
-
-fn fmt_dur(seconds: f64) -> String {
-    if seconds < 0.001 {
-        format!("{:.0}μs", seconds * 1_000_000.0)
-    } else if seconds < 1.0 {
-        format!("{:.1}ms", seconds * 1_000.0)
-    } else {
-        format!("{:.2}s", seconds)
+    for (route, h) in [("/healthz", &fast), ("/search", &slow)] {
+        println!(
+            "{route:<9} count={:>4} mean={:.4}s p50~{:.4}s p99~{:.4}s (bucket interpolation)",
+            h.count(),
+            h.mean(),
+            h.quantile(0.5),
+            h.quantile(0.99)
+        );
     }
-}
-
-/// Tiny LCG for deterministic example output. Returns a value in `[0.0, 1.0)`.
-fn fastrand() -> f64 {
-    use std::cell::Cell;
-    thread_local! {
-        static STATE: Cell<u64> = const { Cell::new(0x123456789ABCDEF0) };
+    for (q, v) in all.snapshot().quantiles {
+        println!("summary   p{:<4} = {v:.4}s (within 2%)", q * 100.0);
     }
-    STATE.with(|s| {
-        let mut x = s.get();
-        x = x
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        s.set(x);
-        (x >> 32) as f64 / (u32::MAX as f64)
-    })
+    Ok(())
 }
-
-// Silence "unused" if no Duration use is needed.
-#[allow(dead_code)]
-fn _silence(_: Duration) {}

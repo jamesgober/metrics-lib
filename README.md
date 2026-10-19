@@ -4,746 +4,303 @@
     <b>metrics-lib</b>
     <br>
     <sub>
-        <sup>RUST PERFORMANCE DIAGNOSTICS</sup>
+        <sup>RUST APPLICATION METRICS</sup>
     </sub>
 </h1>
 
-<div align="center">
-    <a href="https://crates.io/crates/metrics-lib"><img alt="Crates.io" src="https://img.shields.io/crates/v/metrics-lib"></a>
-    <a href="https://crates.io/crates/metrics-lib" alt="Download metrics-lib"><img alt="Crates.io Downloads" src="https://img.shields.io/crates/d/metrics-lib?color=%230099ff"></a>
-    <a href="https://docs.rs/metrics-lib" title="metrics-lib Documentation"><img alt="docs.rs" src="https://img.shields.io/docsrs/metrics-lib"></a>
+<p align="center">
+    <a href="https://crates.io/crates/metrics-lib"><img src="https://img.shields.io/crates/v/metrics-lib.svg" alt="Crates.io"></a>
+    <a href="https://crates.io/crates/metrics-lib" alt="Download"><img alt="Crates.io Downloads" src="https://img.shields.io/crates/d/metrics-lib?color=%230099ff"></a>
+    <a href="https://docs.rs/metrics-lib"><img src="https://docs.rs/metrics-lib/badge.svg" alt="Documentation"></a>
     <a href="https://github.com/jamesgober/metrics-lib/actions"><img alt="GitHub CI" src="https://github.com/jamesgober/metrics-lib/actions/workflows/ci.yml/badge.svg"></a>
-    <a href="https://github.com/rust-lang/rfcs/blob/master/text/2495-min-rust-version.md" title="MSRV"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.70%2B-blue"></a>
+    <a href="https://github.com/rust-lang/rfcs/blob/master/text/2495-min-rust-version.md" title="MSRV"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.85-blue"></a>
+    <a href="#license"><img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License"></a>
+</p>
+
+<p align="center">
+    <b>Counters, gauges, timers, histograms and summaries for Rust services.</b>
     <br>
-    <a href="https://github.com/jamesgober/metrics-lib/actions/workflows/bench.yml" title="metrics-lib Benchmarks"><img alt="Benchmarks" src="https://github.com/jamesgober/metrics-lib/actions/workflows/bench.yml/badge.svg"></a>
-    <a href="https://jamesgober.github.io/metrics-lib/" title="Benchmark Regression">
-        <img alt="Benchmark Regression" src="https://img.shields.io/github/actions/workflow/status/jamesgober/metrics-lib/ci.yml?branch=main&label=Regression&logo=github">
-    </a>
-</div>
+    <i>Atomic hot paths, a bounded registry, and exposition that scrapers accept.</i>
+</p>
 
 <br>
 
-<div align="left">
-    <p>
-        <strong>Metrics-lib</strong> - A lightweight, <b>ultra-high-performance</b> metrics library for Rust. 
-        Purpose-built with <em>minimal dependencies</em> to maintain <b>ultra-low overhead</b> while delivering <b>high-operation throughput</b>, even under <em>heavy loads</em>.
-        Built with native <b>asynchronous support</b> and <b>cross-platform compatibility</b>, Metrics-lib leverages <b>lock-free</b> atomic operations to ensure thread-safe data collection without performance bottlenecks across <b>Windows</b>, <b>macOS</b>, and <b>Linux</b> environments.
-    </p>
-    <p>
-        This library provides a comprehensive metrics system that includes <b>counters</b>, <b>gauges</b>, <b>timers</b>, <b>tumbling-window rate meters</b>, <b>adaptive sampling</b>, and <b>system health monitoring</b>—all designed for production hot paths. 
-        The core architecture is <b>lock-free</b> on the hot path, <b>allocation-free</b> during steady state, and <b>cache-aligned</b> for minimal contention.
-    </p>
-    <p>
-        Built with <b>resilience</b> in mind, Metrics-lib includes features such as <b>circuit breakers</b>, <b>adaptive sampling</b>, <b>backpressure control</b>, and <b>system health monitoring</b> to ensure <b>maximum-endurance</b> and <b>stability</b>.
-    </p>
-    <br>
-    <hr>
-    <p>
-         Optional async helpers, adaptive controls, and system health snapshots are available without imposing overhead when unused.
-    </p>
-    <p>
-        <strong>MSRV is 1.70+</strong>.        
-    </p>
-    <blockquote>
-        <strong>1.0.0 is the API freeze.</strong> See <a href="./docs/STABILITY.md"><code>docs/STABILITY.md</code></a> for the exhaustive frozen-surface list and the SemVer promise. CI enforces formatting, lints, coverage (<i>85% threshold</i>), <b>rustdoc</b> warnings, security advisories (<code>cargo&nbsp;deny</code>), unused-deps (<code>cargo&nbsp;udeps</code>), Miri on the <code>unsafe</code> pin-projection blocks, and publish dry-runs.
-    </blockquote>
-</div>
+<p>
+    <strong>metrics-lib</strong> is an in-process metrics library: you record into counters, gauges, timers, rate meters, histograms and summaries, and export to Prometheus, OpenMetrics, OTLP, StatsD or JSON. Recording into a held counter or gauge is a single atomic operation; timers, histograms and summaries use a few atomic operations, and only timers, rate meters and token buckets read the clock. None of them takes a lock or allocates, except <code>observe_with_exemplar</code>, which stores the exemplar's labels. The registry that hands out those handles validates names, caps the number of series and keeps one kind per name, so a busy or hostile workload cannot grow memory without bound or produce output a scraper rejects.
+</p>
 
+<p>
+    It is built for services that want one dependency for the whole path from instrumentation to a <code>/metrics</code> endpoint. The core has no required dependencies; integrations sit behind features: a built-in HTTP endpoint and Pushgateway client, a <code>metrics</code>-crate recorder so existing <code>metrics::counter!</code> call sites keep working, <code>tower</code> middleware for request rate, errors and duration, and <code>tracing</code> exemplars.
+</p>
 
-<hr>
-<br>
+<p>
+    Every exporter's output is parsed by strict Prometheus and OpenMetrics validators in the test suite, including 2,048 randomly generated registries per run, and every performance number on this page comes from the Criterion benches in the repository with the machine stated next to it.
+</p>
 
-<h2>Performance First</h2>
-
-Latest local Criterion means (`cargo bench --bench metrics_bench --all-features`, Windows x86_64, Rust stable). Numbers are for the **cached-handle** hot-path pattern (hold an `Arc<Counter>` / `Arc<Gauge>` / … and call `.inc()` / `.set()` directly):
-
-- **Counter increment**: ~1.5 ns/op
-- **Gauge set**: ~0.4 ns/op
-- **Timer record**: ~3 ns/op
-- **Histogram observe**: ~10 ns/op (depends on bucket count)
-- **Memory**: 64 bytes per metric (cache-aligned)
-
-Calling `metrics().counter("name").inc()` per call (global lookup) is slower — it pays for an `RwLock::read()` + `HashMap::get(&str)` + `Arc::clone()`. The `cached_vs_global` Criterion group reports both numbers side-by-side; cache the `Arc` in hot loops.
-
-<br>
-<hr>
-<br>
+---
 
 ## Features
 
-### Core Metrics
-- **🔢 Counters** — atomic increment/decrement with overflow-safe `try_*` variants
-- **📊 Gauges** — IEEE 754 atomic floating-point with non-finite guards
-- **⏱️ Timers** — nanosecond precision with RAII guards and batch recording
-- **📈 Rate Meters** — tumbling-window rates with burst detection and API limiting
-- **📐 Histograms** *(v0.9.3)* — bucketed observations with sum/count + quantile estimation
-- **🏷️ Labels** *(v0.9.3)* — `LabelSet` with bounded cardinality cap (default 10 000)
-- **💾 System Health** — background-sampled CPU / memory / load / threads / FDs / health score (v0.9.4: zero-contention reads)
+### **Metric types**
+- **Counter, ShardedCounter, UpDownCounter** - monotonic, contention-striped and signed integer counters.
+- **Gauge** - `f64` with set, add, min/max tracking and exponential moving average.
+- **Timer** - count, sum, min and max of durations; RAII guards that can outlive a temporary handle.
+- **Histogram** - cumulative buckets with exemplars; **Summary** - streaming quantiles with 2 % relative error.
+- **RateMeter, TokenBucket** - sliding-window rates and a GCRA rate limiter.
 
-<br>
+### **Registry**
+- **Labels** - `LabelSet` keys and values validated (or repaired) and escaped for every format.
+- **Bounded** - a series cap (default 10 000), idle-series eviction and explicit removal.
+- **One name, one kind** - conflicting registrations are refused instead of producing invalid output.
+- **Sharded** - 16 independently locked shards; labeled lookups do not allocate.
 
-### Telemetry & Exporters *(v0.9.3+)*
+### **Export**
+- **Prometheus and OpenMetrics text** - always available, with exemplars in OpenMetrics.
+- **OTLP** (JSON and protobuf, cumulative or delta), **StatsD** (deltas), **JSON** snapshots.
+- **HTTP** - a dependency-free `/metrics` server and a Pushgateway client.
+- **Process metrics** - the standard `process_*` series on Linux, macOS and Windows.
 
-Five built-in exporters render the registry into the format your backend speaks:
+### **Reliability and safety**
+- **Minimal unsafe code** - `#![deny(unsafe_code)]`; the only `unsafe` blocks are the documented OS calls that read process and host statistics on Windows and macOS.
+- **No panics on input** - invalid numbers and names are rejected by `try_*` methods and ignored or repaired by the others.
+- **Tested** - unit, integration, stress, property and doc tests; every feature is linted and tested on its own in CI.
 
-| Backend | Module | Feature flag | Output |
-|---|---|---|---|
-| **Prometheus** text | `metrics_lib::exporters::prometheus` | *(always on)* | `String` — `text/plain; version=0.0.4` |
-| **OpenMetrics** text | `metrics_lib::exporters::openmetrics` | *(always on)* | `String` — `application/openmetrics-text` |
-| **JSON snapshot** | `metrics_lib::exporters::json` | `serde` | `RegistrySnapshot` / `String` |
-| **StatsD UDP** push | `metrics_lib::exporters::statsd` | `statsd` | UDP datagrams via `StatsdSink` (DogStatsD tags) |
-| **OTLP/HTTP+JSON** | `metrics_lib::exporters::otlp` | `otlp` *(→ `serde`)* | `String` — POST to `/v1/metrics` |
-
-All exporters honour [`LabelSet`](./docs/API.md#labels) and [`MetricMetadata`](./docs/API.md#metric-metadata) (help text + unit + kind) — `# HELP` / `# TYPE` / `# UNIT` lines, OTLP `description` / `unit`, StatsD tags.
-
-End-to-end runnable demos: [`labels_demo`](./examples/labels_demo.rs), [`histogram_latency`](./examples/histogram_latency.rs), [`prometheus_endpoint`](./examples/prometheus_endpoint.rs), [`statsd_push`](./examples/statsd_push.rs), [`otlp_push`](./examples/otlp_push.rs), [`snapshot_serde`](./examples/snapshot_serde.rs).
-
-<br>
-
-### Advanced Features
-- **Hot-path lock-free** — pure atomic operations on every increment/record/observe
-- **Async Native** — first-class async/await support with zero-cost abstractions
-- **Resilience** — circuit breakers, adaptive sampling, backpressure control
-- **Cross-Platform** — Linux (`/proc`), macOS, Windows (`sysinfo`)
-- **Cache-Aligned** — 64-byte alignment prevents false sharing
-
-<br>
-<hr>
-
-## API Overview
-
-For a complete reference with examples, see `docs/API.md`.
-
-- [`Counter`](./docs/API.md#counter) — ultra-fast atomic counters with batch and conditional ops
-- [`Gauge`](./docs/API.md#gauge) — atomic f64 gauges with math ops, EMA, and min/max helpers
-- [`Timer`](./docs/API.md#timer) — nanosecond timers, RAII guards, and closure/async timing
-- [`RateMeter`](./docs/API.md#ratemeter) — tumbling-window rate tracking and bursts
-- [`Histogram`](./docs/API.md#histogram) — bucketed observations with sum/count and approximate quantiles (v0.9.3)
-- [`LabelSet`](./docs/API.md#labels) — labeled metric instances with bounded cardinality (v0.9.3)
-- [`SystemHealth`](./docs/API.md#systemhealth) — CPU, memory, load, threads, FDs, health score
-- [Exporters](./docs/API.md#exporters) — Prometheus, OpenMetrics, JSON snapshot, StatsD UDP, OTLP/HTTP+JSON (v0.9.3)
-- [Async support](./docs/API.md#async-support) — `AsyncTimerExt`, `AsyncMetricBatch`
-- [Adaptive controls](./docs/API.md#adaptive-controls) — sampling, circuit breaker, backpressure
-- [Prelude](./docs/API.md#prelude) — convenient re-exports
-
-<br>
-
-### Error handling: try_ variants
-All core metrics expose non-panicking `try_` methods that validate inputs and return `Result<_, MetricsError>` instead of panicking:
-
-- `Counter`: `try_inc`, `try_add`, `try_set`, `try_fetch_add`, `try_inc_and_get`
-- `Gauge`: `try_set`, `try_add`, `try_sub`, `try_set_max`, `try_set_min`
-- `Timer`: `try_record_ns`, `try_record`, `try_record_batch`
-- `RateMeter`: `try_tick`, `try_tick_n`, `try_tick_if_under_limit`
-
-Error semantics:
-- `MetricsError::Overflow` — arithmetic would overflow/underflow an internal counter.
-- `MetricsError::InvalidValue { reason }` — non-finite or otherwise invalid input (e.g., NaN for `Gauge`).
-- `MetricsError::OverLimit` — operation would exceed a configured limit (e.g., rate limiting helpers).
-
-Example:
-
-```rust
-use metrics_lib::{init, metrics, MetricsError};
-
-init();
-let c = metrics().counter("jobs");
-c.try_add(10)?;      // Result<(), MetricsError>
-let r = metrics().rate("qps");
-let allowed = r.try_tick_if_under_limit(1000.0)?; // Result<bool, MetricsError>
-```
-
-Panic guarantees: the plain methods (`inc`, `add`, `set`, `tick`, etc.) prioritize speed and may saturate or assume valid inputs. Prefer `try_` variants when you need explicit error handling.
-
-<hr>
-<br>
+---
 
 ## Installation
 
-Add to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-metrics-lib = "1.0.0"
+metrics-lib = "2"
 
-# Optional features
-metrics-lib = { version = "1.0.0", features = ["async"] }
-
-# Full feature set (stable + async + serde)
-metrics-lib = { version = "1.0.0", features = ["full"] }
+# Pick features:
+metrics-lib = { version = "2", features = [
+    "histogram",   # Histogram and Summary
+    "meter",       # RateMeter
+    "http",        # /metrics server and Pushgateway client
+    "tower",       # request metrics middleware
+] }
 ```
 
-<hr>
-<br>
+| Feature | Enables | Default |
+|---|---|---|
+| `count` | `Counter`, `ShardedCounter`, `UpDownCounter` | yes |
+| `gauge` | `Gauge` | yes |
+| `timer` | `Timer` | yes |
+| `system` | `SystemHealth`, `ProcessCollector` (no dependency on Linux, Windows and macOS; `sysinfo` on other targets) | yes |
+| `meter` | `RateMeter` | |
+| `histogram` | `Histogram`, `Summary` | |
+| `sample` | adaptive sampler, circuit breaker, backpressure | |
+| `async` | async timing, batching, Tokio runtime metrics | |
+| `serde` | JSON exporter, `Serialize` snapshots | |
+| `statsd` | StatsD exporter | |
+| `otlp` | OTLP exporter (JSON and protobuf) | |
+| `http` | `MetricsServer`, `Pushgateway` | |
+| `tracing` | span timing and exemplars | |
+| `metrics-rs` | `metrics` crate recorder | |
+| `tower` | `RedLayer` middleware | |
+| `all` / `full` | every metric type / everything | |
+
+**Recommendations**: a library that only counts: `default-features = false, features = ["count"]`. A web service: the defaults plus `histogram`, `http` and `tower`. Code already using the `metrics` crate: add `metrics-rs`.
+
+---
 
 ## Quick Start
 
 ```rust
-use metrics_lib::{init, metrics};
+use metrics_lib::{LabelSet, MetricsCore};
+use metrics_lib::exporters::prometheus;
 
-// Initialize once at startup
-init();
+let core = MetricsCore::new();
 
-// Counters
-metrics().counter("requests").inc();
-metrics().counter("errors").add(5);
+// Look a metric up once and keep the handle on hot paths.
+let requests = core.counter_with("http_requests", &LabelSet::from([("method", "GET")]));
+requests.inc();
 
-// Gauges
-metrics().gauge("cpu_usage").set(87.3);
-metrics().gauge("memory_gb").add(1.5);
+core.gauge("queue_depth").set(12.0);
+core.histogram("request_seconds").observe(0.042);
 
-// Timers - automatic RAII timing
+// Time a block; the guard records when it is dropped.
 {
-    let _timer = metrics().timer("api_call").start();
-    // Your code here - automatically timed on drop
+    let _t = core.start_timer("db_query");
 }
 
-// Or time a closure
-let result = metrics().time("db_query", || {
-    // Database operation
-    "user_data"
+let text = prometheus::render(core.registry());
+assert!(text.contains(r#"http_requests{method="GET"} 1"#));
+```
+
+The global instance works the same way and configures itself on first use:
+
+```rust
+use metrics_lib::{init_with_config, metrics, MetricsConfig};
+
+init_with_config(MetricsConfig::default().with_max_series(50_000)).ok();
+metrics().counter("jobs_done").inc();
+```
+
+### **Serve `/metrics`**
+
+```rust,no_run
+use metrics_lib::exporters::http::MetricsServer;
+use metrics_lib::MetricsCore;
+use std::sync::Arc;
+
+let core = Arc::new(MetricsCore::new());
+let server = MetricsServer::spawn("0.0.0.0:9898", Arc::clone(&core))?;
+// ... run the application; Prometheus scrapes http://host:9898/metrics
+server.shutdown();
+# Ok::<(), std::io::Error>(())
+```
+
+### **Instrument a tower or axum service**
+
+```rust
+use metrics_lib::tower::RedLayer;
+use metrics_lib::MetricsCore;
+use std::sync::Arc;
+use tower::Layer;
+
+let core = Arc::new(MetricsCore::new());
+let _service = RedLayer::new(Arc::clone(&core)).layer(tower::service_fn(
+    |_req: http::Request<()>| async { Ok::<_, std::convert::Infallible>(http::Response::new(())) },
+));
+// Records http_requests_total{method,status}, http_request_duration_seconds
+// and http_requests_in_flight.
+```
+
+### **Keep existing `metrics` call sites**
+
+```rust
+use metrics_lib::metrics_rs::MetricsLibRecorder;
+use metrics_lib::MetricsCore;
+use std::sync::Arc;
+
+let core = Arc::new(MetricsCore::new());
+let recorder = MetricsLibRecorder::new(Arc::clone(&core));
+// Applications call `metrics_lib::metrics_rs::install(core)` once instead.
+metrics::with_local_recorder(&recorder, || {
+    metrics::counter!("logins_total", "provider" => "github").increment(1);
 });
-
-// System health monitoring
-let cpu = metrics().system().cpu_used();
-let memory_gb = metrics().system().mem_used_gb();
-
-// Rate metering
-metrics().rate("api_calls").tick();
+assert_eq!(core.registry().counter_names(), vec!["logins_total"]);
 ```
 
-## Telemetry & Exporters (v0.9.3+)
-
-Five built-in exporters render the current registry state to popular
-backends. All exporters share label and metadata support.
+### **Bounded, validated registries**
 
 ```rust
-use metrics_lib::{init, metrics, LabelSet, Unit};
-use metrics_lib::exporters::{prometheus, openmetrics};
+use metrics_lib::{MetricsError, Registry};
 
-init();
-
-// One-time metric descriptions feed `# HELP` / `# TYPE` / `# UNIT` lines.
-metrics().registry().describe_counter(
-    "http_requests",
-    "Total HTTP requests",
-    Unit::Custom("1"),
-);
-
-// Labeled metrics — `(name, labels)` is the identity.
-let labels = LabelSet::from([("method", "GET"), ("status", "200")]);
-metrics().counter_with("http_requests", &labels).inc();
-
-// Render the registry to Prometheus text format.
-let body = prometheus::render(metrics().registry());
-// Or OpenMetrics:
-let body_om = openmetrics::render(metrics().registry());
+let registry = Registry::with_cardinality_cap(2);
+registry.counter("a").inc();
+registry.counter("b").inc();
+assert!(matches!(registry.try_counter("c"), Err(MetricsError::CardinalityExceeded)));
+assert!(matches!(registry.try_gauge("a"), Err(MetricsError::KindMismatch { .. })));
+assert!(matches!(registry.try_counter("bad name"), Err(MetricsError::InvalidName { .. })));
 ```
 
-| Exporter | Feature flag | Module | Output |
-|---|---|---|---|
-| Prometheus text | (always on) | `metrics_lib::exporters::prometheus` | `String` |
-| OpenMetrics text | (always on) | `metrics_lib::exporters::openmetrics` | `String` |
-| JSON snapshot | `serde` | `metrics_lib::exporters::json` | `String` / `RegistrySnapshot` |
-| StatsD UDP push | `statsd` | `metrics_lib::exporters::statsd` | UDP packets via `StatsdSink` |
-| OTLP/HTTP+JSON | `otlp` (→ `serde`) | `metrics_lib::exporters::otlp` | `String` (POST to `/v1/metrics`) |
+More in [`docs/API.md`](docs/API.md) and the [examples](examples/).
 
-End-to-end examples live in [`examples/`](./examples): `labels_demo`,
-`histogram_latency`, `prometheus_endpoint`, `statsd_push`, `otlp_push`,
-`snapshot_serde`.
+---
 
-## Observability Quick Start
+## Performance
 
-- Integration Examples: see `docs/API.md#integration-examples`
-- Grafana dashboard (ready to import): `observability/grafana-dashboard.json`
-- Prometheus recording rules: `observability/recording-rules.yaml`
-- Kubernetes Service: `docs/k8s/service.yaml`
-- Prometheus Operator ServiceMonitor: `docs/k8s/servicemonitor.yaml`
-- Secured ServiceMonitor (TLS/Bearer): `docs/k8s/servicemonitor-secured.yaml`
+Criterion medians on an AMD Ryzen 9 9950X3D, Windows 11, Rust 1.85, `lto = "fat"`, on a machine that was also running other builds (so these are upper bounds). Method and the full table: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
-Commands
+| Operation | Time |
+|---|---|
+| `Counter::inc` on a held handle | 4.2 ns |
+| `Gauge::set` | 0.28 ns |
+| `Timer::record_ns` | 8.2 ns |
+| `Histogram::observe` | 13.5 ns |
+| `RateMeter::tick` | 44 ns |
+| Unlabeled registry lookup plus `inc` | 32 ns |
+| Labeled registry lookup plus `inc` | 61 ns (two labels) |
+| 8 threads × 100 000 increments, one `Counter` | 6.1 ms |
+| 8 threads × 100 000 increments, `ShardedCounter` | 1.2 ms |
 
+Hold handles on hot paths: a lookup costs a shard read lock and a hash of the name, about eight times the increment itself.
+
+---
+
+## **Status: Stable**
+
+**Current Version:** `2.0.0`, a major release that fixes the correctness problems found in the 2026-10-13 audit. Upgrading from 1.x: [`docs/MIGRATION-2.0.md`](docs/MIGRATION-2.0.md).
+
+**API stability**: the 2.x contract is in [`docs/STABILITY.md`](docs/STABILITY.md). Public enums and option structs are `#[non_exhaustive]`, so additions ship in minor releases.
+
+---
+
+## **Documentation & Resources**
+
+- **[Documentation index](docs/README.md)**
+- **[API reference](docs/API.md)** - every type and exporter with runnable examples
+- **[Performance](docs/PERFORMANCE.md)** and **[tuning](docs/performance-tuning.md)**
+- **[Migrating from 1.x](docs/MIGRATION-2.0.md)** and **[from the `metrics` crate](docs/migrating-from-metrics-rs.md)**
+- **[docs.rs](https://docs.rs/metrics-lib)**, **[crates.io](https://crates.io/crates/metrics-lib)**, **[examples](examples/)**, **[benchmarks](benches/)**
+- **Observability assets**: a Grafana dashboard, Prometheus recording rules and Kubernetes manifests in [`docs/observability/`](docs/observability/) and [`docs/k8s/`](docs/k8s/)
+
+### **Troubleshooting**
+
+<details>
+  <summary><b>My metric shows up with an underscore instead of a dot or dash?</b></summary>
+    <p>Prometheus names cannot contain <code>.</code> or <code>-</code>. Dots are kept in the registry and written as <code>_</code>; other invalid characters are repaired at registration. <code>try_*</code> lookups return <code>InvalidName</code> instead.</p>
+</details>
+
+<details>
+  <summary><b>A lookup returned a metric that is not exported?</b></summary>
+    <p>The name is registered as another kind, or the series cap is full. Check <code>Registry::kind_conflicts()</code> and <code>cardinality_overflows()</code>, or use the <code>try_*</code> lookups to get the error.</p>
+</details>
+
+<details>
+  <summary><b><code>timer("x").start()</code> fails with E0716?</b></summary>
+    <p><code>start()</code> borrows the timer. Use <code>start_owned()</code> or <code>MetricsCore::start_timer</code>, which own their handle.</p>
+</details>
+
+<details>
+  <summary><b>Thread count or load average is <code>None</code>?</b></summary>
+    <p>The platform does not report it (thread count and load average on Windows; every value on targets `sysinfo` cannot read). The exporters omit those series.</p>
+</details>
+
+### **Version Compatibility**
+- **Rust**: 1.85+ (edition 2024). Raising the MSRV is a major change (see `docs/STABILITY.md`).
+- **Platforms**: Linux, macOS and Windows are tested in CI.
+- **Feature flags**: additive; every feature builds, lints and passes its unit tests on its own.
+
+### **Development Setup**
 ```bash
-# Import Grafana dashboard via API
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <GRAFANA_API_TOKEN>" \
-  http://<grafana-host>/api/dashboards/db \
-  -d @observability/grafana-dashboard.json
-
-# Validate Prometheus recording rules
-promtool check rules observability/recording-rules.yaml
-
-# Apply Kubernetes manifests
-kubectl apply -f docs/k8s/service.yaml
-kubectl apply -f docs/k8s/servicemonitor.yaml
-# For secured endpoints
-kubectl apply -f docs/k8s/servicemonitor-secured.yaml
-```
-
-## Advanced Usage
-
-### Async Support
-
-```rust
-use std::time::Duration;
-use metrics_lib::{metrics, AsyncMetricBatch, AsyncTimerExt};
-
-// Async timing with zero overhead and typed result
-let result: &str = metrics()
-    .timer("async_work")
-    .time_async(|| async {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        "completed"
-    })
-    .await;
-
-// Batched async updates (flush takes &MetricsCore)
-let mut batch = AsyncMetricBatch::new();
-batch.counter_inc("requests", 1);
-batch.gauge_set("cpu", 85.2);
-batch.flush(metrics());
-```
-
-## Examples
-
-Run these self-contained examples to see the library in action:
-
-- Quick Start
-  - File: `examples/quick_start.rs`
-  - Run:
-    ```bash
-    cargo run --example quick_start --release
-    ```
-
-- Streaming Rate Window
-  - File: `examples/streaming_rate_window.rs`
-  - Run:
-    ```bash
-    cargo run --example streaming_rate_window --release
-    ```
-
-- Axum Registry Integration (minimal web service)
-  - File: `examples/axum_registry_integration.rs`
-  - Run:
-    ```bash
-    cargo run --example axum_registry_integration --release
-    ```
-  - Endpoints:
-    - `GET /health` — liveness probe
-    - `GET /metrics-demo` — updates metrics (counter/gauge/timer/rate)
-    - `GET /export` — returns a JSON snapshot of selected metrics
-
-- Quick Tour
-  - File: `examples/quick_tour.rs`
-  - Run:
-    ```bash
-    cargo run --example quick_tour --release
-    ```
-
-- Async Batch + Timing
-  - File: `examples/async_batch_timing.rs`
-  - Run:
-    ```bash
-    cargo run --example async_batch_timing --release
-    ```
-
-- Token Bucket Rate Limiter
-  - File: `examples/token_bucket_limiter.rs`
-  - Run:
-    ```bash
-    cargo run --example token_bucket_limiter --release
-    ```
-
-- Custom Exporter (OpenMetrics-like)
-  - File: `examples/custom_exporter_openmetrics.rs`
-  - Run:
-    ```bash
-    cargo run --example custom_exporter_openmetrics --release
-    ```
-
-- Axum Middleware Metrics (minimal)
-  - File: `examples/axum_middleware_metrics.rs`
-  - Run:
-    ```bash
-    cargo run --example axum_middleware_metrics --release
-    ```
-
-- Contention & Admission Demo
-  - File: `examples/contention_admission.rs`
-  - Run:
-    ```bash
-    cargo run --example contention_admission --release
-    ```
-
-- CPU Stats Overview
-  - File: `examples/cpu_stats.rs`
-  - Run:
-    ```bash
-    cargo run --example cpu_stats --release
-    ```
-
-- Memory Stats Overview
-  - File: `examples/memory_stats.rs`
-  - Run:
-    ```bash
-    cargo run --example memory_stats --release
-    ```
-
-- Health Dashboard
-  - File: `examples/health_dashboard.rs`
-  - Run:
-    ```bash
-    cargo run --example health_dashboard --release
-    ```
-
-- Cache Hit/Miss
-  - File: `examples/cache_hit_miss.rs`
-  - Run:
-    ```bash
-    cargo run --example cache_hit_miss --release
-    ```
-
-- Broker Throughput
-  - File: `examples/broker_throughput.rs`
-  - Run:
-    ```bash
-    cargo run --example broker_throughput --release
-    ```
-
-### More Real-World Examples (API Reference)
-
-- Building a Custom Exporter — see `docs/API.md` → [Building a Custom Exporter](./docs/API.md#real-world-custom-exporter)
-- Memory Stats: total/used/free + percentages — see `docs/API.md` → [Memory Stats](./docs/API.md#real-world-memory-stats)
-- Memory % used for an operation (estimate) — see `docs/API.md` → [Memory % for an operation](./docs/API.md#real-world-memory-percent-operation)
-- CPU Stats: total/used/free + percentages — see `docs/API.md` → [CPU Stats](./docs/API.md#real-world-cpu-stats)
-- CPU % used for an operation (estimate) — see `docs/API.md` → [CPU % for an operation](./docs/API.md#real-world-cpu-percent-operation)
-
-### Resilience Features
-
-#### Running many examples quickly
-
-For convenience, a helper script runs a curated set of non-blocking examples sequentially in release mode (skips server examples like Axum middleware):
-
-```bash
-bash tools/run_examples.sh
-```
-
-You can also pass a custom comma-separated list via `EXAMPLES`:
-
-```bash
-EXAMPLES="quick_start,quick_tour,cpu_stats" bash tools/run_examples.sh
-```
-
-```rust
-use metrics_lib::{AdaptiveSampler, SamplingStrategy, MetricCircuitBreaker};
-
-// Adaptive sampling under load
-let sampler = AdaptiveSampler::new(SamplingStrategy::Dynamic {
-    min_rate: 1,
-    max_rate: 100,
-    target_throughput: 10000,
-});
-
-if sampler.should_sample() {
-    metrics().timer("expensive_op").record(duration);
-}
-
-// Circuit breaker protection
-let breaker = MetricCircuitBreaker::new(Default::default());
-if breaker.is_allowed() {
-    // Perform operation
-    breaker.record_success();
-} else {
-    // Circuit is open, skip operation
-}
-```
-
-### System Monitoring
-
-```rust
-let health = metrics().system();
-
-println!("CPU: {:.1}%", health.cpu_used());
-println!("Memory: {:.1} GB", health.mem_used_gb());
-println!("Load: {:.2}", health.load_avg());
-println!("Threads: {}", health.thread_count());
-```
-
-## Benchmarks
-
-Run the included benchmarks to see performance on your system:
-
-```bash
-# Basic performance comparison
-cargo run --example benchmark_comparison --release
-
-# Comprehensive benchmarks (Criterion)
-cargo bench --bench metrics_bench --features meter
-
-# Cross-platform system tests
-cargo test --all-features
-```
-
-### Interpreting Criterion Results
-
-- Criterion writes reports to `target/criterion/` with per-benchmark statistics and comparisons.
-- Key numbers to watch: `time: [low … mean … high]` and outlier percentages.
-- Compare runs over time to detect regressions. Store artifacts from CI for historical comparison.
-- Benchmarks are microbenchmarks; validate with end-to-end measurements as needed.
-
-#### CI Artifacts
-
-- Pull Requests: CI runs a fast smoke bench and uploads `criterion-reports` with `target/criterion`.
-- Nightly: The `Benchmarks` workflow runs full-duration benches on Linux/macOS/Windows and uploads artifacts as `benchmark-results-<os>`.
-- You can download these artifacts from the GitHub Actions run page to compare results across commits.
-
-#### Latest CI Benchmarks
-
-View the latest nightly results and artifacts here:
-
-[Latest CI Benchmarks (Benchmarks workflow)](https://github.com/jamesgober/metrics-lib/actions/workflows/bench.yml)
-
-Benchmark history (GitHub Pages):
-
-[Benchmark History (gh-pages)](https://jamesgober.github.io/metrics-lib/benchmark-data/)
-
-**Sample Results** (latest local run; Windows x86_64, Rust stable):
-```
-Counter Increment: 1.48 ns/op (676.36 M ops/sec)
-Gauge Set:         0.40 ns/op (2500.31 M ops/sec)
-Timer Record:      3.17 ns/op (314.99 M ops/sec)
-Mixed Operations:  151.58 ns/op (6.60 M ops/sec)
-```
-
-<sub>Notes: Latest numbers taken from local Criterion means under `target/criterion/**/new/estimates.json`. Actual throughput varies by CPU and environment; use the GitHub Pages benchmark history for trends.</sub>
-
-### Methodology
-
-- Tooling: Criterion with release builds.
-- Flags for stability on local runs: `cargo bench --bench metrics_bench --features meter -- -w 3.0 -m 5.0 -n 100` (increase on dedicated runners).
-- Environment disclosure (example):
-  - CPU: Apple M1 Pro (performance cores)
-  - Rust: stable toolchain
-  - Target: aarch64-apple-darwin
-  - Governor: default (for CI use a performance governor where applicable)
-
-See also: `docs/zero-overhead-proof.md` for assembly inspection and binary size analysis, and `docs/performance-tuning.md` for environment hardening.
-
-## Architecture
-
-### Lock-Free Design
-- **Atomic Operations**: All metrics use `Relaxed` ordering for maximum performance
-- **Cache-Line Alignment**: 64-byte alignment eliminates false sharing
-- **Compare-and-Swap**: Lock-free min/max tracking in timers
-- **Thread-Local Storage**: Fast random number generation for sampling
-
-### Memory Layout
-```rust
-#[repr(align(64))]
-pub struct Counter {
-    value: AtomicU64,           // 8 bytes
-    // 56 bytes padding to cache line boundary
-}
-```
-<br>
-
-### Zero-Cost Abstractions
-- **RAII Timers**: Compile-time guaranteed cleanup
-- **Async Guards**: No allocation futures for timing
-- **Batch Operations**: Vectorized updates for efficiency
-
-<hr>
-<br>
-
-## Testing
-
-Comprehensive automated coverage includes:
-- default features: **63 unit tests** + **2 API smoke tests** + **14 rustdoc tests**
-- all features: **110 unit tests** + **3 API smoke tests** + **17 rustdoc tests**
-
-```bash
-# Run all tests
-cargo test
-
-# Test with all features
-cargo test --all-features
-
-# Run only bench-gated tests (feature-flagged and ignored by default)
-cargo test --features bench-tests -- --ignored
-
-# Run benchmarks (Criterion)
-cargo bench --bench metrics_bench --features meter
-
-# Check for memory leaks (with valgrind)
-cargo test --target x86_64-unknown-linux-gnu
-```
-
-<hr>
-<br>
-
-## Cross-Platform Support
-
-**Tier 1 Support:**
-- ✅ Linux (x86_64, aarch64)
-- ✅ macOS (x86_64, Apple Silicon)  
-- ✅ Windows (x86_64)
-
-**System Integration:**
-- Linux: `/proc` filesystem, `sysinfo` APIs
-- macOS: `mach` system calls, `sysctl` APIs
-- Windows: Performance counters, WMI integration
-
-**Graceful Fallbacks:**
-- Unsupported platforms default to portable implementations
-- Feature detection at runtime
-- No panics on missing system features
-
-<hr>
-<br>
-
-## Performance Notes
-
-Latest local Criterion means (Windows x86_64, Rust stable, release build,
-**held `Arc<Counter>` / `Arc<Gauge>` / `Arc<Timer>` handle** — see Methodology
-above):
-
-| Operation         | ns/op | M ops/sec | Memory/metric |
-|-------------------|------:|----------:|--------------:|
-| Counter increment |  1.48 |    676.36 |          64 B |
-| Gauge set         |  0.40 |   2500.31 |          64 B |
-| Timer record      |  3.17 |    314.99 |          64 B |
-
-**Calling `metrics().counter("name")` on every increment is slower** than
-holding the `Arc` — the global lookup costs an `RwLock` read + `HashMap` hit
-+ `Arc::clone()`. Cache the handle in hot loops. A side-by-side bench
-(`global_metrics` group in `cargo bench`) shows the realistic global-lookup
-cost for comparison.
-
-A populated head-to-head comparison against `metrics-rs`, `prometheus`, and
-`statsd` will ship with the v1.0.0 release once equivalent test fixtures are
-in place.
-
-<hr>
-<br>
-
-## Configuration
-
-### Feature Flags
-
-| Feature      | Default | Description                                    |
-|--------------|---------|------------------------------------------------|
-| `count`      | ✅      | Counter metric type                            |
-| `gauge`      | ✅      | Gauge metric type                              |
-| `timer`      | ✅      | Timer metric type                              |
-| `meter`      | ❌      | Rate meter metric type                         |
-| `sample`     | ❌      | Statistical sampling                           |
-| `histogram`  | ❌      | Histogram support (requires `sample`)          |
-| `async`      | ❌      | Async/await support (requires Tokio)           |
-| `serde`      | ❌      | Serde serialization support                    |
-| `all`        | ❌      | All stable features (excludes async and serde) |
-| `full`       | ❌      | All features including async and serde         |
-| `minimal`    | ❌      | Smallest useful build (counter only)           |
-
-```toml
-# All stable features:
-metrics-lib = { version = "1.0.0", features = ["all"] }
-
-# Full build including async and serde:
-metrics-lib = { version = "1.0.0", features = ["full"] }
-
-# Minimal build (counter only):
-metrics-lib = { version = "1.0.0", features = ["minimal"] }
-```
-
-### Runtime Configuration
-
-```rust
-use metrics_lib::{init_with_config, Config};
-
-let config = Config {
-    max_metrics: 10000,
-    update_interval_ms: 1000,
-    enable_system_metrics: true,
-};
-
-init_with_config(config);
-```
-
-<hr>
-<br>
-
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md).
-
-### Development Setup
-
-```bash
-# Clone repository
 git clone https://github.com/jamesgober/metrics-lib.git
 cd metrics-lib
-
-# Run tests
-cargo test --all-features
-
-# Run benchmarks
-cargo bench --bench metrics_bench --features meter
-
-# Check formatting and lints
-cargo fmt --all -- --check
-cargo clippy --all-features -- -D warnings
+cargo test --all-features                                 # unit, integration and doc tests
+cargo clippy --all-targets --all-features -- -D warnings  # lints
+cargo bench --all-features --bench metrics_bench          # benchmarks
 ```
 
-<hr>
-<br>
+The repository pins the toolchain for lints and docs (`rust-toolchain.toml`, Rust 1.99.0) and commits `Cargo.lock`; neither affects crates that depend on metrics-lib. The MSRV is checked with `cargo +1.85.0 test --all-features`. Details in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-<div align="center">
-    <sup>
-        <span>HOME</span>
-        <span>&nbsp;│&nbsp;</span>
-        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/README.md" title="Documentation"><b>DOCS</b></a>
-        <span>&nbsp;│&nbsp;</span>
-        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/API.md" title="API Reference"><b>API</b></a>
-        <span>&nbsp;│&nbsp;</span>
-        <a href="https://github.com/jamesgober/metrics-lib/blob/main/docs/GUIDELINES.md" title="Developer Guidelines"><b>GUIDELINES</b></a>
-    </sup>
-</div>
-<br>
+## **Contributing**
 
-
-## Links
-
-- 📚 [Documentation](https://docs.rs/metrics-lib)
-- 📦 [Crates.io](https://crates.io/crates/metrics-lib)  
-- 🐛 [Issues](https://github.com/jamesgober/metrics-lib/issues)
-- 💬 [Discussions](https://github.com/jamesgober/metrics-lib/discussions)
-
-### Guides
-
-- Migrating from metrics-rs: [`docs/migrating-from-metrics-rs.md`](./docs/migrating-from-metrics-rs.md)
-- Performance Tuning: [`docs/performance-tuning.md`](./docs/performance-tuning.md)
-- Zero-Overhead Proof: [`docs/zero-overhead-proof.md`](./docs/zero-overhead-proof.md)
-- API Stability Guarantees: [`docs/api-stability.md`](./docs/api-stability.md)
-
-<br>
+See the [Contributing Guide](CONTRIBUTING.md) and the [development guidelines](docs/GUIDELINES.md).
 
 <hr>
-<br>
 
 <!-- LICENSE
 ############################################# -->
 <div id="license">
-    <h2>⚖️ License</h2>
-    <p>Licensed under the <b>Apache License</b>, version 2.0 (the <b>"License"</b>); you may not use this software, including, but not limited to the source code, media files, ideas, techniques, or any other associated property or concept belonging to, associated with, or otherwise packaged with this software except in compliance with the <b>License</b>.</p>
-    <p>You may obtain a copy of the <b>License</b> at: <a href="http://www.apache.org/licenses/LICENSE-2.0" title="Apache-2.0 License" target="_blank">http://www.apache.org/licenses/LICENSE-2.0</a>.</p>
-    <p>Unless required by applicable law or agreed to in writing, software distributed under the <b>License</b> is distributed on an "<b>AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND</b>, either express or implied.</p>
-    <p>See the <a href="./LICENSE" title="Software License file">LICENSE</a> file included with this project for the specific language governing permissions and limitations under the <b>License</b>.</p>
+    <h2>License</h2>
+    <p><b>metrics-lib</b> is dual-licensed under either of:</p>
+    <ul>
+        <li><b>Apache License, Version 2.0</b> — see <a href="./LICENSE-APACHE" title="Apache-2.0 License">LICENSE-APACHE</a> or <a href="http://www.apache.org/licenses/LICENSE-2.0" title="Apache-2.0 License" target="_blank">apache.org/licenses/LICENSE-2.0</a></li>
+        <li><b>MIT License</b> — see <a href="./LICENSE-MIT" title="MIT License">LICENSE-MIT</a> or <a href="https://opensource.org/licenses/MIT" title="MIT License" target="_blank">opensource.org/licenses/MIT</a></li>
+    </ul>
+    <p>at your option.</p>
+    <h3>Contribution</h3>
+    <p>Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in <b>metrics-lib</b> by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.</p>
+    <p>Unless required by applicable law or agreed to in writing, software distributed under the Licenses is distributed on an <b>"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND</b>, either express or implied.</p>
 </div>
+
 
 <!-- FOOT COPYRIGHT
 ################################################# -->
 <div align="center">
   <h2></h2>
-  <sup>COPYRIGHT <small>&copy;</small> 2025 <strong>JAMES GOBER.</strong></sup>
+  <sup>COPYRIGHT <small>&copy;</small> 2026 <strong>JAMES GOBER.</strong></sup>
 </div>

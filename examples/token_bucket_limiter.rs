@@ -1,32 +1,31 @@
-use metrics_lib::{init, metrics};
-use std::time::{Duration, Instant};
+//! Strict rate limiting with `TokenBucket`.
+//!
+//! Run with: `cargo run --example token_bucket_limiter`
+
+use metrics_lib::{MetricsError, TokenBucket};
+use std::time::Duration;
 
 fn main() {
-    init();
+    // 5 requests per second sustained, bursts of up to 10.
+    let bucket = TokenBucket::new(10, 5.0);
 
-    let limit = 50.0; // ops/sec
-    let r = metrics().rate("token_bucket.limiter");
+    let burst = (0..15).filter(|_| bucket.acquire(1)).count();
+    println!("burst: admitted {burst} of 15 (capacity 10)");
 
-    let start = Instant::now();
-    let mut allowed = 0u64;
-    let mut denied = 0u64;
-
-    // Simulate ~2 seconds of attempts at up to 200 rps
-    for _ in 0..400 {
-        if r.tick_if_under_limit(limit) {
-            allowed += 1;
-        } else {
-            denied += 1;
+    match bucket.try_acquire(1) {
+        Err(MetricsError::WouldBlock) => {
+            let wait = bucket.time_until_available(1).unwrap_or_default();
+            println!("empty; next token in {wait:?}");
+            std::thread::sleep(wait);
         }
-        std::thread::sleep(Duration::from_millis(5)); // 200 rps attempt
+        other => println!("unexpected: {other:?}"),
     }
+    println!("after waiting: acquire = {}", bucket.acquire(1));
 
-    let secs = start.elapsed().as_secs_f64();
+    std::thread::sleep(Duration::from_millis(600));
     println!(
-        "limit={limit}/s over {:.2}s -> allowed={} denied={} eff_rps={:.1}",
-        secs,
-        allowed,
-        denied,
-        allowed as f64 / secs
+        "after 600 ms: {} tokens available (rate {}/s)",
+        bucket.available(),
+        bucket.refill_per_second()
     );
 }

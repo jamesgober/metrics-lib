@@ -1,452 +1,886 @@
-//! OTLP/HTTP+JSON exporter (behind the `otlp` feature, which pulls in
-//! `serde` + `serde_json`).
+//! OpenTelemetry (OTLP) metrics exporter (feature `otlp`).
 //!
-//! Produces the JSON payload defined by the OpenTelemetry Protocol
-//! ([OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/#otlphttp)) for the
-//! `metrics` signal. The exporter is *transport-agnostic*: it returns the
-//! payload as a `String` (or [`ExportMetricsServiceRequest`] for re-use)
-//! that callers POST to their collector endpoint (`/v1/metrics`) with
-//! `Content-Type: application/json`.
+//! Builds an `ExportMetricsServiceRequest` from the registry and encodes it
+//! as OTLP/HTTP **JSON** ([`OtlpExporter::render_json`]) or **protobuf**
+//! ([`OtlpExporter::render_protobuf`], hand-encoded, no extra dependencies).
+//! Transport is up to you: POST the body to the collector's `/v1/metrics`
+//! with [`JSON_CONTENT_TYPE`] or [`PROTOBUF_CONTENT_TYPE`].
 //!
-//! Mapping summary:
+//! # Mapping
 //!
-//! - **Counter** → OTLP `Sum` with `isMonotonic = true`,
-//!   `aggregationTemporality = CUMULATIVE`.
-//! - **Gauge** → OTLP `Gauge`.
-//! - **Timer** → OTLP `Histogram` with `_seconds`-suffixed name, exposing
-//!   `count`, `sum`, `min`, `max`, and a single `+Inf` bucket.
-//! - **RateMeter** → OTLP `Gauge` with `_per_second` suffix.
-//! - **Histogram** → OTLP `Histogram` with non-cumulative `bucketCounts`
-//!   plus `explicitBounds`.
+//! | Registry kind | OTLP metric |
+//! |---|---|
+//! | counter, sharded counter | `Sum`, monotonic, integer points |
+//! | up/down counter | `Sum`, non-monotonic, integer points |
+//! | gauge | `Gauge`, double points (NaN/±∞ points are skipped) |
+//! | timer | `Summary` in seconds: count, sum, quantile 0 = min, quantile 1 = max |
+//! | rate meter | `Sum` of events (monotonic) plus a `Gauge` `<name>.per_second` |
+//! | histogram | `Histogram` with explicit bounds |
+//! | summary | `Summary` with the configured quantiles |
+//!
+//! All series of one name are data points of one `Metric`.
+//!
+//! # Temporality and start times
+//!
+//! With [`Temporality::Cumulative`] (the default) every point's
+//! `start_time_unix_nano` is the wall-clock time its series was created, so
+//! it is stable across exports as the specification requires (1.x reset it
+//! on every export). With [`Temporality::Delta`] the exporter remembers the
+//! previous export: sums and histograms report the change since then, with
+//! the previous export time as the start. Gauges and summaries have no
+//! temporality and always report the current value.
+//!
+//! # Resets
+//!
+//! Metric types do not record that they were reset, so the exporter infers
+//! it: when a counter's or rate meter's total, or a histogram's, timer's or
+//! summary's count, is lower than at this exporter's previous export, the
+//! series is treated as restarted. Its start time becomes the previous
+//! export time (cumulative) or the delta is the new value (delta), so
+//! consumers see a reset instead of a negative rate. The inference has
+//! limits:
+//!
+//! - It needs memory of the previous export, so it works only across
+//!   exports of the same [`OtlpExporter`]; the one-shot [`render`] and
+//!   [`render_protobuf`] functions never detect resets.
+//! - A reset followed, before the next export, by growth back to or past
+//!   the previously exported value is not detected: the series keeps its
+//!   old start time and the events lost in the reset go unreported.
+//! - Up/down counters and gauges are not monotonic, so their resets cannot
+//!   be told from ordinary decreases and are not detected.
+//!
+//! To avoid all three, do not call `reset()` on registered metrics that are
+//! exported over OTLP; register a new series instead.
 //!
 //! # Example
 //!
 //! ```
 //! # #[cfg(feature = "count")]
 //! # {
-//! use metrics_lib::{init, metrics, LabelSet};
-//! use metrics_lib::exporters::otlp;
+//! use metrics_lib::{LabelSet, MetricsCore};
+//! use metrics_lib::exporters::otlp::{OtlpExporter, Temporality};
 //!
-//! init();
-//! metrics().counter_with("requests", &LabelSet::from([("status", "200")])).inc();
+//! let core = MetricsCore::new();
+//! core.counter_with("requests", &LabelSet::from([("status", "200")])).add(3);
 //!
-//! let payload: String = otlp::render(metrics().registry(), "my-service");
-//! assert!(payload.contains("\"resourceMetrics\""));
+//! let exporter = OtlpExporter::new("checkout")
+//!     .with_resource_attribute("deployment.environment", "prod")
+//!     .with_temporality(Temporality::Delta);
+//! let json = exporter.render_json(core.registry()).unwrap();
+//! assert!(json.contains(r#""asInt":"3""#));
+//! let protobuf: Vec<u8> = exporter.render_protobuf(core.registry());
+//! assert!(!protobuf.is_empty());
 //! # }
 //! ```
 
-use crate::{LabelSet, MetricMetadata, Registry, Unit};
+mod proto;
+
+use crate::registry::{FamilySnapshot, Handle};
+use crate::{LabelSet, MetricKind, Registry};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// OTLP `AggregationTemporality::CUMULATIVE`.
-const AGGREGATION_TEMPORALITY_CUMULATIVE: u32 = 2;
+/// `Content-Type` for OTLP/HTTP JSON bodies.
+pub const JSON_CONTENT_TYPE: &str = "application/json";
+/// `Content-Type` for OTLP/HTTP protobuf bodies.
+pub const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
-/// Render an OTLP/HTTP+JSON metrics payload for the supplied registry.
+/// Aggregation temporality of sums and histograms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Temporality {
+    /// Totals since each series was created.
+    #[default]
+    Cumulative,
+    /// Changes since the previous export by this exporter.
+    Delta,
+}
+
+impl Temporality {
+    const fn wire(self) -> u32 {
+        match self {
+            Temporality::Delta => 1,
+            Temporality::Cumulative => 2,
+        }
+    }
+}
+
+/// Stateful OTLP exporter.
 ///
-/// `service_name` is attached as the `service.name` resource attribute.
-#[must_use]
-pub fn render(registry: &Registry, service_name: impl Into<String>) -> String {
-    serde_json::to_string(&build(registry, service_name))
-        .expect("ExportMetricsServiceRequest serialises to JSON")
+/// Keep one per destination: in [`Temporality::Delta`] mode it remembers
+/// what it sent last time. Series that disappear from the registry are
+/// forgotten on the next export.
+pub struct OtlpExporter {
+    service_name: String,
+    resource: LabelSet,
+    temporality: Temporality,
+    previous: Mutex<HashMap<(String, LabelSet), Previous>>,
 }
 
-/// Same as [`render`] but pretty-printed.
-#[must_use]
-pub fn render_pretty(registry: &Registry, service_name: impl Into<String>) -> String {
-    serde_json::to_string_pretty(&build(registry, service_name))
-        .expect("ExportMetricsServiceRequest serialises to JSON")
+#[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "histogram"), allow(dead_code))]
+enum PreviousValue {
+    Int(i64),
+    UInt(u64),
+    /// Cumulative mode: the last exported total and the start time in use.
+    Cumulative {
+        total: u64,
+        start: u64,
+    },
+    Histogram {
+        count: u64,
+        sum: f64,
+        buckets: Vec<u64>,
+    },
 }
 
-/// Build the OTLP payload as a serialisable
-/// [`ExportMetricsServiceRequest`]. Use this when you want to route the
-/// payload through a different serializer or augment it before sending.
-pub fn build(registry: &Registry, service_name: impl Into<String>) -> ExportMetricsServiceRequest {
-    let now_nanos = now_unix_nanos();
-    let now_str = now_nanos.to_string();
-    let mut metrics: Vec<Metric> = Vec::new();
+#[derive(Debug, Clone)]
+struct Previous {
+    time: u64,
+    value: PreviousValue,
+}
 
-    #[cfg(feature = "count")]
-    for (name, labels, c) in registry.counter_entries() {
-        let meta = registry.metadata(&name);
-        metrics.push(Metric {
-            name,
-            description: meta
-                .as_ref()
-                .map(|m| m.help.to_string())
-                .unwrap_or_default(),
-            unit: meta.as_ref().map(unit_str).unwrap_or_default(),
-            data: MetricData::Sum {
-                sum: NumberData {
-                    data_points: vec![NumberDataPoint {
-                        attributes: labels_to_attributes(&labels),
-                        start_time_unix_nano: now_str.clone(),
-                        time_unix_nano: now_str.clone(),
-                        value: NumberValue::AsInt {
-                            as_int: c.get().to_string(),
-                        },
-                    }],
-                    aggregation_temporality: Some(AGGREGATION_TEMPORALITY_CUMULATIVE),
-                    is_monotonic: Some(true),
-                },
-            },
-        });
+impl OtlpExporter {
+    /// Exporter whose resource carries `service.name = service_name`.
+    #[must_use]
+    pub fn new(service_name: impl Into<String>) -> Self {
+        Self {
+            service_name: service_name.into(),
+            resource: LabelSet::new(),
+            temporality: Temporality::Cumulative,
+            previous: Mutex::new(HashMap::new()),
+        }
     }
 
-    #[cfg(feature = "gauge")]
-    for (name, labels, g) in registry.gauge_entries() {
-        let meta = registry.metadata(&name);
-        metrics.push(Metric {
-            name,
-            description: meta
-                .as_ref()
-                .map(|m| m.help.to_string())
-                .unwrap_or_default(),
-            unit: meta.as_ref().map(unit_str).unwrap_or_default(),
-            data: MetricData::Gauge {
-                gauge: NumberData {
-                    data_points: vec![NumberDataPoint {
-                        attributes: labels_to_attributes(&labels),
-                        start_time_unix_nano: now_str.clone(),
-                        time_unix_nano: now_str.clone(),
-                        value: NumberValue::AsDouble { as_double: g.get() },
-                    }],
-                    aggregation_temporality: None,
-                    is_monotonic: None,
-                },
-            },
-        });
+    /// Choose the temporality of sums and histograms.
+    #[must_use]
+    pub fn with_temporality(mut self, temporality: Temporality) -> Self {
+        self.temporality = temporality;
+        self
     }
 
-    #[cfg(feature = "timer")]
-    for (name, labels, t) in registry.timer_entries() {
-        let meta = registry.metadata(&name);
-        let count = t.count();
-        let sum = t.total().as_secs_f64();
-        let (min, max) = if count == 0 {
-            (None, None)
-        } else {
-            (Some(t.min().as_secs_f64()), Some(t.max().as_secs_f64()))
+    /// Add a resource attribute (for example `deployment.environment`).
+    #[must_use]
+    pub fn with_resource_attribute(
+        mut self,
+        key: impl Into<std::borrow::Cow<'static, str>>,
+        value: impl Into<std::borrow::Cow<'static, str>>,
+    ) -> Self {
+        let _ = self.resource.add(key, value);
+        self
+    }
+
+    /// The configured temporality.
+    #[must_use]
+    pub fn temporality(&self) -> Temporality {
+        self.temporality
+    }
+
+    /// Build the request in the serde model used for JSON.
+    ///
+    /// In delta mode this advances the exporter's baselines.
+    #[must_use]
+    pub fn build(&self, registry: &Registry) -> ExportMetricsServiceRequest {
+        let model = self.model(registry);
+        to_json_model(&model, &self.service_name, &self.resource)
+    }
+
+    /// Encode the request as OTLP/HTTP JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `serde_json` error if serialisation fails; the request
+    /// holds only strings, integers and finite floats, so this does not
+    /// happen in practice.
+    pub fn render_json(&self, registry: &Registry) -> serde_json::Result<String> {
+        serde_json::to_string(&self.build(registry))
+    }
+
+    /// Encode the request as OTLP protobuf (`ExportMetricsServiceRequest`).
+    ///
+    /// In delta mode this advances the exporter's baselines.
+    #[must_use]
+    pub fn render_protobuf(&self, registry: &Registry) -> Vec<u8> {
+        let model = self.model(registry);
+        proto::encode_request(&model, &self.service_name, &self.resource)
+    }
+
+    fn model(&self, registry: &Registry) -> Vec<MetricModel> {
+        let now = unix_nanos_now();
+        let mut previous = self.previous.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut next: HashMap<(String, LabelSet), Previous> = HashMap::new();
+        let mut ctx = ModelCtx {
+            now,
+            temporality: self.temporality,
+            previous: &previous,
+            next: &mut next,
         };
-        metrics.push(Metric {
-            name: format!("{name}_seconds"),
-            description: meta
-                .as_ref()
-                .map(|m| m.help.to_string())
-                .unwrap_or_default(),
-            unit: "s".to_string(),
-            data: MetricData::Histogram {
-                histogram: HistogramData {
-                    data_points: vec![HistogramDataPoint {
-                        attributes: labels_to_attributes(&labels),
-                        start_time_unix_nano: now_str.clone(),
-                        time_unix_nano: now_str.clone(),
-                        count: count.to_string(),
-                        sum,
-                        min,
-                        max,
-                        bucket_counts: vec![count.to_string()],
-                        explicit_bounds: vec![],
-                    }],
-                    aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE,
-                },
+        let mut out = Vec::new();
+        // A derived name (`<rate>.per_second`) can equal another family's
+        // name; the first family in name order keeps it, as in the text
+        // exporters, and the clash is counted.
+        let mut claimed: HashSet<String> = HashSet::new();
+        let mut family_metrics = Vec::new();
+        for family in registry.collect() {
+            family_metrics.clear();
+            ctx.family(&family, &mut family_metrics);
+            if family_metrics.iter().any(|m| claimed.contains(&m.name)) {
+                registry.note_exposition_conflict();
+                continue;
+            }
+            claimed.extend(family_metrics.iter().map(|m| m.name.clone()));
+            out.append(&mut family_metrics);
+        }
+        *previous = next;
+        out
+    }
+}
+
+impl std::fmt::Debug for OtlpExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpExporter")
+            .field("service_name", &self.service_name)
+            .field("temporality", &self.temporality)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One-shot cumulative OTLP/HTTP JSON payload.
+///
+/// # Errors
+///
+/// See [`OtlpExporter::render_json`].
+pub fn render(registry: &Registry, service_name: impl Into<String>) -> serde_json::Result<String> {
+    OtlpExporter::new(service_name).render_json(registry)
+}
+
+/// One-shot cumulative OTLP protobuf payload.
+#[must_use]
+pub fn render_protobuf(registry: &Registry, service_name: impl Into<String>) -> Vec<u8> {
+    OtlpExporter::new(service_name).render_protobuf(registry)
+}
+
+fn unix_nanos_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+// ---------------------------------------------------------------------------
+// Internal model shared by the JSON and protobuf encoders.
+// ---------------------------------------------------------------------------
+
+pub(crate) struct MetricModel {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) unit: String,
+    pub(crate) data: DataModel,
+}
+
+pub(crate) enum DataModel {
+    Gauge(Vec<NumberPoint>),
+    Sum {
+        points: Vec<NumberPoint>,
+        monotonic: bool,
+        temporality: Temporality,
+    },
+    Histogram {
+        points: Vec<HistogramPoint>,
+        temporality: Temporality,
+    },
+    Summary(Vec<SummaryPoint>),
+}
+
+pub(crate) struct NumberPoint {
+    pub(crate) attributes: LabelSet,
+    pub(crate) start: u64,
+    pub(crate) time: u64,
+    pub(crate) value: Number,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Number {
+    Int(i64),
+    Double(f64),
+}
+
+pub(crate) struct HistogramPoint {
+    pub(crate) attributes: LabelSet,
+    pub(crate) start: u64,
+    pub(crate) time: u64,
+    pub(crate) count: u64,
+    pub(crate) sum: Option<f64>,
+    pub(crate) bucket_counts: Vec<u64>,
+    pub(crate) explicit_bounds: Vec<f64>,
+}
+
+pub(crate) struct SummaryPoint {
+    pub(crate) attributes: LabelSet,
+    pub(crate) start: u64,
+    pub(crate) time: u64,
+    pub(crate) count: u64,
+    pub(crate) sum: f64,
+    pub(crate) quantiles: Vec<(f64, f64)>,
+}
+
+struct ModelCtx<'a> {
+    now: u64,
+    temporality: Temporality,
+    previous: &'a HashMap<(String, LabelSet), Previous>,
+    next: &'a mut HashMap<(String, LabelSet), Previous>,
+}
+
+impl ModelCtx<'_> {
+    /// Start time and baseline for a cumulative value under the configured
+    /// temporality; records the new baseline.
+    fn uint_point(&mut self, key: (String, LabelSet), created: u64, total: u64) -> (u64, u64) {
+        if self.temporality == Temporality::Cumulative {
+            return (self.cumulative_start(key, created, total), total);
+        }
+        let (start, value) = match self.previous.get(&key) {
+            Some(Previous {
+                time,
+                value: PreviousValue::UInt(prev),
+            }) if *prev <= total => (*time, total - prev),
+            // Reset since the last export: everything counted since then.
+            Some(Previous {
+                time,
+                value: PreviousValue::UInt(_),
+            }) => (*time, total),
+            _ => (created, total),
+        };
+        let _ = self.next.insert(
+            key,
+            Previous {
+                time: self.now,
+                value: PreviousValue::UInt(total),
             },
-        });
+        );
+        (start, value)
     }
 
-    #[cfg(feature = "meter")]
-    for (name, labels, r) in registry.rate_meter_entries() {
-        let meta = registry.metadata(&name);
-        metrics.push(Metric {
-            name: format!("{name}_per_second"),
-            description: meta
-                .as_ref()
-                .map(|m| m.help.to_string())
-                .unwrap_or_default(),
-            unit: "1".to_string(),
-            data: MetricData::Gauge {
-                gauge: NumberData {
-                    data_points: vec![NumberDataPoint {
-                        attributes: labels_to_attributes(&labels),
-                        start_time_unix_nano: now_str.clone(),
-                        time_unix_nano: now_str.clone(),
-                        value: NumberValue::AsDouble {
-                            as_double: r.rate(),
-                        },
-                    }],
-                    aggregation_temporality: None,
-                    is_monotonic: None,
-                },
+    /// Start time of a cumulative series. A total lower than at the last
+    /// export means the metric was reset in between; OTLP signals that with
+    /// a new start time, so the last export time becomes the start.
+    fn cumulative_start(&mut self, key: (String, LabelSet), created: u64, total: u64) -> u64 {
+        let start = match self.previous.get(&key) {
+            Some(Previous {
+                time,
+                value: PreviousValue::Cumulative { total: prev, start },
+            }) => {
+                if total < *prev {
+                    *time
+                } else {
+                    *start
+                }
+            }
+            _ => created,
+        };
+        let _ = self.next.insert(
+            key,
+            Previous {
+                time: self.now,
+                value: PreviousValue::Cumulative { total, start },
             },
-        });
+        );
+        start
+    }
+
+    fn int_point(&mut self, key: (String, LabelSet), created: u64, value: i64) -> (u64, i64) {
+        if self.temporality == Temporality::Cumulative {
+            return (created, value);
+        }
+        let (start, delta) = match self.previous.get(&key) {
+            Some(Previous {
+                time,
+                value: PreviousValue::Int(prev),
+            }) => (*time, value.wrapping_sub(*prev)),
+            _ => (created, value),
+        };
+        let _ = self.next.insert(
+            key,
+            Previous {
+                time: self.now,
+                value: PreviousValue::Int(value),
+            },
+        );
+        (start, delta)
+    }
+
+    #[allow(clippy::too_many_lines)] // one arm per metric kind
+    #[allow(unused_mut, irrefutable_let_patterns)] // arms are feature-gated
+    fn family(&mut self, family: &FamilySnapshot, out: &mut Vec<MetricModel>) {
+        let description = family.help.as_deref().unwrap_or_default().to_owned();
+        let unit = family.unit.as_ucum().into_owned();
+        let name = family.name.clone();
+        let now = self.now;
+        match family.kind {
+            MetricKind::Counter | MetricKind::UpDownCounter => {
+                let monotonic = family.kind == MetricKind::Counter;
+                let mut points = Vec::with_capacity(family.series.len());
+                for s in &family.series {
+                    let key = (name.clone(), LabelSet::clone(&s.labels));
+                    let point = match &s.handle {
+                        #[cfg(feature = "count")]
+                        Handle::Counter(c) => {
+                            let (start, v) = self.uint_point(key, s.created_unix_nanos, c.get());
+                            Some((start, Number::Int(saturating_i64(v))))
+                        }
+                        #[cfg(feature = "count")]
+                        Handle::ShardedCounter(c) => {
+                            let (start, v) = self.uint_point(key, s.created_unix_nanos, c.get());
+                            Some((start, Number::Int(saturating_i64(v))))
+                        }
+                        #[cfg(feature = "count")]
+                        Handle::UpDownCounter(c) => {
+                            let (start, v) = self.int_point(key, s.created_unix_nanos, c.get());
+                            Some((start, Number::Int(v)))
+                        }
+                        #[allow(unreachable_patterns)]
+                        _ => None,
+                    };
+                    if let Some((start, value)) = point {
+                        points.push(NumberPoint {
+                            attributes: LabelSet::clone(&s.labels),
+                            start,
+                            time: now,
+                            value,
+                        });
+                    }
+                }
+                out.push(MetricModel {
+                    name,
+                    description,
+                    unit,
+                    data: DataModel::Sum {
+                        points,
+                        monotonic,
+                        temporality: self.temporality,
+                    },
+                });
+            }
+            MetricKind::Gauge => {
+                let mut points = Vec::new();
+                #[cfg(feature = "gauge")]
+                for s in &family.series {
+                    if let Handle::Gauge(g) = &s.handle {
+                        let v = g.get();
+                        if v.is_finite() {
+                            points.push(NumberPoint {
+                                attributes: LabelSet::clone(&s.labels),
+                                start: s.created_unix_nanos,
+                                time: now,
+                                value: Number::Double(v),
+                            });
+                        }
+                    }
+                }
+                out.push(MetricModel {
+                    name,
+                    description,
+                    unit,
+                    data: DataModel::Gauge(points),
+                });
+            }
+            MetricKind::Timer => {
+                let mut points = Vec::new();
+                #[cfg(feature = "timer")]
+                for s in &family.series {
+                    if let Handle::Timer(t) = &s.handle {
+                        let count = t.count();
+                        #[allow(clippy::cast_precision_loss)] // seconds as f64 is the contract
+                        let sum = t.total_nanos() as f64 / 1e9;
+                        let quantiles = if count > 0 {
+                            vec![(0.0, t.min().as_secs_f64()), (1.0, t.max().as_secs_f64())]
+                        } else {
+                            Vec::new()
+                        };
+                        let key = (name.clone(), LabelSet::clone(&s.labels));
+                        let start = self.cumulative_start(key, s.created_unix_nanos, count);
+                        points.push(SummaryPoint {
+                            attributes: LabelSet::clone(&s.labels),
+                            start,
+                            time: now,
+                            count,
+                            sum,
+                            quantiles,
+                        });
+                    }
+                }
+                out.push(MetricModel {
+                    name,
+                    description,
+                    unit: "s".to_owned(),
+                    data: DataModel::Summary(points),
+                });
+            }
+            MetricKind::Rate => {
+                let mut totals = Vec::new();
+                let mut rates = Vec::new();
+                #[cfg(feature = "meter")]
+                for s in &family.series {
+                    if let Handle::Rate(r) = &s.handle {
+                        let key = (name.clone(), LabelSet::clone(&s.labels));
+                        let (start, v) = self.uint_point(key, s.created_unix_nanos, r.total());
+                        totals.push(NumberPoint {
+                            attributes: LabelSet::clone(&s.labels),
+                            start,
+                            time: now,
+                            value: Number::Int(saturating_i64(v)),
+                        });
+                        rates.push(NumberPoint {
+                            attributes: LabelSet::clone(&s.labels),
+                            start: s.created_unix_nanos,
+                            time: now,
+                            value: Number::Double(r.rate()),
+                        });
+                    }
+                }
+                out.push(MetricModel {
+                    name: name.clone(),
+                    description: description.clone(),
+                    unit: unit.clone(),
+                    data: DataModel::Sum {
+                        points: totals,
+                        monotonic: true,
+                        temporality: self.temporality,
+                    },
+                });
+                out.push(MetricModel {
+                    name: format!("{name}.per_second"),
+                    description,
+                    unit: "1/s".to_owned(),
+                    data: DataModel::Gauge(rates),
+                });
+            }
+            MetricKind::Histogram => {
+                let mut points = Vec::new();
+                #[cfg(feature = "histogram")]
+                for s in &family.series {
+                    if let Handle::Histogram(h) = &s.handle {
+                        points.push(self.histogram_point(
+                            &name,
+                            &s.labels,
+                            s.created_unix_nanos,
+                            h,
+                        ));
+                    }
+                }
+                out.push(MetricModel {
+                    name,
+                    description,
+                    unit,
+                    data: DataModel::Histogram {
+                        points,
+                        temporality: self.temporality,
+                    },
+                });
+            }
+            MetricKind::Summary => {
+                let mut points = Vec::new();
+                #[cfg(feature = "histogram")]
+                for s in &family.series {
+                    if let Handle::Summary(q) = &s.handle {
+                        let snap = q.snapshot();
+                        let key = (name.clone(), LabelSet::clone(&s.labels));
+                        let start = self.cumulative_start(key, s.created_unix_nanos, snap.count);
+                        points.push(SummaryPoint {
+                            attributes: LabelSet::clone(&s.labels),
+                            start,
+                            time: now,
+                            count: snap.count,
+                            sum: snap.sum,
+                            quantiles: snap
+                                .quantiles
+                                .into_iter()
+                                .filter(|(_, v)| v.is_finite())
+                                .collect(),
+                        });
+                    }
+                }
+                out.push(MetricModel {
+                    name,
+                    description,
+                    unit,
+                    data: DataModel::Summary(points),
+                });
+            }
+        }
     }
 
     #[cfg(feature = "histogram")]
-    for (name, labels, h) in registry.histogram_entries() {
-        let meta = registry.metadata(&name);
-        let snap = h.snapshot();
-        // OTLP `bucketCounts` is non-cumulative — undo the cumulative form.
-        let mut bucket_counts: Vec<String> = Vec::with_capacity(snap.buckets.len());
+    fn histogram_point(
+        &mut self,
+        name: &str,
+        labels: &LabelSet,
+        created: u64,
+        h: &crate::Histogram,
+    ) -> HistogramPoint {
+        let snap = h.snapshot_counts();
+        // OTLP bucket counts are per bucket, not cumulative.
+        let mut buckets = Vec::with_capacity(snap.buckets.len());
         let mut prev = 0u64;
         for b in &snap.buckets {
-            bucket_counts.push((b.count.saturating_sub(prev)).to_string());
+            buckets.push(b.count.saturating_sub(prev));
             prev = b.count;
         }
-        let explicit_bounds: Vec<f64> = snap
-            .buckets
-            .iter()
-            .filter(|b| b.upper_bound.is_finite())
-            .map(|b| b.upper_bound)
-            .collect();
-        metrics.push(Metric {
-            name,
-            description: meta
-                .as_ref()
-                .map(|m| m.help.to_string())
-                .unwrap_or_default(),
-            unit: meta.as_ref().map(unit_str).unwrap_or_default(),
-            data: MetricData::Histogram {
-                histogram: HistogramData {
-                    data_points: vec![HistogramDataPoint {
-                        attributes: labels_to_attributes(&labels),
-                        start_time_unix_nano: now_str.clone(),
-                        time_unix_nano: now_str.clone(),
-                        count: snap.count.to_string(),
+        let bounds: Vec<f64> = h.bounds().to_vec();
+        let (start, count, sum, buckets) = if self.temporality == Temporality::Cumulative {
+            let key = (name.to_owned(), labels.clone());
+            let start = self.cumulative_start(key, created, snap.count);
+            (start, snap.count, snap.sum, buckets)
+        } else {
+            let key = (name.to_owned(), labels.clone());
+            let delta = match self.previous.get(&key) {
+                Some(Previous {
+                    time,
+                    value:
+                        PreviousValue::Histogram {
+                            count,
+                            sum,
+                            buckets: prev_buckets,
+                        },
+                }) if *count <= snap.count && prev_buckets.len() == buckets.len() => Some((
+                    *time,
+                    snap.count - count,
+                    snap.sum - sum,
+                    buckets
+                        .iter()
+                        .zip(prev_buckets)
+                        .map(|(now, before)| now.saturating_sub(*before))
+                        .collect(),
+                )),
+                // Reset (or reconfigured) since the last export.
+                Some(Previous { time, .. }) => Some((*time, snap.count, snap.sum, buckets.clone())),
+                _ => None,
+            };
+            let _ = self.next.insert(
+                key,
+                Previous {
+                    time: self.now,
+                    value: PreviousValue::Histogram {
+                        count: snap.count,
                         sum: snap.sum,
-                        min: None,
-                        max: None,
-                        bucket_counts,
-                        explicit_bounds,
-                    }],
-                    aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE,
-                },
-            },
-        });
-    }
-
-    ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            resource: Resource {
-                attributes: vec![KeyValue {
-                    key: "service.name".to_string(),
-                    value: AnyValue::StringValue {
-                        string_value: service_name.into(),
+                        buckets: buckets.clone(),
                     },
-                }],
-            },
-            scope_metrics: vec![ScopeMetrics {
-                scope: InstrumentationScope {
-                    name: "metrics-lib".to_string(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
                 },
-                metrics,
-            }],
-        }],
+            );
+            delta.unwrap_or((created, snap.count, snap.sum, buckets))
+        };
+        HistogramPoint {
+            attributes: labels.clone(),
+            start,
+            time: self.now,
+            count,
+            sum: sum.is_finite().then_some(sum),
+            bucket_counts: buckets,
+            explicit_bounds: bounds,
+        }
     }
 }
 
-fn now_unix_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+fn saturating_i64(v: u64) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
 }
 
-fn unit_str(m: &MetricMetadata) -> String {
-    match m.unit {
-        Unit::None => String::new(),
-        u => u.as_str().to_string(),
-    }
-}
+// ---------------------------------------------------------------------------
+// JSON model (OTLP/HTTP JSON encoding: camelCase names, 64-bit integers as
+// strings, enums as integers).
+// ---------------------------------------------------------------------------
 
-fn labels_to_attributes(labels: &LabelSet) -> Vec<KeyValue> {
-    labels
-        .iter()
-        .map(|(k, v)| KeyValue {
-            key: k.to_string(),
-            value: AnyValue::StringValue {
-                string_value: v.to_string(),
-            },
-        })
-        .collect()
-}
-
-// ---------------------------------------------------------------------
-// OTLP wire types — minimal serde subset of
-// opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest.
-// ---------------------------------------------------------------------
-
-/// Top-level OTLP payload.
+/// `ExportMetricsServiceRequest` in the OTLP/HTTP JSON encoding.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ExportMetricsServiceRequest {
-    /// One `ResourceMetrics` per logical resource (typically one).
-    #[serde(rename = "resourceMetrics")]
+    /// Resource-scoped metrics (one entry).
     pub resource_metrics: Vec<ResourceMetrics>,
 }
 
-/// Resource-scoped metrics block.
+/// `ResourceMetrics`.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ResourceMetrics {
-    /// Resource attributes (e.g. `service.name`).
+    /// The resource (`service.name` plus configured attributes).
     pub resource: Resource,
-    /// Per-instrumentation-scope metric groups.
-    #[serde(rename = "scopeMetrics")]
+    /// Scope-scoped metrics (one entry: `metrics-lib`).
     pub scope_metrics: Vec<ScopeMetrics>,
 }
 
-/// OTLP `Resource`.
+/// `Resource`.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Resource {
-    /// Resource attribute list.
+    /// Resource attributes.
     pub attributes: Vec<KeyValue>,
 }
 
-/// OTLP `ScopeMetrics`.
+/// `ScopeMetrics`.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ScopeMetrics {
-    /// Instrumentation scope descriptor.
+    /// Instrumentation scope.
     pub scope: InstrumentationScope,
-    /// Metrics emitted from this scope.
+    /// One metric per family (rate meters contribute two).
     pub metrics: Vec<Metric>,
 }
 
-/// OTLP `InstrumentationScope`.
+/// `InstrumentationScope`.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct InstrumentationScope {
-    /// Scope name (we use `"metrics-lib"`).
+    /// `"metrics-lib"`.
     pub name: String,
-    /// Scope version (the crate version at compile time).
+    /// The crate version.
     pub version: String,
 }
 
-/// OTLP `Metric`.
+/// `Metric`.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Metric {
     /// Metric name.
     pub name: String,
-    /// Free-form metric description.
+    /// Help text.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
-    /// Unit string (e.g. `"s"`, `"By"`, `"1"`).
+    /// UCUM unit.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub unit: String,
-    /// Metric data variant.
+    /// The data, keyed by its type (`gauge`, `sum`, `histogram`, `summary`).
     #[serde(flatten)]
     pub data: MetricData,
 }
 
-/// OTLP `Metric.data` (the `oneof` variant).
+/// The `data` oneof of `Metric`.
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum MetricData {
-    /// `Sum` variant (counters).
-    Sum {
-        /// Sum payload.
-        sum: NumberData,
-    },
-    /// `Gauge` variant.
+    /// `Gauge`.
     Gauge {
-        /// Gauge payload.
-        gauge: NumberData,
+        /// Data points.
+        #[serde(rename = "dataPoints")]
+        data_points: Vec<NumberDataPoint>,
     },
-    /// `Histogram` variant.
+    /// `Sum`.
+    Sum {
+        /// Data points.
+        #[serde(rename = "dataPoints")]
+        data_points: Vec<NumberDataPoint>,
+        /// 1 = delta, 2 = cumulative.
+        #[serde(rename = "aggregationTemporality")]
+        aggregation_temporality: u32,
+        /// Whether the sum only increases.
+        #[serde(rename = "isMonotonic")]
+        is_monotonic: bool,
+    },
+    /// `Histogram`.
     Histogram {
-        /// Histogram payload.
-        histogram: HistogramData,
+        /// Data points.
+        #[serde(rename = "dataPoints")]
+        data_points: Vec<HistogramDataPoint>,
+        /// 1 = delta, 2 = cumulative.
+        #[serde(rename = "aggregationTemporality")]
+        aggregation_temporality: u32,
+    },
+    /// `Summary`.
+    Summary {
+        /// Data points.
+        #[serde(rename = "dataPoints")]
+        data_points: Vec<SummaryDataPoint>,
     },
 }
 
-/// OTLP `Sum`/`Gauge` data block.
+/// `NumberDataPoint`.
 #[derive(Debug, Clone, Serialize)]
-pub struct NumberData {
-    /// Per-attribute data points.
-    #[serde(rename = "dataPoints")]
-    pub data_points: Vec<NumberDataPoint>,
-    /// Aggregation temporality (1 = DELTA, 2 = CUMULATIVE).
-    #[serde(
-        rename = "aggregationTemporality",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub aggregation_temporality: Option<u32>,
-    /// Monotonic flag (set for counters; absent for gauges).
-    #[serde(rename = "isMonotonic", skip_serializing_if = "Option::is_none")]
-    pub is_monotonic: Option<bool>,
-}
-
-/// One OTLP `NumberDataPoint`.
-#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct NumberDataPoint {
-    /// Per-point attribute set (label values).
+    /// Point attributes (the series labels).
     pub attributes: Vec<KeyValue>,
-    /// Datapoint start timestamp (Unix-epoch nanoseconds, JSON-string-encoded).
-    #[serde(rename = "startTimeUnixNano")]
+    /// Start of the aggregation interval (Unix nanoseconds, as a string).
     pub start_time_unix_nano: String,
-    /// Datapoint timestamp.
-    #[serde(rename = "timeUnixNano")]
+    /// Time of the point (Unix nanoseconds, as a string).
     pub time_unix_nano: String,
-    /// Datapoint value (`asInt` or `asDouble`).
+    /// `asInt` or `asDouble`.
     #[serde(flatten)]
     pub value: NumberValue,
 }
 
-/// OTLP `NumberDataPoint.value` (the `oneof` variant).
+/// The `value` oneof of `NumberDataPoint`.
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[non_exhaustive]
 pub enum NumberValue {
-    /// 64-bit signed integer encoded as a JSON string.
-    AsInt {
-        /// Integer value (string-encoded per OTLP/JSON convention).
-        #[serde(rename = "asInt")]
-        as_int: String,
-    },
-    /// 64-bit double encoded as a JSON number.
-    AsDouble {
-        /// Double value.
-        #[serde(rename = "asDouble")]
-        as_double: f64,
-    },
+    /// Integer value (as a string).
+    #[serde(rename = "asInt")]
+    AsInt(String),
+    /// Double value.
+    #[serde(rename = "asDouble")]
+    AsDouble(f64),
 }
 
-/// OTLP `Histogram` data block.
+/// `HistogramDataPoint`.
 #[derive(Debug, Clone, Serialize)]
-pub struct HistogramData {
-    /// Per-attribute histogram data points.
-    #[serde(rename = "dataPoints")]
-    pub data_points: Vec<HistogramDataPoint>,
-    /// Aggregation temporality (1 = DELTA, 2 = CUMULATIVE).
-    #[serde(rename = "aggregationTemporality")]
-    pub aggregation_temporality: u32,
-}
-
-/// One OTLP `HistogramDataPoint`.
-#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct HistogramDataPoint {
-    /// Per-point attribute set.
+    /// Point attributes.
     pub attributes: Vec<KeyValue>,
-    /// Start timestamp (Unix-epoch nanoseconds, JSON-string-encoded).
-    #[serde(rename = "startTimeUnixNano")]
+    /// Start of the aggregation interval.
     pub start_time_unix_nano: String,
-    /// Datapoint timestamp.
-    #[serde(rename = "timeUnixNano")]
+    /// Time of the point.
     pub time_unix_nano: String,
-    /// Total observation count (string-encoded 64-bit).
+    /// Number of observations (as a string).
     pub count: String,
-    /// Sum of all observations.
-    pub sum: f64,
-    /// Minimum observation (optional).
+    /// Sum of observations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min: Option<f64>,
-    /// Maximum observation (optional).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max: Option<f64>,
-    /// Non-cumulative per-bucket counts, including the trailing `+Inf` bucket.
-    #[serde(rename = "bucketCounts")]
+    pub sum: Option<f64>,
+    /// Per-bucket counts (as strings), one more than `explicit_bounds`.
     pub bucket_counts: Vec<String>,
-    /// Explicit bucket upper bounds (excludes the `+Inf` bucket).
-    #[serde(rename = "explicitBounds")]
+    /// Bucket upper bounds.
     pub explicit_bounds: Vec<f64>,
 }
 
-/// OTLP `KeyValue` attribute pair.
+/// `SummaryDataPoint`.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SummaryDataPoint {
+    /// Point attributes.
+    pub attributes: Vec<KeyValue>,
+    /// Start of the aggregation interval.
+    pub start_time_unix_nano: String,
+    /// Time of the point.
+    pub time_unix_nano: String,
+    /// Number of observations (as a string).
+    pub count: String,
+    /// Sum of observations.
+    pub sum: f64,
+    /// Quantile estimates.
+    pub quantile_values: Vec<ValueAtQuantile>,
+}
+
+/// `SummaryDataPoint.ValueAtQuantile`.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[non_exhaustive]
+pub struct ValueAtQuantile {
+    /// Quantile in `[0, 1]`.
+    pub quantile: f64,
+    /// Estimate.
+    pub value: f64,
+}
+
+/// `KeyValue` with a string value.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct KeyValue {
     /// Attribute key.
     pub key: String,
@@ -454,138 +888,405 @@ pub struct KeyValue {
     pub value: AnyValue,
 }
 
-/// OTLP `AnyValue` — restricted here to string attributes.
+/// `AnyValue` (only `stringValue` is produced).
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[non_exhaustive]
 pub enum AnyValue {
-    /// String attribute value.
-    StringValue {
-        /// Inner string.
-        #[serde(rename = "stringValue")]
-        string_value: String,
-    },
+    /// A string.
+    #[serde(rename = "stringValue")]
+    StringValue(String),
+}
+
+fn attributes(labels: &LabelSet) -> Vec<KeyValue> {
+    labels
+        .iter()
+        .map(|(k, v)| KeyValue {
+            key: k.to_owned(),
+            value: AnyValue::StringValue(v.to_owned()),
+        })
+        .collect()
+}
+
+fn to_json_model(
+    model: &[MetricModel],
+    service_name: &str,
+    resource: &LabelSet,
+) -> ExportMetricsServiceRequest {
+    let mut resource_attrs = vec![KeyValue {
+        key: "service.name".to_owned(),
+        value: AnyValue::StringValue(service_name.to_owned()),
+    }];
+    resource_attrs.extend(
+        attributes(resource)
+            .into_iter()
+            .filter(|kv| kv.key != "service.name"),
+    );
+    let metrics = model
+        .iter()
+        .map(|m| Metric {
+            name: m.name.clone(),
+            description: m.description.clone(),
+            unit: m.unit.clone(),
+            data: match &m.data {
+                DataModel::Gauge(points) => MetricData::Gauge {
+                    data_points: points.iter().map(number_point).collect(),
+                },
+                DataModel::Sum {
+                    points,
+                    monotonic,
+                    temporality,
+                } => MetricData::Sum {
+                    data_points: points.iter().map(number_point).collect(),
+                    aggregation_temporality: temporality.wire(),
+                    is_monotonic: *monotonic,
+                },
+                DataModel::Histogram {
+                    points,
+                    temporality,
+                } => MetricData::Histogram {
+                    data_points: points
+                        .iter()
+                        .map(|p| HistogramDataPoint {
+                            attributes: attributes(&p.attributes),
+                            start_time_unix_nano: p.start.to_string(),
+                            time_unix_nano: p.time.to_string(),
+                            count: p.count.to_string(),
+                            sum: p.sum,
+                            bucket_counts: p.bucket_counts.iter().map(u64::to_string).collect(),
+                            explicit_bounds: p.explicit_bounds.clone(),
+                        })
+                        .collect(),
+                    aggregation_temporality: temporality.wire(),
+                },
+                DataModel::Summary(points) => MetricData::Summary {
+                    data_points: points
+                        .iter()
+                        .map(|p| SummaryDataPoint {
+                            attributes: attributes(&p.attributes),
+                            start_time_unix_nano: p.start.to_string(),
+                            time_unix_nano: p.time.to_string(),
+                            count: p.count.to_string(),
+                            sum: p.sum,
+                            quantile_values: p
+                                .quantiles
+                                .iter()
+                                .map(|(q, v)| ValueAtQuantile {
+                                    quantile: *q,
+                                    value: *v,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                },
+            },
+        })
+        .collect();
+    ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Resource {
+                attributes: resource_attrs,
+            },
+            scope_metrics: vec![ScopeMetrics {
+                scope: InstrumentationScope {
+                    name: "metrics-lib".to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                },
+                metrics,
+            }],
+        }],
+    }
+}
+
+fn number_point(p: &NumberPoint) -> NumberDataPoint {
+    NumberDataPoint {
+        attributes: attributes(&p.attributes),
+        start_time_unix_nano: p.start.to_string(),
+        time_unix_nano: p.time.to_string(),
+        value: match p.value {
+            Number::Int(v) => NumberValue::AsInt(v.to_string()),
+            Number::Double(v) => NumberValue::AsDouble(v),
+        },
+    }
 }
 
 #[cfg(test)]
+#[cfg(all(feature = "count", feature = "gauge"))]
 mod tests {
+    use super::proto::decode::{Value, bytes, fields, one, string};
     use super::*;
 
-    #[test]
-    fn empty_registry_has_resource_metrics_block() {
-        let r = Registry::new();
-        let body = render(&r, "test-service");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            v["resourceMetrics"][0]["resource"]["attributes"][0]["key"],
-            "service.name"
-        );
-        assert_eq!(
-            v["resourceMetrics"][0]["resource"]["attributes"][0]["value"]["stringValue"],
-            "test-service"
-        );
+    fn metric_by_name<'a>(req: &'a ExportMetricsServiceRequest, name: &str) -> &'a Metric {
+        req.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("metric {name} missing"))
     }
 
-    #[test]
-    #[cfg(feature = "count")]
-    fn counter_renders_as_sum_monotonic() {
-        let r = Registry::new();
-        r.describe_counter("requests", "Total HTTP requests", Unit::Custom("1"));
-        let labels = LabelSet::from([("method", "GET")]);
-        r.get_or_create_counter_with("requests", &labels).add(42);
-        let body = render(&r, "test-service");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let metric = &v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
-        assert_eq!(metric["name"], "requests");
-        assert_eq!(metric["sum"]["isMonotonic"], true);
-        assert_eq!(metric["sum"]["aggregationTemporality"], 2);
-        let dp = &metric["sum"]["dataPoints"][0];
-        assert_eq!(dp["asInt"], "42");
-        assert_eq!(dp["attributes"][0]["key"], "method");
-        assert_eq!(dp["attributes"][0]["value"]["stringValue"], "GET");
-    }
-
-    #[test]
-    #[cfg(feature = "gauge")]
-    fn gauge_renders_as_gauge_double() {
-        let r = Registry::new();
-        r.get_or_create_gauge("temp_c").set(21.5);
-        let body = render(&r, "svc");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let metric = &v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
-        assert_eq!(metric["name"], "temp_c");
-        let dp = &metric["gauge"]["dataPoints"][0];
-        assert_eq!(dp["asDouble"], 21.5);
-    }
-
-    #[test]
-    #[cfg(feature = "timer")]
-    fn timer_renders_as_histogram_with_seconds_suffix() {
-        let r = Registry::new();
-        let t = r.get_or_create_timer("rpc");
-        t.record(std::time::Duration::from_millis(3));
-        let body = render(&r, "svc");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let metric = &v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
-        assert_eq!(metric["name"], "rpc_seconds");
-        assert_eq!(metric["unit"], "s");
-        let dp = &metric["histogram"]["dataPoints"][0];
-        assert_eq!(dp["count"], "1");
-        assert!(dp["min"].is_number());
-        assert!(dp["max"].is_number());
-        assert_eq!(dp["explicitBounds"], serde_json::json!([]));
-    }
-
-    #[test]
-    #[cfg(feature = "meter")]
-    fn rate_meter_renders_as_gauge_per_second() {
-        let r = Registry::new();
-        r.get_or_create_rate_meter("qps").tick_n(2);
-        let body = render(&r, "svc");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let metric = &v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
-        assert_eq!(metric["name"], "qps_per_second");
-        assert_eq!(metric["unit"], "1");
-        let dp = &metric["gauge"]["dataPoints"][0];
-        assert!(dp["asDouble"].is_number());
-    }
-
-    #[test]
-    fn render_pretty_is_indented() {
-        let r = Registry::new();
-        let body = render_pretty(&r, "svc");
-        assert!(body.contains('\n'));
-    }
-
-    #[test]
-    fn unit_str_passes_through_known_units() {
-        // Indirectly exercise unit_str via describe + render.
-        let r = Registry::new();
-        #[cfg(feature = "count")]
-        {
-            r.describe_counter("bytes_total_in", "Bytes received", Unit::Bytes);
-            r.get_or_create_counter("bytes_total_in").add(1024);
+    fn sum_value(req: &ExportMetricsServiceRequest, name: &str) -> (u32, String) {
+        match &metric_by_name(req, name).data {
+            MetricData::Sum {
+                data_points,
+                aggregation_temporality,
+                ..
+            } => {
+                let v = match &data_points[0].value {
+                    NumberValue::AsInt(v) => v.clone(),
+                    NumberValue::AsDouble(v) => v.to_string(),
+                };
+                (*aggregation_temporality, v)
+            }
+            _ => panic!("expected a sum"),
         }
-        let body = render(&r, "svc");
-        let _v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        #[cfg(feature = "count")]
-        assert!(body.contains("\"unit\":\"bytes\""), "{body}");
+    }
+
+    #[cfg(all(feature = "meter", feature = "gauge"))]
+    #[test]
+    fn test_derived_name_collisions_are_skipped_regression_ml2_007() {
+        let r = Registry::new();
+        // The rate meter `q` emits `q.per_second`; the gauge clashes.
+        r.rate_meter("q").tick();
+        r.gauge("q.per_second").set(5.0);
+        let req = OtlpExporter::new("svc").build(&r);
+        let names: Vec<&str> = req.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["q", "q.per_second"]);
+        assert!(matches!(
+            metric_by_name(&req, "q.per_second").data,
+            MetricData::Gauge { .. }
+        ));
+        assert_eq!(r.exposition_conflicts(), 1);
     }
 
     #[test]
-    #[cfg(feature = "histogram")]
-    fn histogram_renders_non_cumulative_buckets() {
+    fn test_reset_starts_a_new_cumulative_series_regression_ml2_010() {
         let r = Registry::new();
-        r.configure_histogram("rtt", [0.01, 0.1]);
-        let h = r.get_or_create_histogram("rtt");
-        h.observe(0.005); // → bucket[0]
-        h.observe(0.05); //  → bucket[1]
-        h.observe(0.5); //   → +Inf
-        let body = render(&r, "svc");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let metric = &v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0];
-        let dp = &metric["histogram"]["dataPoints"][0];
-        assert_eq!(dp["count"], "3");
-        assert_eq!(dp["bucketCounts"], serde_json::json!(["1", "1", "1"]));
-        assert_eq!(dp["explicitBounds"], serde_json::json!([0.01, 0.1]));
+        let c = r.counter("c");
+        c.add(5);
+        let exporter = OtlpExporter::new("svc");
+        let start = |req: &ExportMetricsServiceRequest| match &metric_by_name(req, "c").data {
+            MetricData::Sum { data_points, .. } => data_points[0].start_time_unix_nano.clone(),
+            _ => panic!("expected a sum"),
+        };
+        let first = exporter.build(&r);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        c.add(1);
+        let second = exporter.build(&r);
+        assert_eq!(start(&first), start(&second));
+        c.reset();
+        c.add(1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let third = exporter.build(&r);
+        let parse = |s: String| s.parse::<u64>().unwrap();
+        assert!(parse(start(&third)) > parse(start(&second)));
+        // The new start sticks while the counter grows again.
+        c.add(1);
+        assert_eq!(start(&third), start(&exporter.build(&r)));
+    }
+
+    #[test]
+    fn test_series_of_one_name_share_one_metric() {
+        let r = Registry::new();
+        r.counter_with("hits", &LabelSet::from([("k", "a")])).inc();
+        r.counter_with("hits", &LabelSet::from([("k", "b")])).add(2);
+        let req = OtlpExporter::new("svc").build(&r);
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(metrics.len(), 1);
+        let MetricData::Sum {
+            data_points,
+            aggregation_temporality,
+            is_monotonic,
+        } = &metrics[0].data
+        else {
+            panic!("expected a sum");
+        };
+        assert_eq!(data_points.len(), 2);
+        assert_eq!(*aggregation_temporality, 2);
+        assert!(*is_monotonic);
+    }
+
+    #[test]
+    fn test_cumulative_start_time_is_stable_regression_ml012() {
+        // ML-012: the start time was reset to "now" on every export.
+        let r = Registry::new();
+        r.counter("c").inc();
+        let exporter = OtlpExporter::new("svc");
+        let start = |req: &ExportMetricsServiceRequest| match &metric_by_name(req, "c").data {
+            MetricData::Sum { data_points, .. } => data_points[0].start_time_unix_nano.clone(),
+            _ => panic!("expected a sum"),
+        };
+        let first = exporter.build(&r);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = exporter.build(&r);
+        assert_eq!(start(&first), start(&second));
+        let time = |req: &ExportMetricsServiceRequest| match &metric_by_name(req, "c").data {
+            MetricData::Sum { data_points, .. } => data_points[0].time_unix_nano.clone(),
+            _ => panic!("expected a sum"),
+        };
+        assert_ne!(time(&first), time(&second));
+    }
+
+    #[test]
+    fn test_delta_temporality_reports_changes() {
+        let r = Registry::new();
+        let c = r.counter("c");
+        let u = r.up_down_counter("u");
+        let exporter = OtlpExporter::new("svc").with_temporality(Temporality::Delta);
+        assert_eq!(exporter.temporality(), Temporality::Delta);
+        c.add(5);
+        u.add(3);
+        let first = exporter.build(&r);
+        assert_eq!(sum_value(&first, "c"), (1, "5".to_owned()));
+        assert_eq!(sum_value(&first, "u"), (1, "3".to_owned()));
+        c.add(2);
+        u.add(-4);
+        let second = exporter.build(&r);
+        assert_eq!(sum_value(&second, "c"), (1, "2".to_owned()));
+        assert_eq!(sum_value(&second, "u"), (1, "-4".to_owned()));
+        c.reset();
+        c.add(1);
+        assert_eq!(sum_value(&exporter.build(&r), "c"), (1, "1".to_owned()));
+    }
+
+    #[test]
+    fn test_non_finite_gauges_are_skipped_regression_ml024() {
+        let r = Registry::new();
+        r.gauge("nan").set(f64::NAN);
+        r.gauge("ok").set(2.0);
+        let json = render(&r, "svc").unwrap();
+        assert!(!json.contains("null"), "{json}");
+        let req = OtlpExporter::new("svc").build(&r);
+        match &metric_by_name(&req, "nan").data {
+            MetricData::Gauge { data_points } => assert!(data_points.is_empty()),
+            _ => panic!("expected a gauge"),
+        }
+    }
+
+    #[test]
+    fn test_json_uses_otlp_field_conventions() {
+        let r = Registry::new();
+        r.describe_counter("c", "Count of things", crate::Unit::None)
+            .unwrap();
+        r.counter("c").add(7);
+        let exporter = OtlpExporter::new("svc").with_resource_attribute("env", "test");
+        let json = exporter.render_json(&r).unwrap();
+        for needle in [
+            r#""resourceMetrics""#,
+            r#""scopeMetrics""#,
+            r#""service.name""#,
+            r#""stringValue":"svc""#,
+            r#""key":"env""#,
+            r#""dataPoints""#,
+            r#""startTimeUnixNano":""#,
+            r#""asInt":"7""#,
+            r#""aggregationTemporality":2"#,
+            r#""isMonotonic":true"#,
+            r#""description":"Count of things""#,
+        ] {
+            assert!(json.contains(needle), "{needle} missing in {json}");
+        }
+        assert!(format!("{exporter:?}").contains("OtlpExporter"));
+    }
+
+    #[test]
+    fn test_protobuf_structure() {
+        let r = Registry::new();
+        r.counter_with("c", &LabelSet::from([("k", "v")])).add(3);
+        r.gauge("g").set(1.5);
+        let body = OtlpExporter::new("svc")
+            .with_resource_attribute("env", "prod")
+            .render_protobuf(&r);
+        let req = fields(&body);
+        let rm = fields(&bytes(&req, 1)[0]);
+        let resource = fields(&bytes(&rm, 1)[0]);
+        let attrs = bytes(&resource, 1);
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(string(&fields(&attrs[0]), 1), "service.name");
+        let sm = fields(&bytes(&rm, 2)[0]);
+        let scope = fields(&bytes(&sm, 1)[0]);
+        assert_eq!(string(&scope, 1), "metrics-lib");
+        let metrics = bytes(&sm, 2);
+        assert_eq!(metrics.len(), 2);
+        let counter = fields(&metrics[0]);
+        assert_eq!(string(&counter, 1), "c");
+        let sum = fields(&bytes(&counter, 7)[0]);
+        assert_eq!(one(&sum, 2), Value::Varint(2));
+        assert_eq!(one(&sum, 3), Value::Varint(1));
+        let point = fields(&bytes(&sum, 1)[0]);
+        assert_eq!(one(&point, 6), Value::Fixed64(3));
+        let gauge = fields(&metrics[1]);
+        let g = fields(&bytes(&gauge, 5)[0]);
+        let gp = fields(&bytes(&g, 1)[0]);
+        assert_eq!(one(&gp, 4), Value::Fixed64(1.5f64.to_bits()));
+        assert_ne!(render_protobuf(&r, "svc").len(), 0);
+    }
+
+    #[cfg(all(feature = "timer", feature = "meter", feature = "histogram"))]
+    #[test]
+    fn test_every_kind_maps_and_encodes() {
+        let r = Registry::new();
+        r.timer("t").record(std::time::Duration::from_millis(250));
+        r.rate_meter("rate").tick_n(4);
+        r.configure_histogram("h", [0.1, 1.0]).unwrap();
+        let h = r.histogram("h");
+        h.observe(0.05);
+        h.observe(5.0);
+        r.summary("s").observe(0.5);
+        let _ = r.summary("s_empty");
+        r.sharded_counter("sc").inc();
+        let exporter = OtlpExporter::new("svc").with_temporality(Temporality::Delta);
+        let req = exporter.build(&r);
+        match &metric_by_name(&req, "t").data {
+            MetricData::Summary { data_points } => {
+                assert_eq!(data_points[0].count, "1");
+                assert_eq!(data_points[0].quantile_values.len(), 2);
+                assert!((data_points[0].sum - 0.25).abs() < 1e-9);
+            }
+            _ => panic!("timer should be a summary"),
+        }
+        assert_eq!(metric_by_name(&req, "t").unit, "s");
+        assert!(matches!(
+            metric_by_name(&req, "rate").data,
+            MetricData::Sum { .. }
+        ));
+        assert!(matches!(
+            metric_by_name(&req, "rate.per_second").data,
+            MetricData::Gauge { .. }
+        ));
+        match &metric_by_name(&req, "h").data {
+            MetricData::Histogram { data_points, .. } => {
+                assert_eq!(data_points[0].bucket_counts, vec!["1", "0", "1"]);
+                assert_eq!(data_points[0].explicit_bounds, vec![0.1, 1.0]);
+            }
+            _ => panic!("expected a histogram"),
+        }
+        match &metric_by_name(&req, "s_empty").data {
+            MetricData::Summary { data_points } => {
+                assert!(data_points[0].quantile_values.is_empty());
+            }
+            _ => panic!("expected a summary"),
+        }
+        // A second delta export only carries the new observation.
+        h.observe(0.5);
+        let req2 = exporter.build(&r);
+        match &metric_by_name(&req2, "h").data {
+            MetricData::Histogram { data_points, .. } => {
+                assert_eq!(data_points[0].count, "1");
+                assert_eq!(data_points[0].bucket_counts, vec!["0", "1", "0"]);
+            }
+            _ => panic!("expected a histogram"),
+        }
+        let body = exporter.render_protobuf(&r);
+        let rm = fields(&bytes(&fields(&body), 1)[0]);
+        let sm = fields(&bytes(&rm, 2)[0]);
+        assert!(bytes(&sm, 2).len() >= 7);
+        assert!(
+            serde_json::to_string(&req2)
+                .unwrap()
+                .contains("explicitBounds")
+        );
     }
 }

@@ -9,50 +9,49 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "metrics-lib"
-version = "1.0.0"
+version = "2.0.0"
 
-# Minimum Supported Rust Version (MSRV)
-rust-version = "1.70"
-edition = "2021"
+# Minimum Supported Rust Version (MSRV). Raising it is a MAJOR change.
+rust-version = "1.85"
+edition = "2024"
 
-# License
-license = "Apache-2.0"
-
-# Readme
+license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
-# Description
-description = "High-performance Rust metrics library: sub-2ns counters, sub-1ns gauges, nanosecond timers, tumbling-window rate meters, async timing, adaptive sampling, and system health. Cross-platform with minimal dependencies."
+description = "Lock-free metrics for Rust: counters, gauges, timers, histograms, summaries and rate meters behind a bounded, validated registry, with spec-valid Prometheus/OpenMetrics output, StatsD/OTLP/JSON exporters and optional process metrics."
 
-# Keywords (5 total)
-keywords = [
-    "benchmark", 
-    "performance", 
-    "profiling", 
-    "timing", 
-    "metrics"
-]
+keywords = ["metrics", "prometheus", "openmetrics", "telemetry", "observability"]
+categories = ["development-tools::profiling", "development-tools::debugging", "concurrency"]
 
-# Categories (5 total)
-categories = [
-    "development-tools::profiling", 
-    "memory-management"
-]
-
-# Links
 homepage      = "https://github.com/jamesgober/metrics-lib"
 repository    = "https://github.com/jamesgober/metrics-lib"
 documentation = "https://docs.rs/metrics-lib"
 
-# Authors
-authors = [
-    "James Gober <me@jamesgober.com>"
+authors = ["James Gober <me@jamesgober.com>"]
+
+# Ship the library, its user-facing docs, tests, benches and examples; keep
+# repository tooling (CI, deny config, observability assets) out of the
+# published crate.
+include = [
+    "/src/**/*.rs",
+    "/tests/**/*.rs",
+    "/benches/**/*.rs",
+    "/examples/**/*.rs",
+    "/docs/*.md",
+    "/docs/release/v2.0.0.md",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
 ]
 
-# `sysinfo` is gated on `#[cfg(not(target_os = "linux"))]` everywhere it
-# is used. On Linux CI runners cargo-udeps therefore reports it as
-# "unused"; this is a false positive (it's the cross-platform backend on
-# macOS and Windows). Tell cargo-udeps to skip it.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# `sysinfo` is only compiled for targets without an in-house backend (the
+# BSDs and others), so on Linux, macOS and Windows runners cargo-udeps reports
+# it as unused. That is a false positive.
 [package.metadata.cargo-udeps.ignore]
 normal = ["sysinfo"]
 
@@ -61,82 +60,155 @@ normal = ["sysinfo"]
 # FEATURE FLAGS
 # #################################
 [features]
-# Core metric types — each gates its own module and re-exports.
-count       = []
-gauge       = []
-timer       = []
-meter       = []
+# Default build: counters, gauges, timers and lazily-started system metrics.
+default = ["count", "gauge", "timer", "system"]
 
-# Adaptive sampling / circuit breaker / backpressure controllers.
-sample      = []
+# Metric types. Each flag gates one module plus its registry and exporter
+# support. `count` also provides `ShardedCounter` and `UpDownCounter`.
+count     = []
+gauge     = []
+timer     = []
+meter     = []
+# `Histogram` (explicit buckets, exemplars) and `Summary` (streaming quantiles).
+histogram = []
 
-# Enable running benchmark-style assertions inside `cargo test` (slow,
-# timing-coupled; gated and ignored by default).
-bench-tests = []
+# Adaptive sampler, circuit breaker and backpressure controller.
+sample = []
 
-# Enables async support (Tokio runtime helpers + AsyncMetricsBatcher).
-async       = ["dep:tokio"]
+# Process and host metrics (`SystemHealth`, standard `process_*` series).
+# Reads `/proc` on Linux and the OS directly on Windows and macOS; `sysinfo`
+# is used only on other targets. Nothing is sampled and no thread is started
+# until the first call to `MetricsCore::system()`.
+system = ["dep:sysinfo"]
 
-# Histogram type with configurable buckets and quantile estimation.
-histogram   = ["sample"]
+# Tokio helpers: async timer guards, `TimedFuture`, `AsyncMetricBatch`,
+# `AsyncMetricsBatcher` and the Tokio runtime-metrics collector.
+async = ["dep:tokio", "dep:pin-project-lite"]
 
-# Wire Serde derive support for stats and snapshot types, plus the
-# `exporters::json` JSON snapshot exporter (pulls in `serde_json`).
-serde       = ["dep:serde", "dep:serde_json"]
+# `Serialize` for stats/snapshot types plus the JSON snapshot exporter.
+serde = ["dep:serde", "dep:serde_json"]
 
-# Built-in StatsD UDP exporter (`exporters::statsd`). No new transitive deps
-# — uses `std::net::UdpSocket`.
-statsd      = []
+# StatsD / DogStatsD UDP exporter (std only, no extra dependencies).
+statsd = []
 
-# Built-in OTLP/HTTP+JSON exporter (`exporters::otlp`). Requires the
-# `serde` feature so the OTLP payload can be serialised.
-otlp        = ["serde"]
+# OTLP exporter: HTTP+JSON payloads (needs `serde`) and hand-encoded protobuf
+# payloads (no extra dependencies).
+otlp = ["serde"]
 
-# Optional `tracing` integration: opt-in helpers that wrap `Timer`
-# operations with a `tracing::info_span!`. Hot paths are unchanged when
-# this flag is off.
-tracing     = ["dep:tracing"]
+# Dependency-free HTTP helpers: a blocking `/metrics` server and a Prometheus
+# Pushgateway client (plain HTTP over `std::net`).
+http = []
 
-# All built-in exporters (Prometheus + OpenMetrics are always-on; this flag
-# adds JSON snapshot + StatsD UDP + OTLP/HTTP+JSON).
-exporters-all = ["serde", "statsd", "otlp"]
+# `tracing` integration: span-wrapped timing and exemplar helpers.
+tracing = ["dep:tracing"]
 
-# Aggregate flags. `all` excludes runtime-dependent features so it can be
-# enabled on environments that don't link against Tokio or Serde.
-all  = ["count", "gauge", "timer", "meter", "sample", "histogram"]
+# Bridge for the `metrics` facade crate (a `metrics::Recorder` implementation).
+metrics-rs = ["dep:metrics", "count", "gauge", "histogram"]
+
+# Tower middleware that records request rate, errors and duration.
+tower = ["dep:tower-layer", "dep:tower-service", "dep:http", "dep:pin-project-lite", "count", "histogram"]
+
+# Every built-in exporter.
+exporters-all = ["serde", "statsd", "otlp", "http"]
+
+# Aggregates.
+minimal = ["count"]
+all = ["count", "gauge", "timer", "meter", "sample", "histogram", "system"]
 full = [
-    "count", "gauge", "timer", "meter", "sample", "histogram",
-    "async", "serde", "statsd", "otlp", "tracing",
+    "count", "gauge", "timer", "meter", "sample", "histogram", "system",
+    "async", "serde", "statsd", "otlp", "http", "tracing", "metrics-rs", "tower",
 ]
 
-# Default build: counters + gauges + timers (the most common subset).
-default = ["count", "gauge", "timer"]
 
-# Smallest useful build (counter only).
-minimal = ["count"]
+
+# DEPENDENCIES
+# #################################
+[dependencies]
+# Optional (feature `async`). The portfolio's async runtime (REPS). Only the
+# runtime pieces the helpers use are enabled.
+tokio = { version = "1.47", default-features = false, features = ["rt", "time", "sync"], optional = true }
+# Optional (features `async`, `tower`). Safe pin projection for `TimedFuture`
+# and the tower response future, so the crate needs no `unsafe`. Already part
+# of tokio's dependency graph.
+pin-project-lite = { version = "0.2.14", optional = true }
+# Optional (features `serde`, `otlp`). Serialization of stats and payloads.
+serde = { version = "1.0.200", features = ["derive"], optional = true }
+serde_json = { version = "1.0.120", optional = true }
+# Optional (feature `tracing`). Span-wrapped timing and exemplar helpers.
+tracing = { version = "0.1.40", default-features = false, features = ["std"], optional = true }
+# Optional (feature `metrics-rs`). The `metrics` facade; implementing its
+# `Recorder` lets the `metrics` ecosystem record into this crate.
+metrics = { version = "0.24", optional = true }
+# Optional (feature `tower`). Middleware traits and HTTP request/response types.
+tower-layer = { version = "0.3.3", optional = true }
+tower-service = { version = "0.3.3", optional = true }
+http = { version = "1.1", optional = true }
+
+# Optional (feature `system`), and only for targets without an in-house
+# backend (FreeBSD and the other BSDs, …): Linux, Windows and macOS read the
+# OS directly and never compile it. 0.36 is the newest line whose MSRV (1.75)
+# fits ours; 0.37+ needs Rust 1.88. Only sysinfo's `system` component is
+# compiled. The soundness fixes shipped in 0.37-0.39 are in components that
+# are either not compiled here (users, groups) or never called (motherboard).
+[target.'cfg(not(any(target_os = "linux", target_os = "macos", windows)))'.dependencies]
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"], optional = true }
+
+
+
+# DEV DEPENDENCIES
+# #################################
+[dev-dependencies]
+# Benchmark harness. 0.7 is the newest line compatible with MSRV 1.85 (0.8
+# needs 1.86). Default features off: no rayon/plotters subtree.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+# Property tests (REPS). 1.11 is the newest line with MSRV <= 1.85.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+serde_json = "1.0.120"
+# Runtime for async tests and examples.
+tokio = { version = "1.47", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net"] }
+# Examples: an axum `/metrics` endpoint and the tower middleware in context.
+axum = { version = "0.8.4", default-features = false, features = ["http1", "tokio", "matched-path"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+http = "1.1"
+# Tests and example for the `metrics-rs` bridge.
+metrics = "0.24"
+
+# Parity tests only: the in-house Windows and macOS samplers are compared
+# with sysinfo's readings (tests/system_parity.rs). Never shipped.
+[target.'cfg(any(windows, target_os = "macos"))'.dev-dependencies]
+sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 
 
 # BENCHMARKS
 # #################################
 [[bench]]
-name    = "metrics_bench"
+name = "metrics_bench"
 harness = false
-required-features = ["meter"]
+required-features = ["count", "gauge", "timer", "meter", "histogram"]
+
+[[bench]]
+name = "registry_bench"
+harness = false
+required-features = ["count", "gauge", "timer", "histogram"]
+
+
 
 # EXAMPLES
 # #################################
 [[example]]
 name = "quick_start"
-required-features = ["meter"]
+required-features = ["count", "gauge", "timer"]
 
 [[example]]
 name = "quick_tour"
-required-features = ["meter"]
+required-features = ["count", "gauge", "timer", "meter"]
 
 [[example]]
 name = "token_bucket_limiter"
-required-features = ["meter"]
 
 [[example]]
 name = "contention_admission"
@@ -148,45 +220,44 @@ required-features = ["meter"]
 
 [[example]]
 name = "custom_exporter_openmetrics"
-required-features = ["meter"]
+required-features = ["count", "gauge"]
 
 [[example]]
 name = "benchmark_comparison"
-required-features = ["meter"]
+required-features = ["count", "gauge", "timer", "meter"]
 
 [[example]]
 name = "async_batch_timing"
-required-features = ["async"]
+required-features = ["async", "count", "timer"]
 
 [[example]]
 name = "axum_middleware_metrics"
-required-features = ["async"]
-
-[[example]]
-name = "health_dashboard"
-required-features = ["async"]
-
-[[example]]
-name = "streaming_rate_window"
-required-features = ["async", "meter"]
+required-features = ["tower", "count", "gauge", "histogram"]
 
 [[example]]
 name = "axum_registry_integration"
-required-features = ["async", "meter"]
+required-features = ["count", "gauge", "timer", "histogram"]
 
-# Examples that use specific metric features.
+[[example]]
+name = "health_dashboard"
+required-features = ["system"]
+
+[[example]]
+name = "streaming_rate_window"
+required-features = ["meter"]
+
 [[example]]
 name = "cache_hit_miss"
 required-features = ["count", "timer"]
 
-# System health examples — only need SystemHealth (always compiled), no metric feature gates required.
 [[example]]
 name = "cpu_stats"
+required-features = ["system"]
 
 [[example]]
 name = "memory_stats"
+required-features = ["system"]
 
-# v0.9.3 telemetry examples.
 [[example]]
 name = "labels_demo"
 required-features = ["count"]
@@ -197,7 +268,7 @@ required-features = ["histogram"]
 
 [[example]]
 name = "prometheus_endpoint"
-required-features = ["async", "count", "gauge", "timer", "histogram"]
+required-features = ["http", "count", "gauge", "timer", "histogram"]
 
 [[example]]
 name = "statsd_push"
@@ -211,37 +282,17 @@ required-features = ["otlp", "count", "gauge", "timer", "histogram"]
 name = "snapshot_serde"
 required-features = ["serde", "count", "gauge"]
 
+[[example]]
+name = "metrics_facade"
+required-features = ["metrics-rs"]
 
 
-# DEPENDENCIES
+
+# PROFILES
 # #################################
-[dependencies]
-tokio = { version = "1.0", features = ["rt", "time", "macros", "sync"], optional = true }
-serde = { version = "1.0", features = ["derive"], optional = true }
-serde_json = { version = "1.0", optional = true }
-tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
-num_cpus    = "1.16"
-parking_lot = "0.12"
-sysinfo = { version = "0.29", default-features = false }
-
-
-
-# DEV DEPENDENCIES
-# #################################
-[dev-dependencies]
-# Pin Criterion minor for reproducible output layout in CI aggregation
-criterion = { version = "=0.4.0", default-features = false }
-tokio-test = "0.4"
-half = "=2.2.1" # Pin transitive resolution (via plotters) to MSRV-compatible half version
-doc-comment = "0.3"
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
-serde_json = "1.0"
-# Tokio runtime for examples
-tokio = { version = "1.0", features = ["full"] }
-rand = "0.8"
-anyhow = "1"
-tower = "0.5"
-crossbeam-channel = "0.5"
-# Property-based testing (v0.9.5+). Pinned to a 1.0.x line that compiles
-# clean on MSRV 1.70.
-proptest = { version = "=1.0.0", default-features = false, features = ["std"] }
+# Used by `cargo bench` (the bench profile inherits from release). Has no
+# effect on downstream builds.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
