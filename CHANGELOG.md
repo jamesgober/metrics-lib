@@ -22,7 +22,7 @@
 
 ### Security
 
-## [2.0.0] - 2026-10-14
+## [2.0.0] - 2026-10-19
 
 A correctness release. The 2026-10-13 audit found bugs that 1.0 had frozen
 into its API: Prometheus/OpenMetrics output that scrapers reject, memory
@@ -71,12 +71,15 @@ and its replacement is listed in
   `/health` endpoint with Prometheus/OpenMetrics content negotiation) and a
   Pushgateway client (`push`, `push_add`, `delete`). The server serves each
   connection on its own short-lived thread (at most `MAX_CONNECTIONS` = 16
-  at once, 503 beyond that), gives every client a total deadline to send
-  its request head (`REQUEST_TIMEOUT`, 5 s, then 408) and to read the
-  response (`RESPONSE_TIMEOUT`, 10 s), and answers heads over
-  `MAX_REQUEST_HEAD` (8 KiB) with 431. The Pushgateway client enforces one
-  deadline over connecting, sending and reading, and tries every resolved
-  address.
+  at once). When all are taken, a new connection evicts the oldest one
+  still waiting for its request, so idle connections cannot lock scrapers
+  out; only when every slot is writing a response is it answered 503. Every
+  client gets a total deadline to send its request head
+  (`REQUEST_TIMEOUT`, 2 s, then 408) and to read the response
+  (`RESPONSE_TIMEOUT`, 10 s), and heads over `MAX_REQUEST_HEAD` (8 KiB) are
+  answered 431. The Pushgateway client enforces one deadline over
+  connecting, sending and reading, and tries every resolved address with
+  an equal share of the time left.
 - Feature `tower`: `RedLayer`, request rate/error/duration middleware for
   any tower service (axum, tonic, hyper).
 - OTLP: `OtlpExporter` with cumulative or delta temporality, stable series
@@ -134,7 +137,7 @@ and its replacement is listed in
 - `json::render` returns `serde_json::Result<String>`; schema version 2.
 - Public enums and option/stats structs are `#[non_exhaustive]`.
 - Dependencies: the `system` feature reads the OS directly on Linux
-  (`/proc`), Windows (five kernel32 calls) and macOS (libSystem: `getrusage`,
+  (`/proc`), Windows (six kernel32 calls) and macOS (libSystem: `getrusage`,
   `proc_pidinfo`, Mach host statistics, `sysctl`), so `sysinfo` is no longer
   compiled there; it remains (0.29 to 0.36.1) only for targets without an
   in-house backend, such as FreeBSD. On Windows that removes 20 transitive
@@ -294,6 +297,23 @@ release (ML2 IDs):
   every type.
 - ML2-015 (exemplars dropped while another thread writes the same bucket's
   exemplar) is documented behaviour and stays: the hot path never waits.
+
+Found by the final verification and fixed before release:
+
+- F-1: 16 idle connections re-opened continuously could keep every scrape
+  at 503. A new connection now evicts the oldest connection still waiting
+  for its request, and the request-head deadline is 2 s (was 5 s).
+- F-2: the per-platform meaning of host "used" memory is documented in
+  `docs/MIGRATION-2.0.md` and the release notes.
+- F-3: the release notes say which platforms are run in CI and which are
+  only type-checked (x86_64 macOS, FreeBSD).
+- F-4: the macOS `proc_pidinfo` helper accepts only the result types of an
+  `unsafe trait` tied to their flavor constants, instead of any `T`.
+- F-5: the Pushgateway client splits its time budget across the resolved
+  addresses, so an unreachable first address leaves time for the next.
+- F-6: the limits of OTLP reset detection are documented.
+- F-7 / F-8: a dead Windows branch in the `sysinfo` backend is removed;
+  the Windows backend makes six kernel32 calls, as now documented.
 
 ### Security
 

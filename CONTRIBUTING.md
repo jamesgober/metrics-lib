@@ -57,7 +57,9 @@ cargo hack test --lib --each-feature
 ```
 
 and checks semver against the last release with
-`cargo semver-checks`.
+`cargo semver-checks`. Locally, cargo-semver-checks 0.47 cannot read the
+rustdoc JSON of the pinned 1.99.0, so run it as
+`cargo +1.95.0 semver-checks` until a newer release supports it.
 
 ## Tests
 

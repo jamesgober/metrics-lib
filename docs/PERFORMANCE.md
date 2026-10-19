@@ -187,7 +187,7 @@ Criterion medians on the reference host (Windows), `system` group of
 | Operation | In-house backend | `sysinfo` 0.36 |
 |---|---|---|
 | `ProcessCollector::collect` (one `process_*` sample) | 0.66 µs | 31 ms |
-| `SystemHealth::update` (host and process) | 0.14 ms | about 32 ms |
+| `SystemHealth::update` (host and process) | 0.14 ms (0.27 ms in the final re-audit, host-dependent) | about 32 ms |
 | `render_core`, 400 series plus `process_*` | 0.15 ms | (plus one sample) |
 
 `sysinfo` scans every process on the host to refresh one; the 2.0.0

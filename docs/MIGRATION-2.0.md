@@ -163,6 +163,22 @@ replaced `memory_gb` with `memory_percent`. `update_interval_ms()` became
 `update_interval() -> Duration`. `SystemSnapshot` reports bytes
 (`memory_total_bytes`, `memory_used_bytes`, `process_memory_bytes`).
 
+Host "used" memory now has one meaning on every platform: memory that
+cannot be given to a new allocation without reclaiming or compressing
+something. The file cache is not counted.
+
+| Platform | "Used" memory |
+|---|---|
+| Linux | `MemTotal - MemAvailable` (`/proc/meminfo`) |
+| Windows | total minus available physical memory (`GlobalMemoryStatusEx`) |
+| macOS | app memory + wired + compressed, Activity Monitor's "Memory Used" |
+| other targets (`sysinfo`) | `sysinfo`'s used memory |
+
+On macOS this is lower than 1.x and `sysinfo` reported: they counted every
+active page, file cache included, plus speculative pages (on a 14 GB CI
+runner, 5.7 GB here against 10.9 GB). Dashboards and health thresholds based
+on macOS memory use may need adjusting.
+
 **Adaptive controls** (feature `sample`). `CircuitBreakerConfig`,
 `SamplingStats`, `BackpressureGuard` and the new `CircuitState` are public.
 `Fixed { rate: 0 }` samples everything instead of panicking.
