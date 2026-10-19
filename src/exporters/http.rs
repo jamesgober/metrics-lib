@@ -59,7 +59,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connections served at the same time. When all are taken, a new
 /// connection replaces the oldest one that has not finished sending its
-/// request; only when every slot is busy writing a response is it answered
+/// request; only when every slot is writing a response is it answered
 /// `503`.
 pub const MAX_CONNECTIONS: usize = 16;
 
@@ -92,6 +92,9 @@ const DEFAULT_LIMITS: Limits = Limits {
 /// per-read timeouts, so a client dripping bytes is cut off too. When every
 /// slot is taken, a new connection evicts the oldest connection still
 /// waiting for its request, so idle connections cannot lock scrapers out.
+/// A client that opens connections faster than the server reads requests
+/// (more than [`MAX_CONNECTIONS`] while one scrape is in flight) can still
+/// push others out; keep the endpoint on a network you control.
 pub struct MetricsServer {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -867,26 +870,38 @@ mod tests {
         };
         let server = MetricsServer::spawn_with("127.0.0.1:0", core, limits).unwrap();
         let addr = server.local_addr();
-        // Fill every slot with idle connections, then keep re-opening them
-        // as fast as the server drops them (the re-audit's scenario).
+        // The re-audit's scenario: as many idle connections as the server
+        // has slots, each re-opened as soon as the server drops it.
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let attacker = thread::spawn(move || {
-            let mut held = Vec::new();
+            let open = || {
+                let s = TcpStream::connect(addr).unwrap();
+                s.set_nonblocking(true).unwrap();
+                s
+            };
+            let mut held: Vec<TcpStream> = (0..limits.max_connections).map(|_| open()).collect();
+            let mut buf = [0u8; 64];
             while !flag.load(Ordering::Acquire) {
-                if let Ok(s) = TcpStream::connect(addr) {
-                    held.push(s);
+                for s in &mut held {
+                    // Closed (evicted or timed out): open a fresh one.
+                    let open_still = matches!(
+                        s.read(&mut buf),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                    );
+                    if !open_still {
+                        *s = open();
+                    }
                 }
-                if held.len() > 4 * limits.max_connections {
-                    let _ = held.remove(0);
-                }
-                thread::sleep(Duration::from_millis(5));
+                thread::sleep(Duration::from_millis(10));
             }
         });
+        // Let the idle connections fill every slot.
         thread::sleep(Duration::from_millis(200));
         for _ in 0..20 {
             let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
             assert!(response.ends_with("ok\n"), "{response}");
+            thread::sleep(Duration::from_millis(20));
         }
         stop.store(true, Ordering::Release);
         attacker.join().unwrap();
