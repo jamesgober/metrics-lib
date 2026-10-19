@@ -42,8 +42,8 @@ use std::io::{self, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -51,13 +51,16 @@ use std::time::{Duration, Instant};
 /// Longer heads are answered `431`.
 pub const MAX_REQUEST_HEAD: usize = 8 * 1024;
 /// Time a client has, from the moment its connection is accepted, to send
-/// the complete request head. Slower clients are answered `408`.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// the complete request head. Slower clients are answered `408`. Scrapers
+/// send their request at once, so this is short.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// Time the server spends writing one response before giving up on a
 /// client that does not read it.
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Connections served at the same time. Further connections are answered
-/// `503` and closed.
+/// Connections served at the same time. When all are taken, a new
+/// connection replaces the oldest one that has not finished sending its
+/// request; only when every slot is busy writing a response is it answered
+/// `503`.
 pub const MAX_CONNECTIONS: usize = 16;
 
 /// Limits of one server; the public constants are the defaults.
@@ -86,7 +89,9 @@ const DEFAULT_LIMITS: Limits = Limits {
 /// cannot delay other scrapes. Each client gets [`REQUEST_TIMEOUT`] from
 /// accept to send its request head (at most [`MAX_REQUEST_HEAD`] bytes) and
 /// [`RESPONSE_TIMEOUT`] to read the response; both are total deadlines, not
-/// per-read timeouts, so a client dripping bytes is cut off too.
+/// per-read timeouts, so a client dripping bytes is cut off too. When every
+/// slot is taken, a new connection evicts the oldest connection still
+/// waiting for its request, so idle connections cannot lock scrapers out.
 pub struct MetricsServer {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -174,7 +179,7 @@ impl std::fmt::Debug for MetricsServer {
     }
 }
 
-/// Decrements the active-connection count when a worker ends.
+/// Decrements a refusal count when a refusing thread ends.
 struct Slot(Arc<AtomicUsize>);
 
 impl Drop for Slot {
@@ -183,8 +188,73 @@ impl Drop for Slot {
     }
 }
 
+/// One served connection: the worker's handle on the shared table.
+struct Conn {
+    id: u64,
+    /// Still reading the request head (may be evicted).
+    reading: bool,
+    /// A second handle on the socket, used to shut down an evicted client.
+    stream: TcpStream,
+}
+
+/// Connections being served, oldest first.
+#[derive(Default)]
+struct Conns {
+    next_id: u64,
+    list: Vec<Conn>,
+}
+
+/// Shared table plus the worker's own id; removes the entry when dropped.
+struct ConnGuard {
+    conns: Arc<Mutex<Conns>>,
+    id: u64,
+}
+
+impl ConnGuard {
+    /// Mark the request head as read: from now on the connection is not
+    /// evicted.
+    fn serving(&self) {
+        let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(c) = conns.list.iter_mut().find(|c| c.id == self.id) {
+            c.reading = false;
+        }
+    }
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        conns.list.retain(|c| c.id != self.id);
+    }
+}
+
+/// Register `stream`, evicting the oldest connection still reading its
+/// request when the table is full. `None` when every slot is serving.
+fn admit(conns: &Arc<Mutex<Conns>>, stream: &TcpStream, max: usize) -> Option<ConnGuard> {
+    let mut table = conns.lock().unwrap_or_else(PoisonError::into_inner);
+    if table.list.len() >= max {
+        let oldest_idle = table.list.iter().position(|c| c.reading)?;
+        let evicted = table.list.remove(oldest_idle);
+        // Its worker sees the read fail and exits; nothing to report to a
+        // client that never sent a request.
+        let _ = evicted.stream.shutdown(Shutdown::Both);
+    }
+    let handle = stream.try_clone().ok()?;
+    let id = table.next_id;
+    table.next_id += 1;
+    table.list.push(Conn {
+        id,
+        reading: true,
+        stream: handle,
+    });
+    Some(ConnGuard {
+        conns: Arc::clone(conns),
+        id,
+    })
+}
+
 fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBool, limits: Limits) {
-    let active = Arc::new(AtomicUsize::new(0));
+    let conns = Arc::new(Mutex::new(Conns::default()));
     let refusing = Arc::new(AtomicUsize::new(0));
     loop {
         let accepted = listener.accept();
@@ -199,10 +269,9 @@ fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBoo
             continue;
         };
         let accepted_at = Instant::now();
-        if active.fetch_add(1, Ordering::AcqRel) >= limits.max_connections {
-            let _ = active.fetch_sub(1, Ordering::AcqRel);
-            // Answer 503 off the accept thread, with its own bound; past it
-            // the connection is just closed.
+        let Some(guard) = admit(&conns, &stream, limits.max_connections) else {
+            // Every slot is writing a response. Answer 503 off the accept
+            // thread, with its own bound; past it the connection is closed.
             if refusing.fetch_add(1, Ordering::AcqRel) < limits.max_connections {
                 let slot = Slot(Arc::clone(&refusing));
                 let _ = thread::Builder::new()
@@ -215,18 +284,16 @@ fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBoo
                 let _ = refusing.fetch_sub(1, Ordering::AcqRel);
             }
             continue;
-        }
-        let slot = Slot(Arc::clone(&active));
+        };
         let core = Arc::clone(core);
         let spawned = thread::Builder::new()
             .name("metrics-lib-http-conn".into())
             .spawn(move || {
-                let _slot = slot;
                 // A failed exchange only affects that client.
-                let _ = serve_connection(stream, &core, accepted_at, limits);
+                let _ = serve_connection(stream, &core, accepted_at, limits, &guard);
             });
         if spawned.is_err() {
-            // The closure (and with it the stream and the slot) was dropped.
+            // The closure (and with it the stream and the guard) was dropped.
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -376,6 +443,7 @@ fn serve_connection(
     core: &MetricsCore,
     accepted_at: Instant,
     limits: Limits,
+    guard: &ConnGuard,
 ) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     let head = match read_head(&mut stream, accepted_at + limits.request_timeout) {
@@ -390,6 +458,7 @@ fn serve_connection(
         }
         Err(HeadError::Io) => return Ok(()),
     };
+    guard.serving();
     let request = parse_head(&head);
     let (status, content_type, body) = match (request.method.as_str(), request.path.as_str()) {
         ("GET" | "HEAD", "/metrics") => {
@@ -610,17 +679,21 @@ fn timed_out() -> io::Error {
 }
 
 /// Connect to the first of `addrs` that accepts before `deadline`, trying
-/// them in order.
+/// them in order, each with an equal share of the time left.
 fn connect_any(addrs: &[SocketAddr], deadline: Instant) -> io::Result<TcpStream> {
     let mut last = io::Error::new(
         io::ErrorKind::NotFound,
         "pushgateway host resolved to nothing",
     );
-    for addr in addrs {
+    for (i, addr) in addrs.iter().enumerate() {
         let Some(left) = remaining(deadline) else {
             return Err(timed_out());
         };
-        match TcpStream::connect_timeout(addr, left) {
+        // Share what is left fairly among the addresses not tried yet, so
+        // one unreachable address (an IPv6 `localhost` with an IPv4-only
+        // gateway) cannot use up the whole budget.
+        let untried = u32::try_from(addrs.len() - i).unwrap_or(u32::MAX);
+        match TcpStream::connect_timeout(addr, left / untried) {
             Ok(stream) => return Ok(stream),
             Err(e) => last = e,
         }
@@ -786,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn test_connections_beyond_the_limit_get_503() {
+    fn test_idle_connections_cannot_lock_scrapers_out_regression_f1() {
         let core = Arc::new(MetricsCore::new());
         let limits = Limits {
             request_timeout: Duration::from_secs(5),
@@ -794,25 +867,63 @@ mod tests {
         };
         let server = MetricsServer::spawn_with("127.0.0.1:0", core, limits).unwrap();
         let addr = server.local_addr();
-        let idle: Vec<TcpStream> = (0..limits.max_connections)
-            .map(|_| TcpStream::connect(addr).unwrap())
-            .collect();
-        // Let the accept thread hand the idle connections to workers.
-        thread::sleep(Duration::from_millis(200));
-        let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
-        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-        drop(idle);
-        // Workers see the closed connections and free their slots.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
-            if response.ends_with("ok\n") {
-                break;
+        // Fill every slot with idle connections, then keep re-opening them
+        // as fast as the server drops them (the re-audit's scenario).
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let attacker = thread::spawn(move || {
+            let mut held = Vec::new();
+            while !flag.load(Ordering::Acquire) {
+                if let Ok(s) = TcpStream::connect(addr) {
+                    held.push(s);
+                }
+                if held.len() > 4 * limits.max_connections {
+                    let _ = held.remove(0);
+                }
+                thread::sleep(Duration::from_millis(5));
             }
-            assert!(Instant::now() < deadline, "slots never freed: {response}");
-            thread::sleep(Duration::from_millis(20));
+        });
+        thread::sleep(Duration::from_millis(200));
+        for _ in 0..20 {
+            let response = get(addr, "GET /health HTTP/1.1\r\n\r\n");
+            assert!(response.ends_with("ok\n"), "{response}");
         }
+        stop.store(true, Ordering::Release);
+        attacker.join().unwrap();
         server.shutdown();
+    }
+
+    #[test]
+    fn test_admission_evicts_the_oldest_idle_connection_and_refuses_when_all_serve() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pair = || {
+            let client = TcpStream::connect(addr).unwrap();
+            let (server_side, _) = listener.accept().unwrap();
+            (client, server_side)
+        };
+        let conns = Arc::new(Mutex::new(Conns::default()));
+        let (mut first_client, first) = pair();
+        let (_c2, second) = pair();
+        let g1 = admit(&conns, &first, 2).unwrap();
+        let g2 = admit(&conns, &second, 2).unwrap();
+        // Full: the next connection evicts the oldest one still reading.
+        let (_c3, third) = pair();
+        let g3 = admit(&conns, &third, 2).unwrap();
+        let mut buf = [0u8; 1];
+        first_client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(first_client.read(&mut buf).unwrap_or(0), 0, "evicted");
+        assert_eq!(conns.lock().unwrap().list.len(), 2);
+        // Once every slot is serving a response, nothing can be evicted.
+        g2.serving();
+        g3.serving();
+        let (_c4, fourth) = pair();
+        assert!(admit(&conns, &fourth, 2).is_none());
+        // Guards remove their entries; the evicted one is already gone.
+        drop((g1, g2, g3));
+        assert_eq!(conns.lock().unwrap().list.len(), 0);
     }
 
     #[test]
@@ -908,6 +1019,23 @@ mod tests {
                 .kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn test_pushgateway_unreachable_first_address_leaves_time_for_the_next_f5() {
+        // 192.0.2.0/24 (TEST-NET-1) is never routed: a connect there either
+        // fails at once or hangs until its timeout. With the budget split,
+        // the second address still gets half of it.
+        let blackhole = SocketAddr::from(([192, 0, 2, 1], 9));
+        let open = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = open.local_addr().unwrap();
+        let start = Instant::now();
+        let stream = connect_any(
+            &[blackhole, addr],
+            Instant::now() + Duration::from_millis(800),
+        );
+        assert_eq!(stream.unwrap().peer_addr().unwrap(), addr);
+        assert!(start.elapsed() < Duration::from_millis(800));
     }
 
     fn get(addr: SocketAddr, request: &str) -> String {
