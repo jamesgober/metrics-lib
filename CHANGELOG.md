@@ -22,6 +22,56 @@
 
 ### Security
 
+## [2.1.0] - 2026-11-04
+
+JSON without serde. The JSON snapshot exporter and the OTLP/HTTP JSON
+encoder needed `serde` and `serde_json`; two new features write the same
+text through [jsonx-lib](https://crates.io/crates/jsonx-lib) 0.5, which has
+no dependencies. Nothing existing changes: the `serde` and `otlp` features,
+the `Serialize` impls and every existing signature are as in 2.0.0, and the
+new features do not enable `serde`.
+
+### Added
+
+- Feature `json`: `exporters::json::to_json` and `to_json_pretty`, and
+  `RegistrySnapshot::to_json` and `to_json_pretty`. They write the snapshot
+  document of `render` / `render_pretty` straight through jsonx-lib's
+  typed writer (no tree, no serde) and return `String`: writing cannot
+  fail. The `exporters::json` module and its snapshot types are available
+  with either `serde` or `json`.
+- Feature `otlp-json` (enables `json`): the OTLP exporter without serde.
+  `OtlpExporter::to_json` and `otlp::to_json` write the OTLP/HTTP JSON
+  request of `render_json` / `render` straight from the model the protobuf
+  encoder uses; `render_protobuf` and the rest of `OtlpExporter` are
+  available too. The serde request model (`OtlpExporter::build`,
+  `ExportMetricsServiceRequest` and its parts) stays with `otlp`.
+- Parity tests: with both writers enabled, `to_json` and `render` (compact
+  and indented) and `OtlpExporter::to_json` and `render_json` produce the
+  same bytes for the same snapshot or request, over every metric kind,
+  labels and help text that need every JSON escape, empty and full
+  histograms and summaries, exemplars, extreme integers, non-finite
+  floats, 20 000 random floats in snapshots plus 400 000 compared with
+  `serde_json` directly, and the float ties described below
+  (`tests/json_parity.rs`, `exporters::otlp::json`,
+  `exporters::json_float`).
+- Benchmark `json_bench`: both writers on a 159-series service registry.
+- `json` and `otlp-json` are part of `exporters-all` and `full`.
+
+### Notes
+
+- The one difference in output: U+2028 and U+2029 in a string (a label
+  value, help text, a resource attribute) are escaped as `\u2028` and
+  `\u2029` by the jsonx-lib writers and written raw by `serde_json`. Both
+  are valid JSON and decode to the same string.
+- Floats are written as `serde_json` 1.0.147 and later write them,
+  including the `+` of a positive exponent (`1e+16`) and the even last
+  digit when a value lies exactly halfway between two shortest texts
+  (`164696460098373.625` is written `164696460098373.62`). jsonx-lib's own
+  float text differs in both, so the exporters lay floats out themselves.
+  `serde_json` up to 1.0.146 wrote `1e16`.
+- `jsonx-lib` is a private dependency: none of its types appear in the
+  API (see `docs/STABILITY.md`).
+
 ## [2.0.0] - 2026-10-19
 
 A correctness release. The 2026-10-13 audit found bugs that 1.0 had frozen
@@ -1363,7 +1413,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/jamesgober/metrics-lib/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/jamesgober/metrics-lib/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/jamesgober/metrics-lib/compare/v0.9.5...v1.0.0
 [0.9.5]: https://github.com/jamesgober/metrics-lib/compare/v0.9.4...v0.9.5
