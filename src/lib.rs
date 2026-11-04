@@ -82,6 +82,14 @@
 //! they were measured on.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// The crate overview links every metric type. In a build without the
+// optional `meter`, `histogram`, or `sample` features those types do not
+// exist, so the links cannot resolve; docs.rs and the all-features doc check
+// build with every type and still catch a link that is really broken.
+#![cfg_attr(
+    not(all(feature = "meter", feature = "histogram", feature = "sample")),
+    allow(rustdoc::broken_intra_doc_links)
+)]
 // `unsafe` is denied everywhere except the two FFI modules that read process
 // and host statistics from the OS (`src/system/windows.rs`,
 // `src/system/macos.rs`). Every block there has a `SAFETY` comment and the

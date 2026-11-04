@@ -57,6 +57,13 @@ new features do not enable `serde`.
 - Benchmark `json_bench`: both writers on a 159-series service registry.
 - `json` and `otlp-json` are part of `exporters-all` and `full`.
 
+### Fixed
+
+- `cargo doc` with the default features (or any set without `meter`,
+  `histogram`, and `sample`) failed under `-D warnings` on links to types
+  those features add. The links are allowed to stay unresolved in such
+  builds; the all-features doc check still catches a broken one.
+
 ### Notes
 
 - The one difference in output: U+2028 and U+2029 in a string (a label
