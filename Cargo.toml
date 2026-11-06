@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "metrics-lib"
-version = "2.1.0"
+version = "2.1.1"
 
 # Minimum Supported Rust Version (MSRV). Raising it is a MAJOR change.
 rust-version = "1.85"
@@ -40,6 +40,7 @@ include = [
     "/docs/*.md",
     "/docs/release/v2.0.0.md",
     "/docs/release/v2.1.0.md",
+    "/docs/release/v2.1.1.md",
     "/README.md",
     "/CHANGELOG.md",
     "/LICENSE-APACHE",
@@ -150,7 +151,7 @@ serde_json = { version = "1.0.120", optional = true }
 # tree in between. No dependencies of its own, MSRV 1.85, no `unsafe`. Its
 # types stay out of this crate's public API, so a 0.x bump of it is not a
 # breaking change here. Default features off: only `String` output is used.
-jsonx-lib = { version = "0.5.0", default-features = false, optional = true }
+jsonx-lib = { version = "0.5.1", default-features = false, optional = true }
 # Optional (feature `tracing`). Span-wrapped timing and exemplar helpers.
 tracing = { version = "0.1.40", default-features = false, features = ["std"], optional = true }
 # Optional (feature `metrics-rs`). The `metrics` facade; implementing its

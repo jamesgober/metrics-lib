@@ -685,6 +685,8 @@ mod doc_tests {
     struct ReleaseNotes;
     #[doc = include_str!("../docs/release/v2.1.0.md")]
     struct ReleaseNotes2_1;
+    #[doc = include_str!("../docs/release/v2.1.1.md")]
+    struct ReleaseNotes2_1_1;
 }
 
 #[cfg(test)]

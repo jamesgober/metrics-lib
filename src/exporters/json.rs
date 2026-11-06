@@ -69,6 +69,8 @@ use crate::{LabelSet, MetricKind, Registry, Unit};
 use serde::{Serialize, Serializer};
 
 #[cfg(feature = "json")]
+use crate::exporters::json_float;
+#[cfg(feature = "json")]
 mod write;
 
 /// Version of the JSON shape. Bumped on incompatible changes (1.x wrote
@@ -317,14 +319,19 @@ impl RegistrySnapshot {
     /// ```
     #[must_use]
     pub fn to_json(&self) -> String {
-        jsonx_lib::to_string(&write::Doc(self))
+        let mut out = String::with_capacity(write::estimated_len(self));
+        jsonx_lib::write_value_with(&mut out, &write::Doc(self), json_float::COMPACT);
+        out
     }
 
     /// Like [`to_json`](Self::to_json) but indented: two spaces per level,
     /// as `serde_json::to_string_pretty` writes it.
     #[must_use]
     pub fn to_json_pretty(&self) -> String {
-        jsonx_lib::to_string_pretty(&write::Doc(self))
+        // Indentation and line breaks about double the compact length.
+        let mut out = String::with_capacity(write::estimated_len(self).saturating_mul(2));
+        jsonx_lib::write_value_with(&mut out, &write::Doc(self), json_float::PRETTY);
+        out
     }
 }
 

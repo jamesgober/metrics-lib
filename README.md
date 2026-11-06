@@ -226,7 +226,7 @@ Hold handles on hot paths: a lookup costs a shard read lock and a hash of the na
 
 ## **Status: Stable**
 
-**Current Version:** `2.1.0`, which adds JSON and OTLP/JSON exporters that do not need serde (features `json` and `otlp-json`). 2.0.0 fixed the correctness problems found in the 2026-10-13 audit; upgrading from 1.x: [`docs/MIGRATION-2.0.md`](docs/MIGRATION-2.0.md).
+**Current Version:** `2.1.1`. 2.1 added JSON and OTLP/JSON exporters that do not need serde (features `json` and `otlp-json`); 2.1.1 makes the JSON snapshot exporter faster than its serde_json counterpart. 2.0.0 fixed the correctness problems found in the 2026-10-13 audit; upgrading from 1.x: [`docs/MIGRATION-2.0.md`](docs/MIGRATION-2.0.md).
 
 **API stability**: the 2.x contract is in [`docs/STABILITY.md`](docs/STABILITY.md). Public enums and option structs are `#[non_exhaustive]`, so additions ship in minor releases.
 
