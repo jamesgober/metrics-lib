@@ -2,13 +2,13 @@
 //!
 //! Every function here writes exactly what the `serde` derives on the
 //! snapshot types write through `serde_json`: the same keys in the same
-//! order, the same omitted fields, the same tags, the same float text
-//! (`json_float`) and the same text for non-finite floats. The parity tests at the end compare the two byte for
-//! byte. jsonx-lib's types stay private to this module: [`Doc`] is the only
+//! order, the same omitted fields, the same tags, the same float text (the
+//! document is written in `json_float`'s formats) and the same text for
+//! non-finite floats. The parity tests compare the two byte for byte.
+//! jsonx-lib's types stay private to this module: [`Doc`] is the only
 //! `ToJson` type, and it is not public.
 
 use super::{CardinalitySnapshot, JsonSeries, JsonValue, QuantileValue, RegistrySnapshot};
-use crate::exporters::json_float;
 use crate::{LabelSet, MetricKind, Unit};
 use jsonx_lib::{ObjectWriter, ToJson, ValueWriter, Written};
 use std::time::Duration;
@@ -31,6 +31,30 @@ impl ToJson for Doc<'_> {
             o.member_with("cardinality", |w| write_cardinality(w, &snap.cardinality));
         })
     }
+}
+
+/// About how long the compact text of `snap` is, on the generous side, so
+/// the output is allocated once instead of growing by doubling (about 13
+/// reallocations and copies for a 30 KiB snapshot). Cheap: no label is
+/// read, only counted. An underestimate costs one growth, an overestimate
+/// spare capacity; neither changes the text.
+pub(super) fn estimated_len(snap: &RegistrySnapshot) -> usize {
+    snap.series.iter().fold(256, |len, series| {
+        let fixed = 80 + series.name.len() + 40 * series.labels.len();
+        let help = series.help.as_ref().map_or(0, |help| help.len() + 10);
+        let value = match &series.value {
+            #[cfg(feature = "histogram")]
+            JsonValue::Histogram(h) => 112 + 40 * h.buckets.len() + 160 * h.exemplars.len(),
+            #[cfg(feature = "histogram")]
+            JsonValue::Summary { quantiles, .. } => 64 + 48 * quantiles.len(),
+            #[cfg(feature = "timer")]
+            JsonValue::Timer(_) => 320,
+            #[cfg(feature = "meter")]
+            JsonValue::Rate(_) => 320,
+            _ => 48,
+        };
+        len.saturating_add(fixed + help + value)
+    })
 }
 
 fn write_series(out: ValueWriter<'_>, series: &JsonSeries) -> Written {
@@ -111,7 +135,7 @@ fn duration_members(o: &mut ObjectWriter<'_>, d: Duration) {
 /// A float that JSON can hold as a number, or `"NaN"`, `"+Inf"`, `"-Inf"`.
 fn finite_or_string(out: ValueWriter<'_>, v: f64) -> Written {
     if v.is_finite() {
-        json_float::f64(out, v)
+        out.f64(v)
     } else if v.is_nan() {
         out.str("NaN")
     } else if v > 0.0 {
@@ -145,17 +169,17 @@ fn write_value(out: ValueWriter<'_>, value: &JsonValue) -> Written {
             o.member_with("min", |w| write_duration(w, t.min));
             o.member_with("max", |w| write_duration(w, t.max));
             o.member_with("age", |w| write_duration(w, t.age));
-            json_float::member(o, "rate_per_second", t.rate_per_second);
+            o.member("rate_per_second", &t.rate_per_second);
         }
         #[cfg(feature = "meter")]
         JsonValue::Rate(r) => {
             o.member("type", "rate");
             o.member("total_events", &r.total_events);
-            json_float::member(o, "rate", r.rate);
-            json_float::member(o, "per_second", r.per_second);
-            json_float::member(o, "per_minute", r.per_minute);
-            json_float::member(o, "per_hour", r.per_hour);
-            json_float::member(o, "average_rate", r.average_rate);
+            o.member("rate", &r.rate);
+            o.member("per_second", &r.per_second);
+            o.member("per_minute", &r.per_minute);
+            o.member("per_hour", &r.per_hour);
+            o.member("average_rate", &r.average_rate);
             o.member_with("age", |w| write_duration(w, r.age));
             o.member_with("window", |w| write_duration(w, r.window));
         }
@@ -171,7 +195,7 @@ fn write_value(out: ValueWriter<'_>, value: &JsonValue) -> Written {
                                 // bound that is not finite is the `+Inf`
                                 // bucket.
                                 if bucket.upper_bound.is_finite() {
-                                    json_float::member(o, "upper_bound", bucket.upper_bound);
+                                    o.member("upper_bound", &bucket.upper_bound);
                                 } else {
                                     o.member("upper_bound", "+Inf");
                                 }
@@ -181,7 +205,7 @@ fn write_value(out: ValueWriter<'_>, value: &JsonValue) -> Written {
                     }
                 })
             });
-            json_float::member(o, "sum", h.sum);
+            o.member("sum", &h.sum);
             o.member("count", &h.count);
             o.member_with("age", |w| write_duration(w, h.age));
             if !h.exemplars.is_empty() {
@@ -192,8 +216,8 @@ fn write_value(out: ValueWriter<'_>, value: &JsonValue) -> Written {
                                 Some(e) => a.item_with(|w| {
                                     w.object(|o| {
                                         o.member_with("labels", |w| write_labels(w, &e.labels));
-                                        json_float::member(o, "value", e.value);
-                                        json_float::member(o, "timestamp", e.timestamp);
+                                        o.member("value", &e.value);
+                                        o.member("timestamp", &e.timestamp);
                                     })
                                 }),
                                 // `()` writes `null`.
@@ -212,7 +236,7 @@ fn write_value(out: ValueWriter<'_>, value: &JsonValue) -> Written {
         } => {
             o.member("type", "summary");
             o.member("count", count);
-            json_float::member(o, "sum", *sum);
+            o.member("sum", sum);
             o.member_with("quantiles", |w| {
                 w.array(|a| {
                     for q in quantiles {
@@ -227,7 +251,7 @@ fn write_value(out: ValueWriter<'_>, value: &JsonValue) -> Written {
 #[cfg_attr(not(feature = "histogram"), allow(dead_code))]
 fn write_quantile(out: ValueWriter<'_>, q: &QuantileValue) -> Written {
     out.object(|o| {
-        json_float::member(o, "quantile", q.quantile);
+        o.member("quantile", &q.quantile);
         o.member_with("value", |w| finite_or_string(w, q.value));
     })
 }
@@ -277,6 +301,42 @@ mod tests {
         assert!(!text.contains("null"), "{text}");
         let pretty = crate::exporters::json::to_json_pretty(&r);
         assert!(pretty.contains("\n  \"series\": [\n"), "{pretty}");
+    }
+
+    /// The estimate covers ordinary snapshots, so they are allocated once:
+    /// short labels on every kind, compact and indented.
+    #[cfg(all(
+        feature = "count",
+        feature = "gauge",
+        feature = "timer",
+        feature = "meter",
+        feature = "histogram"
+    ))]
+    #[test]
+    fn test_estimated_len_covers_ordinary_snapshots() {
+        let r = Registry::new();
+        r.describe_counter("http_requests", "Requests served", crate::Unit::None)
+            .unwrap();
+        for status in ["200", "404", "500"] {
+            let labels = crate::LabelSet::from([
+                ("method", "GET"),
+                ("route", "/api/users/:id"),
+                ("status", status),
+            ]);
+            r.counter_with("http_requests", &labels).add(17);
+        }
+        r.gauge("pool_in_use").set(0.1 + 0.2);
+        r.timer("db_query").record_ns(37_000);
+        r.rate_meter("events").tick_n(12_345);
+        let h = r.histogram_with("latency", &crate::LabelSet::from([("route", "/")]));
+        h.observe(0.37);
+        let s = r.summary("payload_size");
+        s.observe(3.5);
+        let snap = snapshot(&r);
+        let estimate = super::estimated_len(&snap);
+        assert!(estimate >= snap.to_json().len(), "{estimate}");
+        assert!(estimate * 2 >= snap.to_json_pretty().len(), "{estimate}");
+        assert!(estimate <= 3 * snap.to_json().len(), "{estimate}");
     }
 
     #[test]

@@ -22,6 +22,35 @@
 
 ### Security
 
+## [2.1.1] - 2026-11-05
+
+The JSON snapshot exporter on jsonx-lib (feature `json`) is now faster than
+its `serde_json` counterpart: writing a prepared 159-series snapshot takes
+0.65 to 0.77 of `serde_json`'s time (2.1.0: 2.1 to 2.4 times). The text
+is unchanged, byte for byte.
+
+### Changed
+
+- Requires jsonx-lib 0.5.1. Floats are written by jsonx-lib's own
+  formatter in its `serde_json`-compatible float text
+  (`Format::exponent_plus` and `Format::even_ties`); the exporter's own
+  float re-layout (`{:e}`, digit shuffling, tie breaking, and a number
+  token check for each float) is gone. The OTLP/JSON request (feature
+  `otlp-json`) is written the same way.
+- `to_json` and `to_json_pretty` allocate the output once, from an estimate
+  of the snapshot's length (series, label count, histogram buckets,
+  quantiles), instead of growing it by doubling.
+
+### Notes
+
+- Same output: the parity tests (`tests/json_parity.rs`, 400 000 floats
+  against `serde_json` directly, the OTLP request) pass unchanged.
+- Security: no change. Escaping is jsonx-lib's, as in 2.1.0; float text
+  is a valid JSON number by construction there and still compared with
+  `serde_json`'s; the size estimate only sets a capacity (bounded by the
+  series count, which the registry's cardinality cap bounds) and never
+  truncates.
+
 ## [2.1.0] - 2026-11-04
 
 JSON without serde. The JSON snapshot exporter and the OTLP/HTTP JSON
@@ -1420,7 +1449,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/jamesgober/metrics-lib/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/jamesgober/metrics-lib/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/jamesgober/metrics-lib/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/jamesgober/metrics-lib/compare/v0.9.5...v1.0.0

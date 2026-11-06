@@ -183,25 +183,30 @@ one read of the sketch) takes 0.75 µs.
 `json_bench` (added in 2.1.0): a typical HTTP service registry of 159
 series (120 labeled request counters, 10 latency histograms with the
 default bounds, 20 gauges, 5 timers, 2 rate meters, 2 summaries; about
-31 KB of compact JSON). Criterion medians, `--measurement-time 6`, two
-runs on the reference host while it was running other builds, rustc
-1.99.0, 2026-11-04:
+31 KB of compact JSON). Criterion medians, `--measurement-time 3`,
+2.1.0 (on jsonx-lib 0.5.0) and 2.1.1 (on 0.5.1) run alternately, the best
+of three or four runs each, on the reference host while it was running
+other work (so `serde_json`'s times are higher than in quiet runs), rustc
+1.99.0, 2026-11-05:
 
-| Operation | `serde_json` (`serde`, `otlp`) | jsonx-lib (`json`, `otlp-json`) |
-|---|---|---|
-| Write a prepared snapshot, compact | 29-31 µs | 61-72 µs |
-| Write a prepared snapshot, indented | 54-55 µs | 68-69 µs |
-| Registry to text (`render` / `to_json`, snapshot included) | 83-86 µs | 105-113 µs |
-| OTLP/HTTP JSON request (`render_json` / `to_json`) | 329-411 µs | 167-169 µs |
+| Operation | `serde_json` (`serde`, `otlp`) | jsonx-lib, 2.1.1 (`json`, `otlp-json`) | jsonx-lib, 2.1.0 |
+|---|---|---|---|
+| Write a prepared snapshot, compact | 39-40 µs | 26 µs | 86 µs |
+| Write a prepared snapshot, indented | 72-75 µs | 43 µs | 103 µs |
+| Registry to text (`render` / `to_json`, snapshot included) | 98-116 µs | 98 µs | 153 µs |
+| OTLP/HTTP JSON request (`render_json` / `to_json`) | 476-494 µs | 177 µs | 236 µs |
 
-The snapshot document is about 2 times slower to write through jsonx-lib
-than through `serde_json` (1.3 times end to end, where building the
-snapshot dominates). Part of it is the float text: `serde_json` formats
-floats with `zmij`, the jsonx-lib path with `core`'s formatter plus the
-layout that matches `serde_json`'s text (see `exporters::json_float`).
-The OTLP request is about 2 times faster, because `to_json` writes
-straight from the internal model and skips building the serde request
-model (one `String` per integer, a `Vec` per attribute list).
+Since 2.1.1 the snapshot is written in about two thirds of `serde_json`'s
+time (a best-of harness alternating the two builds puts it at 0.75-0.77,
+against 2.2-2.4 for 2.1.0); building the snapshot is most of the
+end-to-end time. 2.1.0 lost mostly on floats (`core`'s formatter plus a
+re-layout to `serde_json`'s text, about 120 ns a float against 14 ns) and
+on jsonx-lib 0.5.0's writer calls; jsonx-lib 0.5.1 formats floats itself,
+in `serde_json`'s text when asked (`exporters::json_float`), and inlines
+its writer. The OTLP request is about 2.7 times faster than `serde_json`'s,
+because `to_json` writes straight from the internal model and skips
+building the serde request model (one `String` per integer, a `Vec` per
+attribute list).
 
 ### Process and host metrics by platform
 

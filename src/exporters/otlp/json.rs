@@ -5,9 +5,9 @@
 //! and writes exactly what the serde request model (`ExportMetricsServiceRequest`
 //! and friends, feature `otlp`) writes through `serde_json`: camelCase keys
 //! in the same order, 64-bit integers as strings, enums as integers, empty
-//! `description`/`unit` and a missing histogram `sum` left out, floats as
-//! `json_float` writes them. The parity
-//! test at the end compares the two byte for byte.
+//! `description`/`unit` and a missing histogram `sum` left out, floats in
+//! `serde_json`'s text (the request is written in `json_float::COMPACT`).
+//! The parity test at the end compares the two byte for byte.
 
 use super::{DataModel, HistogramPoint, MetricModel, Number, NumberPoint, SummaryPoint};
 use crate::LabelSet;
@@ -20,11 +20,14 @@ pub(super) fn write_request(
     service_name: &str,
     resource: &LabelSet,
 ) -> String {
-    jsonx_lib::to_string(&Request {
-        model,
-        service_name,
-        resource,
-    })
+    jsonx_lib::to_string_with(
+        &Request {
+            model,
+            service_name,
+            resource,
+        },
+        json_float::COMPACT,
+    )
 }
 
 struct Request<'a> {
@@ -206,7 +209,7 @@ fn number_points(o: &mut ObjectWriter<'_>, points: &[NumberPoint]) {
                                 let text = v.to_string();
                                 o.member("asInt", &text);
                             }
-                            Number::Double(v) => json_float::member(o, "asDouble", v),
+                            Number::Double(v) => o.member("asDouble", &v),
                         }
                     })
                 });
@@ -221,7 +224,7 @@ fn histogram_point(out: ValueWriter<'_>, p: &HistogramPoint) -> Written {
         times(o, p.start, p.time);
         u64_string(o, "count", p.count);
         if let Some(sum) = p.sum {
-            json_float::member(o, "sum", sum);
+            o.member("sum", &sum);
         }
         o.member_with("bucketCounts", |w| {
             w.array(|a| {
@@ -234,7 +237,7 @@ fn histogram_point(out: ValueWriter<'_>, p: &HistogramPoint) -> Written {
         o.member_with("explicitBounds", |w| {
             w.array(|a| {
                 for bound in &p.explicit_bounds {
-                    a.item_with(|w| json_float::f64(w, *bound));
+                    a.item(bound);
                 }
             })
         });
@@ -246,14 +249,14 @@ fn summary_point(out: ValueWriter<'_>, p: &SummaryPoint) -> Written {
         attributes(o, &p.attributes);
         times(o, p.start, p.time);
         u64_string(o, "count", p.count);
-        json_float::member(o, "sum", p.sum);
+        o.member("sum", &p.sum);
         o.member_with("quantileValues", |w| {
             w.array(|a| {
                 for (quantile, value) in &p.quantiles {
                     a.item_with(|w| {
                         w.object(|o| {
-                            json_float::member(o, "quantile", *quantile);
-                            json_float::member(o, "value", *value);
+                            o.member("quantile", quantile);
+                            o.member("value", value);
                         })
                     });
                 }
