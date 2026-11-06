@@ -1,10 +1,27 @@
-//! OpenTelemetry (OTLP) metrics exporter (feature `otlp`).
+//! OpenTelemetry (OTLP) metrics exporter (features `otlp` and `otlp-json`).
 //!
 //! Builds an `ExportMetricsServiceRequest` from the registry and encodes it
-//! as OTLP/HTTP **JSON** ([`OtlpExporter::render_json`]) or **protobuf**
+//! as OTLP/HTTP **JSON** or **protobuf**
 //! ([`OtlpExporter::render_protobuf`], hand-encoded, no extra dependencies).
 //! Transport is up to you: POST the body to the collector's `/v1/metrics`
 //! with [`JSON_CONTENT_TYPE`] or [`PROTOBUF_CONTENT_TYPE`].
+//!
+//! The JSON comes two ways, and they write the same text:
+//!
+//! - feature `otlp` (which enables `serde`): `OtlpExporter::render_json`
+//!   and `render` serialise the request model (`OtlpExporter::build`, the
+//!   `ExportMetricsServiceRequest` types) with `serde_json`;
+//! - feature `otlp-json`, which does not need serde: `OtlpExporter::to_json`
+//!   and `to_json` write the request through jsonx-lib's typed writer, with
+//!   no model or tree in between, and cannot fail. The serde request model
+//!   is not part of this feature.
+//!
+//! The one difference between the two: U+2028 and U+2029 in a string (a
+//! label value, a resource attribute, help text) are escaped as `\u2028`
+//! and `\u2029` by `to_json` and written raw by `render_json`. Both are
+//! valid JSON and decode to the same string. As in
+//! [`exporters::json`](crate::exporters::json), the float text is that of
+//! `serde_json` 1.0.147 and later.
 //!
 //! # Mapping
 //!
@@ -55,7 +72,7 @@
 //! # Example
 //!
 //! ```
-//! # #[cfg(feature = "count")]
+//! # #[cfg(all(feature = "count", feature = "otlp"))]
 //! # {
 //! use metrics_lib::{LabelSet, MetricsCore};
 //! use metrics_lib::exporters::otlp::{OtlpExporter, Temporality};
@@ -72,11 +89,29 @@
 //! assert!(!protobuf.is_empty());
 //! # }
 //! ```
+//!
+//! Without serde (feature `otlp-json`):
+//!
+//! ```
+//! # #[cfg(all(feature = "count", feature = "json"))]
+//! # {
+//! use metrics_lib::MetricsCore;
+//! use metrics_lib::exporters::otlp::OtlpExporter;
+//!
+//! let core = MetricsCore::new();
+//! core.counter("requests").add(3);
+//! let json: String = OtlpExporter::new("checkout").to_json(core.registry());
+//! assert!(json.contains(r#""asInt":"3""#));
+//! # }
+//! ```
 
+#[cfg(feature = "json")]
+mod json;
 mod proto;
 
 use crate::registry::{FamilySnapshot, Handle};
 use crate::{LabelSet, MetricKind, Registry};
+#[cfg(feature = "otlp")]
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
@@ -178,24 +213,59 @@ impl OtlpExporter {
         self.temporality
     }
 
-    /// Build the request in the serde model used for JSON.
+    /// Build the request in the serde model used for JSON (feature `otlp`).
     ///
     /// In delta mode this advances the exporter's baselines.
+    #[cfg(feature = "otlp")]
     #[must_use]
     pub fn build(&self, registry: &Registry) -> ExportMetricsServiceRequest {
         let model = self.model(registry);
         to_json_model(&model, &self.service_name, &self.resource)
     }
 
-    /// Encode the request as OTLP/HTTP JSON.
+    /// Encode the request as OTLP/HTTP JSON (feature `otlp`).
+    ///
+    /// In delta mode this advances the exporter's baselines. `to_json`
+    /// (feature `otlp-json`) writes the same text without serde.
     ///
     /// # Errors
     ///
     /// Returns the `serde_json` error if serialisation fails; the request
     /// holds only strings, integers and finite floats, so this does not
     /// happen in practice.
+    #[cfg(feature = "otlp")]
     pub fn render_json(&self, registry: &Registry) -> serde_json::Result<String> {
         serde_json::to_string(&self.build(registry))
+    }
+
+    /// Encode the request as OTLP/HTTP JSON, written by jsonx-lib (feature
+    /// `otlp-json`, which does not need serde).
+    ///
+    /// In delta mode this advances the exporter's baselines. The text is the
+    /// same as `render_json` writes (see the [module documentation](self)
+    /// for the one difference, U+2028 and U+2029 in strings), and writing
+    /// cannot fail.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "gauge")]
+    /// # {
+    /// use metrics_lib::Registry;
+    /// use metrics_lib::exporters::otlp::OtlpExporter;
+    ///
+    /// let registry = Registry::new();
+    /// registry.gauge("temp").set(21.5);
+    /// let body = OtlpExporter::new("svc").to_json(&registry);
+    /// assert!(body.contains(r#""gauge":{"dataPoints":[{"attributes":[],"#));
+    /// assert!(body.contains(r#""asDouble":21.5}"#));
+    /// # }
+    /// ```
+    #[cfg(feature = "json")]
+    #[must_use]
+    pub fn to_json(&self, registry: &Registry) -> String {
+        let model = self.model(registry);
+        json::write_request(&model, &self.service_name, &self.resource)
     }
 
     /// Encode the request as OTLP protobuf (`ExportMetricsServiceRequest`).
@@ -247,13 +317,22 @@ impl std::fmt::Debug for OtlpExporter {
     }
 }
 
-/// One-shot cumulative OTLP/HTTP JSON payload.
+/// One-shot cumulative OTLP/HTTP JSON payload (feature `otlp`).
 ///
 /// # Errors
 ///
 /// See [`OtlpExporter::render_json`].
+#[cfg(feature = "otlp")]
 pub fn render(registry: &Registry, service_name: impl Into<String>) -> serde_json::Result<String> {
     OtlpExporter::new(service_name).render_json(registry)
+}
+
+/// One-shot cumulative OTLP/HTTP JSON payload, written by jsonx-lib
+/// (feature `otlp-json`); the same text as `render`.
+#[cfg(feature = "json")]
+#[must_use]
+pub fn to_json(registry: &Registry, service_name: impl Into<String>) -> String {
+    OtlpExporter::new(service_name).to_json(registry)
 }
 
 /// One-shot cumulative OTLP protobuf payload.
@@ -687,10 +766,12 @@ fn saturating_i64(v: u64) -> i64 {
 
 // ---------------------------------------------------------------------------
 // JSON model (OTLP/HTTP JSON encoding: camelCase names, 64-bit integers as
-// strings, enums as integers).
+// strings, enums as integers), feature `otlp`. `otlp/json.rs` writes the
+// same encoding without it (feature `otlp-json`).
 // ---------------------------------------------------------------------------
 
 /// `ExportMetricsServiceRequest` in the OTLP/HTTP JSON encoding.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -700,6 +781,7 @@ pub struct ExportMetricsServiceRequest {
 }
 
 /// `ResourceMetrics`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -711,6 +793,7 @@ pub struct ResourceMetrics {
 }
 
 /// `Resource`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -720,6 +803,7 @@ pub struct Resource {
 }
 
 /// `ScopeMetrics`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -731,6 +815,7 @@ pub struct ScopeMetrics {
 }
 
 /// `InstrumentationScope`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -742,6 +827,7 @@ pub struct InstrumentationScope {
 }
 
 /// `Metric`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -760,6 +846,7 @@ pub struct Metric {
 }
 
 /// The `data` oneof of `Metric`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -800,6 +887,7 @@ pub enum MetricData {
 }
 
 /// `NumberDataPoint`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -816,6 +904,7 @@ pub struct NumberDataPoint {
 }
 
 /// The `value` oneof of `NumberDataPoint`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub enum NumberValue {
@@ -828,6 +917,7 @@ pub enum NumberValue {
 }
 
 /// `HistogramDataPoint`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -850,6 +940,7 @@ pub struct HistogramDataPoint {
 }
 
 /// `SummaryDataPoint`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -869,6 +960,7 @@ pub struct SummaryDataPoint {
 }
 
 /// `SummaryDataPoint.ValueAtQuantile`.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Copy, Serialize)]
 #[non_exhaustive]
 pub struct ValueAtQuantile {
@@ -879,6 +971,7 @@ pub struct ValueAtQuantile {
 }
 
 /// `KeyValue` with a string value.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KeyValue {
@@ -889,6 +982,7 @@ pub struct KeyValue {
 }
 
 /// `AnyValue` (only `stringValue` is produced).
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub enum AnyValue {
@@ -897,6 +991,7 @@ pub enum AnyValue {
     StringValue(String),
 }
 
+#[cfg(feature = "otlp")]
 fn attributes(labels: &LabelSet) -> Vec<KeyValue> {
     labels
         .iter()
@@ -907,6 +1002,7 @@ fn attributes(labels: &LabelSet) -> Vec<KeyValue> {
         .collect()
 }
 
+#[cfg(feature = "otlp")]
 fn to_json_model(
     model: &[MetricModel],
     service_name: &str,
@@ -997,6 +1093,7 @@ fn to_json_model(
     }
 }
 
+#[cfg(feature = "otlp")]
 fn number_point(p: &NumberPoint) -> NumberDataPoint {
     NumberDataPoint {
         attributes: attributes(&p.attributes),
@@ -1010,7 +1107,7 @@ fn number_point(p: &NumberPoint) -> NumberDataPoint {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "count", feature = "gauge"))]
+#[cfg(all(feature = "count", feature = "gauge", feature = "otlp"))]
 mod tests {
     use super::proto::decode::{Value, bytes, fields, one, string};
     use super::*;

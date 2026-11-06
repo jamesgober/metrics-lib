@@ -57,6 +57,7 @@
 ### **Export**
 - **Prometheus and OpenMetrics text** - always available, with exemplars in OpenMetrics.
 - **OTLP** (JSON and protobuf, cumulative or delta), **StatsD** (deltas), **JSON** snapshots.
+- **JSON without serde** - features `json` and `otlp-json` write the same JSON and OTLP/JSON text through `jsonx-lib`, which has no dependencies.
 - **HTTP** - a dependency-free `/metrics` server and a Pushgateway client.
 - **Process metrics** - the standard `process_*` series on Linux, macOS and Windows.
 
@@ -93,8 +94,10 @@ metrics-lib = { version = "2", features = [
 | `sample` | adaptive sampler, circuit breaker, backpressure | |
 | `async` | async timing, batching, Tokio runtime metrics | |
 | `serde` | JSON exporter, `Serialize` snapshots | |
+| `json` | JSON exporter without serde, written by `jsonx-lib` (same text as `serde`'s) | |
 | `statsd` | StatsD exporter | |
 | `otlp` | OTLP exporter (JSON and protobuf) | |
+| `otlp-json` | OTLP exporter without serde: JSON written by `jsonx-lib`, protobuf | |
 | `http` | `MetricsServer`, `Pushgateway` | |
 | `tracing` | span timing and exemplars | |
 | `metrics-rs` | `metrics` crate recorder | |
@@ -223,7 +226,7 @@ Hold handles on hot paths: a lookup costs a shard read lock and a hash of the na
 
 ## **Status: Stable**
 
-**Current Version:** `2.0.0`, a major release that fixes the correctness problems found in the 2026-10-13 audit. Upgrading from 1.x: [`docs/MIGRATION-2.0.md`](docs/MIGRATION-2.0.md).
+**Current Version:** `2.1.0`, which adds JSON and OTLP/JSON exporters that do not need serde (features `json` and `otlp-json`). 2.0.0 fixed the correctness problems found in the 2026-10-13 audit; upgrading from 1.x: [`docs/MIGRATION-2.0.md`](docs/MIGRATION-2.0.md).
 
 **API stability**: the 2.x contract is in [`docs/STABILITY.md`](docs/STABILITY.md). Public enums and option structs are `#[non_exhaustive]`, so additions ship in minor releases.
 

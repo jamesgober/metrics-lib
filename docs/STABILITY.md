@@ -57,6 +57,10 @@ Everything public, in particular:
   system backend (FreeBSD and the other BSDs, …), as long as
   the MSRV holds.
 - Items hidden from the documentation and anything named `__*`.
+- The `jsonx-lib` version behind the `json` and `otlp-json` features. It is
+  a private dependency: none of its types or traits appear in this crate's
+  API, so a new `jsonx-lib` line can be taken in a minor release. The text
+  it writes is covered, as the output of the exporters.
 
 ## Behavioural contracts
 

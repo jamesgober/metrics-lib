@@ -1,18 +1,38 @@
-//! JSON snapshot exporter (feature `serde`).
+//! JSON snapshot exporter (features `serde` and `json`).
 //!
-//! [`snapshot`] captures every series as a [`RegistrySnapshot`], which
-//! implements `serde::Serialize`, so it can go through any serde format;
-//! [`render`] and [`render_pretty`] produce JSON text directly. Useful for
-//! `/debug/metrics` endpoints, periodic dumps and test fixtures.
+//! [`snapshot`] captures every series as a [`RegistrySnapshot`]. Useful for
+//! `/debug/metrics` endpoints, periodic dumps and test fixtures. Two ways
+//! write it as JSON text, and they write the same text:
+//!
+//! - feature `serde`: the snapshot implements `serde::Serialize`, so it can
+//!   go through any serde format, and `render` and `render_pretty` produce
+//!   JSON with `serde_json`;
+//! - feature `json`, which does not need serde: `to_json` and
+//!   `to_json_pretty` (and [`RegistrySnapshot`]'s methods of the same names)
+//!   write the document through jsonx-lib's typed writer, with no
+//!   intermediate tree, and cannot fail.
+//!
+//! For the same snapshot both produce the same bytes (key order, float and
+//! integer text, escaping, omitted fields, indentation), with one
+//! exception: U+2028 and U+2029 in a string (possible in label values and
+//! help text) are escaped as `\u2028` and `\u2029` by `to_json` and written
+//! raw by `render`. Both forms are valid JSON and decode to the same string;
+//! the escaped form is also safe to embed in JavaScript before ES2019.
+//!
+//! The float text is that of `serde_json` 1.0.147 and later (checked
+//! against 1.0.154). Versions up to 1.0.146 wrote a positive exponent
+//! without its sign (`1e16` where later versions and `to_json` write
+//! `1e+16`), so with those `render` differs there too.
 //!
 //! JSON has no NaN or infinity, so non-finite gauge values and quantile
 //! estimates are written as the strings `"NaN"`, `"+Inf"` and `"-Inf"`, and
-//! the last histogram bucket bound as `"+Inf"`.
+//! the last histogram bucket bound as `"+Inf"`. Other non-finite floats
+//! (a sum that overflowed, for example) are written as `null`.
 //!
 //! # Example
 //!
 //! ```
-//! # #[cfg(feature = "count")]
+//! # #[cfg(all(feature = "count", feature = "serde"))]
 //! # {
 //! use metrics_lib::{LabelSet, MetricsCore};
 //! use metrics_lib::exporters::json;
@@ -27,17 +47,37 @@
 //! assert!(body.contains(r#""type":"counter""#));
 //! # }
 //! ```
+//!
+//! Without serde (feature `json`):
+//!
+//! ```
+//! # #[cfg(all(feature = "count", feature = "json"))]
+//! # {
+//! use metrics_lib::MetricsCore;
+//! use metrics_lib::exporters::json;
+//!
+//! let core = MetricsCore::new();
+//! core.counter("hits").add(2);
+//! let body: String = json::to_json(core.registry());
+//! assert!(body.contains(r#""type":"counter","value":2"#));
+//! # }
+//! ```
 
 use crate::registry::Handle;
 use crate::{LabelSet, MetricKind, Registry, Unit};
+#[cfg(feature = "serde")]
 use serde::{Serialize, Serializer};
+
+#[cfg(feature = "json")]
+mod write;
 
 /// Version of the JSON shape. Bumped on incompatible changes (1.x wrote
 /// version 1, with one list per metric type).
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Every series in a registry.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct RegistrySnapshot {
     /// [`SCHEMA_VERSION`] of this snapshot.
@@ -49,7 +89,8 @@ pub struct RegistrySnapshot {
 }
 
 /// One series.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct JsonSeries {
     /// Registered name.
@@ -59,18 +100,19 @@ pub struct JsonSeries {
     /// Labels, serialised as a JSON object.
     pub labels: LabelSet,
     /// Help text, when the family was described.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub help: Option<String>,
     /// Unit, when the family was described with one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub unit: Option<Unit>,
     /// The value, tagged by `"type"`.
     pub value: JsonValue,
 }
 
 /// Value of one series, tagged by metric type.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 #[non_exhaustive]
 pub enum JsonValue {
     /// Counter or sharded counter.
@@ -86,7 +128,7 @@ pub enum JsonValue {
     /// Gauge.
     Gauge {
         /// Current value (`"NaN"`/`"+Inf"`/`"-Inf"` when non-finite).
-        #[serde(serialize_with = "finite_or_string")]
+        #[cfg_attr(feature = "serde", serde(serialize_with = "finite_or_string"))]
         value: f64,
     },
     /// Timer.
@@ -111,18 +153,20 @@ pub enum JsonValue {
 }
 
 /// One quantile estimate of a summary.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct QuantileValue {
     /// Quantile in `[0, 1]`.
     pub quantile: f64,
     /// Estimate (`"NaN"` when the summary is empty).
-    #[serde(serialize_with = "finite_or_string")]
+    #[cfg_attr(feature = "serde", serde(serialize_with = "finite_or_string"))]
     pub value: f64,
 }
 
 /// Registry limits and counters at snapshot time.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 #[non_exhaustive]
 pub struct CardinalitySnapshot {
     /// Cap slots in use.
@@ -137,6 +181,7 @@ pub struct CardinalitySnapshot {
     pub kind_conflicts: u64,
 }
 
+#[cfg(feature = "serde")]
 #[allow(clippy::trivially_copy_pass_by_ref)] // signature required by serde
 fn finite_or_string<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
     if v.is_finite() {
@@ -224,28 +269,86 @@ pub fn snapshot(registry: &Registry) -> RegistrySnapshot {
     }
 }
 
-/// Snapshot `registry` and serialise it as compact JSON.
+/// Snapshot `registry` and serialise it as compact JSON (feature `serde`).
+///
+/// `to_json` writes the same text without serde (feature `json`).
 ///
 /// # Errors
 ///
 /// Returns the `serde_json` error if serialisation fails. The snapshot only
 /// holds strings, integers and finite floats (non-finite values are written
 /// as strings), so this does not happen in practice.
+#[cfg(feature = "serde")]
 pub fn render(registry: &Registry) -> serde_json::Result<String> {
     serde_json::to_string(&snapshot(registry))
 }
 
-/// Like [`render`] but indented.
+/// Like [`render`] but indented (feature `serde`).
 ///
 /// # Errors
 ///
 /// See [`render`].
+#[cfg(feature = "serde")]
 pub fn render_pretty(registry: &Registry) -> serde_json::Result<String> {
     serde_json::to_string_pretty(&snapshot(registry))
 }
 
+#[cfg(feature = "json")]
+impl RegistrySnapshot {
+    /// This snapshot as compact JSON, written by jsonx-lib (feature `json`).
+    ///
+    /// The text is the same as `serde_json` writes for this snapshot (see the
+    /// [module documentation](self) for the one difference, U+2028 and
+    /// U+2029 in strings). Writing cannot fail.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "gauge")]
+    /// # {
+    /// use metrics_lib::Registry;
+    /// use metrics_lib::exporters::json;
+    ///
+    /// let registry = Registry::new();
+    /// registry.gauge("temp").set(f64::NAN);
+    /// let snap = json::snapshot(&registry);
+    /// assert!(snap.to_json().contains(r#""type":"gauge","value":"NaN""#));
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        jsonx_lib::to_string(&write::Doc(self))
+    }
+
+    /// Like [`to_json`](Self::to_json) but indented: two spaces per level,
+    /// as `serde_json::to_string_pretty` writes it.
+    #[must_use]
+    pub fn to_json_pretty(&self) -> String {
+        jsonx_lib::to_string_pretty(&write::Doc(self))
+    }
+}
+
+/// Snapshot `registry` and write it as compact JSON with jsonx-lib (feature
+/// `json`, which does not need serde).
+///
+/// The same text as `render`, and infallible. See
+/// [`RegistrySnapshot::to_json`].
+#[cfg(feature = "json")]
+#[must_use]
+pub fn to_json(registry: &Registry) -> String {
+    snapshot(registry).to_json()
+}
+
+/// Like [`to_json`] but indented (feature `json`); the same text as
+/// `render_pretty`.
+#[cfg(feature = "json")]
+#[must_use]
+pub fn to_json_pretty(registry: &Registry) -> String {
+    snapshot(registry).to_json_pretty()
+}
+
 #[cfg(test)]
-#[cfg(all(feature = "count", feature = "gauge"))]
+#[cfg(all(feature = "count", feature = "gauge", feature = "serde"))]
 mod tests {
     use super::*;
 

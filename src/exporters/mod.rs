@@ -4,9 +4,9 @@
 //! |---|---|---|
 //! | [`prometheus`] | always | Prometheus text format 0.0.4 |
 //! | [`openmetrics`] | always | OpenMetrics 1.0 text format |
-//! | `json` | `serde` | JSON snapshot of every series |
+//! | `json` | `serde` or `json` | JSON snapshot of every series (`json` writes it without serde) |
 //! | `statsd` | `statsd` | StatsD / `DogStatsD` lines over UDP |
-//! | `otlp` | `otlp` | OTLP metrics as HTTP+JSON or protobuf |
+//! | `otlp` | `otlp` or `otlp-json` | OTLP metrics as HTTP+JSON or protobuf (`otlp-json` writes the JSON without serde) |
 //! | `http` | `http` | `/metrics` server and Pushgateway client |
 //!
 //! All exporters read the same validated registry, so no exporter has to
@@ -17,10 +17,12 @@
 
 #[cfg(feature = "http")]
 pub mod http;
-#[cfg(feature = "serde")]
+#[cfg(any(feature = "serde", feature = "json"))]
 pub mod json;
+#[cfg(feature = "json")]
+mod json_float;
 pub mod openmetrics;
-#[cfg(feature = "otlp")]
+#[cfg(any(feature = "otlp", feature = "otlp-json"))]
 pub mod otlp;
 pub mod prometheus;
 #[cfg(feature = "statsd")]

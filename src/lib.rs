@@ -61,8 +61,10 @@
 //! | `sample` | | [`AdaptiveSampler`], [`MetricCircuitBreaker`], [`BackpressureController`] |
 //! | `async` | | Tokio helpers (`async_support`) |
 //! | `serde` | | `Serialize` on stats types; JSON exporter |
+//! | `json` | | JSON exporter without serde (jsonx-lib) |
 //! | `statsd` | | StatsD/DogStatsD UDP exporter |
 //! | `otlp` | | OTLP HTTP+JSON and protobuf payloads |
+//! | `otlp-json` | | OTLP HTTP+JSON (jsonx-lib) and protobuf payloads, without serde |
 //! | `http` | | Blocking `/metrics` server and Pushgateway client |
 //! | `tracing` | | Span-wrapped timing and exemplar helpers |
 //! | `metrics-rs` | | `metrics` facade `Recorder` bridge |
@@ -80,6 +82,14 @@
 //! they were measured on.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// The crate overview links every metric type. In a build without the
+// optional `meter`, `histogram`, or `sample` features those types do not
+// exist, so the links cannot resolve; docs.rs and the all-features doc check
+// build with every type and still catch a link that is really broken.
+#![cfg_attr(
+    not(all(feature = "meter", feature = "histogram", feature = "sample")),
+    allow(rustdoc::broken_intra_doc_links)
+)]
 // `unsafe` is denied everywhere except the two FFI modules that read process
 // and host statistics from the OS (`src/system/windows.rs`,
 // `src/system/macos.rs`). Every block there has a `SAFETY` comment and the
@@ -673,6 +683,8 @@ mod doc_tests {
     struct PerformanceTuning;
     #[doc = include_str!("../docs/release/v2.0.0.md")]
     struct ReleaseNotes;
+    #[doc = include_str!("../docs/release/v2.1.0.md")]
+    struct ReleaseNotes2_1;
 }
 
 #[cfg(test)]

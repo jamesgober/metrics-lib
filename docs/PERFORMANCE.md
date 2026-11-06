@@ -178,6 +178,31 @@ the OpenMetrics and JSON exporters ask for exemplars; Prometheus text and
 OTLP take a counts-only snapshot. `Summary::snapshot` (four quantiles from
 one read of the sketch) takes 0.75 µs.
 
+### JSON: serde_json and jsonx-lib
+
+`json_bench` (added in 2.1.0): a typical HTTP service registry of 159
+series (120 labeled request counters, 10 latency histograms with the
+default bounds, 20 gauges, 5 timers, 2 rate meters, 2 summaries; about
+31 KB of compact JSON). Criterion medians, `--measurement-time 6`, two
+runs on the reference host while it was running other builds, rustc
+1.99.0, 2026-11-04:
+
+| Operation | `serde_json` (`serde`, `otlp`) | jsonx-lib (`json`, `otlp-json`) |
+|---|---|---|
+| Write a prepared snapshot, compact | 29-31 µs | 61-72 µs |
+| Write a prepared snapshot, indented | 54-55 µs | 68-69 µs |
+| Registry to text (`render` / `to_json`, snapshot included) | 83-86 µs | 105-113 µs |
+| OTLP/HTTP JSON request (`render_json` / `to_json`) | 329-411 µs | 167-169 µs |
+
+The snapshot document is about 2 times slower to write through jsonx-lib
+than through `serde_json` (1.3 times end to end, where building the
+snapshot dominates). Part of it is the float text: `serde_json` formats
+floats with `zmij`, the jsonx-lib path with `core`'s formatter plus the
+layout that matches `serde_json`'s text (see `exporters::json_float`).
+The OTLP request is about 2 times faster, because `to_json` writes
+straight from the internal model and skips building the serde request
+model (one `String` per integer, a `Vec` per attribute list).
+
 ### Process and host metrics by platform
 
 Criterion medians on the reference host (Windows), `system` group of
@@ -212,6 +237,7 @@ the next one is pushed back.
 ```bash
 cargo bench --all-features --bench metrics_bench -- --warm-up-time 2 --measurement-time 4
 cargo bench --all-features --bench registry_bench -- --warm-up-time 2 --measurement-time 4
+cargo bench --all-features --bench json_bench -- --warm-up-time 2 --measurement-time 6
 ```
 
 For 1.0.0, check out `v1.0.0` and run

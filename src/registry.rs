@@ -433,7 +433,7 @@ pub(crate) struct SeriesSnapshot {
     pub(crate) labels: Arc<LabelSet>,
     pub(crate) handle: Handle,
     /// Only the OTLP exporter reports series start times.
-    #[cfg_attr(not(feature = "otlp"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "otlp", feature = "otlp-json")), allow(dead_code))]
     pub(crate) created_unix_nanos: u64,
 }
 

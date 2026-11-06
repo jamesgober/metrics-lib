@@ -323,7 +323,7 @@ assert!(full.contains("process_resident_memory_bytes"));
 Content types: `prometheus::CONTENT_TYPE`, `openmetrics::CONTENT_TYPE`.
 `render_into` appends to a reusable buffer.
 
-### JSON (`serde`)
+### JSON (`serde` or `json`)
 
 ```rust
 use metrics_lib::exporters::json;
@@ -334,6 +334,33 @@ let body = json::render(core.registry())?;
 assert!(body.contains(r#""type":"gauge","value":21.5"#));
 # Ok::<(), serde_json::Error>(())
 ```
+
+Feature `json` writes the same document without serde, through
+[jsonx-lib](https://crates.io/crates/jsonx-lib)'s typed writer. Writing
+cannot fail, so these return `String`:
+
+```rust
+use metrics_lib::exporters::json;
+
+let core = metrics_lib::MetricsCore::new();
+core.gauge("temp").set(21.5);
+let body: String = json::to_json(core.registry());
+assert!(body.contains(r#""type":"gauge","value":21.5"#));
+let indented: String = json::to_json_pretty(core.registry());
+// Or snapshot once and write it as often as needed:
+let snap = json::snapshot(core.registry());
+assert_eq!(snap.to_json(), body);
+assert_eq!(snap.to_json_pretty(), indented);
+```
+
+With both features on, `to_json` and `render` (and the `_pretty` pair)
+write the same bytes for the same snapshot, as checked by
+`tests/json_parity.rs`, with one exception: U+2028 and U+2029 in a label
+value or help text are escaped as `\u2028` / `\u2029` by `to_json` and
+written raw by `render`. Both decode to the same string; the escaped form
+is safe to embed in a `<script>` block or a JavaScript string before
+ES2019. The float text is `serde_json`'s from 1.0.147 on (`1e+16`); older
+`serde_json` versions write `1e16`.
 
 ### StatsD (`statsd`)
 
@@ -347,7 +374,7 @@ sink.send(core.registry())?; // "app.hits:5|c"
 # Ok::<(), std::io::Error>(())
 ```
 
-### OTLP (`otlp`)
+### OTLP (`otlp` or `otlp-json`)
 
 ```rust
 use metrics_lib::exporters::otlp::{OtlpExporter, Temporality};
@@ -360,6 +387,23 @@ assert!(json.contains("\"asInt\":\"2\""));
 let protobuf = exporter.render_protobuf(core.registry());
 assert!(!protobuf.is_empty());
 # Ok::<(), serde_json::Error>(())
+```
+
+Feature `otlp-json` offers the exporter without serde: `render_protobuf`
+as above, and `to_json` (and the one-shot `otlp::to_json`) for the
+OTLP/HTTP JSON body, written by jsonx-lib with the same text as
+`render_json` (the same U+2028/U+2029 exception as the JSON exporter).
+The serde request model (`build`, `ExportMetricsServiceRequest`) comes
+only with `otlp`.
+
+```rust
+use metrics_lib::exporters::otlp::{self, OtlpExporter};
+
+let core = metrics_lib::MetricsCore::new();
+core.counter("orders").add(2);
+let body: String = OtlpExporter::new("shop").to_json(core.registry());
+assert!(body.contains("\"asInt\":\"2\""));
+assert!(otlp::to_json(core.registry(), "shop").contains("\"service.name\""));
 ```
 
 ### HTTP server and Pushgateway (`http`)

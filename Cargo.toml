@@ -9,7 +9,7 @@
 #╚═══════════════════════════════╝
 [package]
 name    = "metrics-lib"
-version = "2.0.0"
+version = "2.1.0"
 
 # Minimum Supported Rust Version (MSRV). Raising it is a MAJOR change.
 rust-version = "1.85"
@@ -39,6 +39,7 @@ include = [
     "/examples/**/*.rs",
     "/docs/*.md",
     "/docs/release/v2.0.0.md",
+    "/docs/release/v2.1.0.md",
     "/README.md",
     "/CHANGELOG.md",
     "/LICENSE-APACHE",
@@ -88,12 +89,21 @@ async = ["dep:tokio", "dep:pin-project-lite"]
 # `Serialize` for stats/snapshot types plus the JSON snapshot exporter.
 serde = ["dep:serde", "dep:serde_json"]
 
+# The JSON snapshot exporter without serde: `json::to_json` and
+# `json::to_json_pretty` write the same document as `json::render` through
+# jsonx-lib. Does not enable `serde`.
+json = ["dep:jsonx-lib"]
+
 # StatsD / DogStatsD UDP exporter (std only, no extra dependencies).
 statsd = []
 
 # OTLP exporter: HTTP+JSON payloads (needs `serde`) and hand-encoded protobuf
 # payloads (no extra dependencies).
 otlp = ["serde"]
+
+# The OTLP exporter without serde: protobuf payloads, and HTTP+JSON payloads
+# written through jsonx-lib (`OtlpExporter::to_json`, `otlp::to_json`).
+otlp-json = ["json"]
 
 # Dependency-free HTTP helpers: a blocking `/metrics` server and a Prometheus
 # Pushgateway client (plain HTTP over `std::net`).
@@ -109,14 +119,15 @@ metrics-rs = ["dep:metrics", "count", "gauge", "histogram"]
 tower = ["dep:tower-layer", "dep:tower-service", "dep:http", "dep:pin-project-lite", "count", "histogram"]
 
 # Every built-in exporter.
-exporters-all = ["serde", "statsd", "otlp", "http"]
+exporters-all = ["serde", "json", "statsd", "otlp", "otlp-json", "http"]
 
 # Aggregates.
 minimal = ["count"]
 all = ["count", "gauge", "timer", "meter", "sample", "histogram", "system"]
 full = [
     "count", "gauge", "timer", "meter", "sample", "histogram", "system",
-    "async", "serde", "statsd", "otlp", "http", "tracing", "metrics-rs", "tower",
+    "async", "serde", "json", "statsd", "otlp", "otlp-json", "http", "tracing",
+    "metrics-rs", "tower",
 ]
 
 
@@ -134,6 +145,12 @@ pin-project-lite = { version = "0.2.14", optional = true }
 # Optional (features `serde`, `otlp`). Serialization of stats and payloads.
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }
+# Optional (features `json`, `otlp-json`). JSON writing without serde: the
+# snapshot and OTLP documents go straight through its typed writer, with no
+# tree in between. No dependencies of its own, MSRV 1.85, no `unsafe`. Its
+# types stay out of this crate's public API, so a 0.x bump of it is not a
+# breaking change here. Default features off: only `String` output is used.
+jsonx-lib = { version = "0.5.0", default-features = false, optional = true }
 # Optional (feature `tracing`). Span-wrapped timing and exemplar helpers.
 tracing = { version = "0.1.40", default-features = false, features = ["std"], optional = true }
 # Optional (feature `metrics-rs`). The `metrics` facade; implementing its
@@ -194,6 +211,11 @@ required-features = ["count", "gauge", "timer", "meter", "histogram"]
 name = "registry_bench"
 harness = false
 required-features = ["count", "gauge", "timer", "histogram"]
+
+[[bench]]
+name = "json_bench"
+harness = false
+required-features = ["serde", "json", "otlp", "otlp-json", "count", "gauge", "timer", "histogram"]
 
 
 
