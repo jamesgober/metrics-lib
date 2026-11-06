@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793855360352,
+  "lastUpdate": 1793939788691,
   "repoUrl": "https://github.com/jamesgober/metrics-lib",
   "entries": {
     "Criterion": [
@@ -45682,6 +45682,295 @@ window.BENCHMARK_DATA = {
           {
             "name": "timer/start_stop",
             "value": 57.01725320190144,
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "12473969+jamesgober@users.noreply.github.com",
+            "name": "James Gober",
+            "username": "jamesgober"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e2743eb8cca34f0e8082427ecc7304077460f12a",
+          "message": "2.1.0: JSON and OTLP exporters on jsonx-lib (features json, otlp-json) (#5)\n\nexporters::json::to_json / to_json_pretty and exporters::otlp::to_json without serde, on jsonx-lib; output matches the serde_json renderers (U+2028/2029 escaped). Default-feature doc build fixed.",
+          "timestamp": "2026-11-05T23:28:24-05:00",
+          "tree_id": "1757b179e0f92670f23c813695c938d9604123f9",
+          "url": "https://github.com/jamesgober/metrics-lib/commit/e2743eb8cca34f0e8082427ecc7304077460f12a"
+        },
+        "date": 1793939787724,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "admission/token_bucket_acquire",
+            "value": 40.51804130097852,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "admission/token_bucket_reject",
+            "value": 34.201280579702214,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/1",
+            "value": 265602.27591256646,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/16",
+            "value": 23272881.760190208,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/4",
+            "value": 5510748.667402261,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/8",
+            "value": 10708556.4309859,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/1",
+            "value": 260712.97678250447,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/16",
+            "value": 1862278.3437985335,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/4",
+            "value": 351983.64956961904,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/8",
+            "value": 929477.3695532957,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/add",
+            "value": 2.030170871453466,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/get",
+            "value": 0.6241721265555771,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/inc",
+            "value": 2.223358561409364,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/sharded_get",
+            "value": 1.56435498654268,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/sharded_inc",
+            "value": 2.1338477791403125,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/try_add",
+            "value": 3.237145577781517,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/up_down_add",
+            "value": 1.980987368285654,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_observe",
+            "value": 13.510472833879538,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_observe_with_exemplar",
+            "value": 87.24937738504943,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_snapshot",
+            "value": 65.12834405307966,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_snapshot_with_exemplars",
+            "value": 160.99414895295294,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/summary_observe",
+            "value": 25.552862270412266,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/summary_quantile",
+            "value": 1447.1815036016633,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/summary_snapshot",
+            "value": 1404.6351715321898,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "exposition/openmetrics_400_series",
+            "value": 255151.61135455297,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "exposition/prometheus_400_series",
+            "value": 257487.6104633471,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "exposition/render_core_400_series_with_process",
+            "value": 307511.87390379404,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/add",
+            "value": 5.298546284030973,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/get",
+            "value": 0.6496879683086538,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/set",
+            "value": 0.624023429289974,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/set_max",
+            "value": 1.046374042983168,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "global/counter_lookup_inc",
+            "value": 37.10594375868206,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "global/labels_from_array_2",
+            "value": 33.21881140656116,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rate_meter/rate",
+            "value": 34.619104065950175,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rate_meter/tick",
+            "value": 40.184826213722225,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rate_meter/tick_n",
+            "value": 40.380629837343825,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_concurrent/labeled_lookup_inc/1",
+            "value": 822740.4542062323,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_concurrent/labeled_lookup_inc/4",
+            "value": 3697200.7335803877,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_concurrent/labeled_lookup_inc/8",
+            "value": 6910769.586666666,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/counter_held_handle",
+            "value": 2.2200607341831873,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/counter_labeled_hit",
+            "value": 93.52770277438034,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/counter_unlabeled_hit",
+            "value": 36.16087996722771,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/gauge_unlabeled_hit",
+            "value": 38.98974994573874,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/histogram_labeled_hit",
+            "value": 114.07454180191522,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/timer_unlabeled_hit",
+            "value": 38.26622960308604,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_registration/evict_idle_10k_series",
+            "value": 48970.36675953273,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_registration/new_labeled_series",
+            "value": 5059.162460503109,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "system/host_and_process_update",
+            "value": 77481.23309731386,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "system/process_sample",
+            "value": 35940.53149271302,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/record",
+            "value": 4.936985975216578,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/record_ns",
+            "value": 4.929421863878635,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/start_owned_drop",
+            "value": 67.54156484632777,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/start_stop",
+            "value": 64.7857838882448,
             "unit": "ns/iter"
           }
         ]
