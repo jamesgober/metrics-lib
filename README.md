@@ -149,11 +149,18 @@ use metrics_lib::MetricsCore;
 use std::sync::Arc;
 
 let core = Arc::new(MetricsCore::new());
-let server = MetricsServer::spawn("0.0.0.0:9898", Arc::clone(&core))?;
-// ... run the application; Prometheus scrapes http://host:9898/metrics
+// Loopback only: the endpoint has no authentication unless you set
+// `MetricsServer::builder().bearer_token(..)`.
+let server = MetricsServer::spawn("127.0.0.1:9898", Arc::clone(&core))?;
+// ... run the application; a local agent scrapes http://127.0.0.1:9898/metrics
 server.shutdown();
 # Ok::<(), std::io::Error>(())
 ```
+
+To serve other hosts, bind a private address and require a token:
+`MetricsServer::builder().bearer_token(token).spawn("10.0.0.5:9898", core)`.
+Plain HTTP carries the token in clear text, so keep it on a private network
+or behind a TLS proxy.
 
 ### **Instrument a tower or axum service**
 

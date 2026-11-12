@@ -23,10 +23,22 @@
 //!
 //! - **Series cap** ([`Registry::set_cardinality_cap`], default
 //!   [`DEFAULT_CARDINALITY_CAP`]): the total number of series, labeled and
-//!   unlabeled, plus families that only carry metadata. Past the cap the
-//!   `try_*` lookups return [`MetricsError::CardinalityExceeded`] and the
-//!   other lookups hand out a detached *overflow* metric (shared per type,
-//!   never exported) and bump [`Registry::cardinality_overflows`].
+//!   unlabeled, plus families that only carry metadata.
+//! - **Family cap** ([`Registry::set_family_cardinality_cap`], default
+//!   [`DEFAULT_FAMILY_CARDINALITY_CAP`], since 2.2): the series one family
+//!   may hold, so attacker-chosen label values in one family cannot take
+//!   the whole series cap and silently stop every other family from
+//!   gaining series.
+//! - Past either cap the `try_*` lookups return
+//!   [`MetricsError::CardinalityExceeded`] and the other lookups bump
+//!   [`Registry::cardinality_overflows`] and hand out a metric that is not
+//!   exported. When the series cap (not a family cap) refused a counter,
+//!   gauge, timer or rate meter, that metric is kept aside (up to 256 of
+//!   them) and joins its family, still the same handle, once a slot frees
+//!   ([`Registry::remove`], [`Registry::remove_series`],
+//!   [`Registry::evict_idle`], [`Registry::clear`], or a higher cap); a
+//!   handle kept by the caller then starts being exported. Other refusals
+//!   get a detached overflow metric (shared per type, never exported).
 //! - **Validation**: names and labels are checked (see
 //!   [`validate_metric_name`](crate::validate_metric_name)). The `try_*`
 //!   lookups return the error; the others repair the input and bump
@@ -63,7 +75,10 @@ use crate::{LabelSet, MetricKind, MetricMetadata, MetricsError, Result, Unit};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{
+    Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard,
+    RwLockWriteGuard,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "gauge")]
@@ -76,6 +91,15 @@ use crate::Timer;
 use crate::{Counter, ShardedCounter, UpDownCounter};
 #[cfg(feature = "histogram")]
 use crate::{Histogram, Summary, SummaryConfig};
+
+/// Default cap on the number of series one family (one metric name) may
+/// hold in a [`Registry`]: half of [`DEFAULT_CARDINALITY_CAP`]. See
+/// [`Registry::set_family_cardinality_cap`].
+pub const DEFAULT_FAMILY_CARDINALITY_CAP: usize = 5_000;
+
+/// Metrics refused by the series cap that a registry keeps aside until a
+/// slot frees.
+const MAX_PARKED: usize = 256;
 
 /// Default cap on the number of series a [`Registry`] holds.
 pub const DEFAULT_CARDINALITY_CAP: usize = 10_000;
@@ -274,12 +298,37 @@ registry_metric!(
     MetricKind::Histogram,
     Some("le"),
     |f| {
-        match &f.buckets {
+        let histogram = match &f.buckets {
             Some(bounds) => Histogram::with_buckets(bounds.iter().copied()),
             None => Histogram::default_seconds(),
+        };
+        match f.histogram_shards {
+            Some(shards) => histogram.with_shards(shards),
+            None => histogram,
         }
     }
 );
+
+/// Whether a metric of `storage` can be kept aside while the series cap is
+/// full and join its family later: only kinds whose creation takes no
+/// family configuration.
+fn parkable(storage: Storage) -> bool {
+    #[cfg(feature = "histogram")]
+    if matches!(storage, Storage::Histogram | Storage::Summary) {
+        return false;
+    }
+    let _ = storage;
+    true
+}
+
+/// A metric the series cap refused, waiting for a free slot.
+struct Parked {
+    name: String,
+    labels: LabelSet,
+    kind: MetricKind,
+    storage: Storage,
+    handle: Handle,
+}
 registry_metric!(
     "histogram",
     Summary,
@@ -337,6 +386,9 @@ pub(crate) struct Family {
     buckets: Option<Arc<[f64]>>,
     #[cfg(feature = "histogram")]
     summary: Option<Arc<SummaryConfig>>,
+    /// Stripe count for histograms created in this family.
+    #[cfg(feature = "histogram")]
+    histogram_shards: Option<usize>,
     unlabeled: Option<Series>,
     /// Keys are shared with snapshots, so exporting a series clones a
     /// pointer instead of its labels.
@@ -354,6 +406,8 @@ impl Family {
             buckets: None,
             #[cfg(feature = "histogram")]
             summary: None,
+            #[cfg(feature = "histogram")]
+            histogram_shards: None,
             unlabeled: None,
             labeled: HashMap::new(),
         }
@@ -376,7 +430,7 @@ impl Family {
 
     fn has_config(&self) -> bool {
         #[cfg(feature = "histogram")]
-        if self.buckets.is_some() || self.summary.is_some() {
+        if self.buckets.is_some() || self.summary.is_some() || self.histogram_shards.is_some() {
             return true;
         }
         self.help.is_some()
@@ -451,7 +505,11 @@ enum Policy {
 pub struct Registry {
     shards: Box<[RwLock<HashMap<String, Family>>]>,
     cap: AtomicUsize,
+    family_cap: AtomicUsize,
     used: AtomicUsize,
+    /// Metrics refused by the series cap, adopted when a slot frees.
+    parked: Mutex<Vec<Parked>>,
+    parked_len: AtomicUsize,
     overflows: AtomicU64,
     invalid_inputs: AtomicU64,
     kind_conflicts: AtomicU64,
@@ -497,7 +555,10 @@ impl Registry {
         Self {
             shards: (0..SHARDS).map(|_| RwLock::new(HashMap::new())).collect(),
             cap: AtomicUsize::new(cap),
+            family_cap: AtomicUsize::new(DEFAULT_FAMILY_CARDINALITY_CAP),
             used: AtomicUsize::new(0),
+            parked: Mutex::new(Vec::new()),
+            parked_len: AtomicUsize::new(0),
             overflows: AtomicU64::new(0),
             invalid_inputs: AtomicU64::new(0),
             kind_conflicts: AtomicU64::new(0),
@@ -529,9 +590,47 @@ impl Registry {
     // ------------------------------------------------------------------
 
     /// Set the series cap. Lowering it below the current count does not
-    /// remove anything; it only blocks new series.
+    /// remove anything; it only blocks new series. Raising it lets metrics
+    /// kept aside while the cap was full join their families.
     pub fn set_cardinality_cap(&self, cap: usize) {
         self.cap.store(cap, Ordering::Relaxed);
+        self.adopt_parked();
+    }
+
+    /// Set the cap on series per family (per metric name), checked before
+    /// the series cap (since 2.2; default
+    /// [`DEFAULT_FAMILY_CARDINALITY_CAP`]). One family whose label values
+    /// come from untrusted input then cannot take every slot of the series
+    /// cap and blind every family created after it. A family that needs
+    /// more series needs a higher family cap; `usize::MAX` restores the 2.1
+    /// behaviour (the series cap alone). Lowering it removes nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "count")]
+    /// # {
+    /// use metrics_lib::{LabelSet, Registry};
+    ///
+    /// let registry = Registry::new();
+    /// registry.set_family_cardinality_cap(2);
+    /// for user in ["a", "b", "c"] {
+    ///     registry.counter_with("logins", &LabelSet::from([("user", user)])).inc();
+    /// }
+    /// registry.counter("requests").inc(); // other families are unaffected
+    /// assert_eq!(registry.metric_count(), 3);
+    /// assert_eq!(registry.cardinality_overflows(), 1);
+    /// # }
+    /// ```
+    pub fn set_family_cardinality_cap(&self, cap: usize) {
+        self.family_cap.store(cap, Ordering::Relaxed);
+        self.adopt_parked();
+    }
+
+    /// Current cap on series per family.
+    #[must_use]
+    pub fn family_cardinality_cap(&self) -> usize {
+        self.family_cap.load(Ordering::Relaxed)
     }
 
     /// Current series cap.
@@ -580,6 +679,13 @@ impl Registry {
     }
 
     fn try_reserve(&self, slots: usize) -> Result<()> {
+        self.try_reserve_quietly(slots).inspect_err(|_| {
+            let _ = self.overflows.fetch_add(1, Ordering::Relaxed);
+        })
+    }
+
+    /// [`try_reserve`](Self::try_reserve) without counting a refusal.
+    fn try_reserve_quietly(&self, slots: usize) -> Result<()> {
         if slots == 0 {
             return Ok(());
         }
@@ -589,10 +695,103 @@ impl Registry {
                 used.checked_add(slots).filter(|next| *next <= cap)
             })
             .map(|_| ())
-            .map_err(|_| {
-                let _ = self.overflows.fetch_add(1, Ordering::Relaxed);
-                MetricsError::CardinalityExceeded
-            })
+            .map_err(|_| MetricsError::CardinalityExceeded)
+    }
+
+    fn lock_parked(&self) -> MutexGuard<'_, Vec<Parked>> {
+        self.parked.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A metric for a lookup the caps refused. When the series cap (not
+    /// the family cap) refused a parkable kind, it is kept aside and joins
+    /// its family when a slot frees; otherwise the shared overflow sink.
+    #[cold]
+    fn park_or_sink<T: RegistryMetric>(&self, name: &str, labels: &LabelSet) -> Arc<T> {
+        let sink = || Arc::clone(T::overflow_sink());
+        if !parkable(T::STORAGE)
+            || validate_metric_name(name).is_err()
+            || labels.validate().is_err()
+            || T::RESERVED_LABEL.is_some_and(|r| labels.contains_key(r))
+        {
+            return sink();
+        }
+        {
+            let shard = self.read_shard(name);
+            if let Some(family) = shard.get(name) {
+                if !family.compatible(T::KIND, Some(T::STORAGE))
+                    || family.series_count() + 1 > self.family_cardinality_cap()
+                {
+                    return sink();
+                }
+            }
+        }
+        let mut parked = self.lock_parked();
+        if let Some(p) = parked
+            .iter()
+            .find(|p| p.name == name && p.labels == *labels)
+        {
+            return T::unwrap(&p.handle).cloned().unwrap_or_else(sink);
+        }
+        if parked.len() >= MAX_PARKED {
+            return sink();
+        }
+        let metric = Arc::new(T::create(&Family::new(T::KIND)));
+        parked.push(Parked {
+            name: name.to_owned(),
+            labels: labels.clone(),
+            kind: T::KIND,
+            storage: T::STORAGE,
+            handle: T::wrap(Arc::clone(&metric)),
+        });
+        self.parked_len.store(parked.len(), Ordering::Relaxed);
+        drop(parked);
+        // A slot may have freed since the lookup was refused.
+        if self.cardinality_count() < self.cardinality_cap() {
+            self.adopt_parked();
+        }
+        metric
+    }
+
+    /// Move metrics kept aside into their families while slots are free.
+    fn adopt_parked(&self) {
+        if self.parked_len.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut parked = self.lock_parked();
+        let family_cap = self.family_cardinality_cap();
+        let mut i = 0;
+        while i < parked.len() {
+            let p = &parked[i];
+            let mut shard = self.write_shard(&p.name);
+            let family = shard.get(p.name.as_str());
+            if family.is_some_and(|f| {
+                !f.compatible(p.kind, Some(p.storage)) || f.get(&p.labels).is_some()
+            }) {
+                // Another kind took the name, or the series was created
+                // meanwhile: this handle can no longer join it.
+                drop(shard);
+                let _gone = parked.swap_remove(i);
+                continue;
+            }
+            let before = family.map_or(0, Family::slots);
+            let after = family.map_or(1, |f| (f.series_count() + 1).max(1));
+            if after > family_cap {
+                i += 1;
+                continue;
+            }
+            if self.try_reserve_quietly(after - before).is_err() {
+                break;
+            }
+            let now = self.now_ns();
+            let family = shard
+                .entry(p.name.clone())
+                .or_insert_with(|| Family::new(p.kind));
+            family.storage = Some(p.storage);
+            family.insert(p.labels.clone(), Series::new(p.handle.clone(), now));
+            drop(shard);
+            let _adopted = parked.swap_remove(i);
+        }
+        self.parked_len.store(parked.len(), Ordering::Relaxed);
     }
 
     fn release(&self, slots: usize) {
@@ -622,8 +821,11 @@ impl Registry {
         if let Some(found) = self.find::<T>(name, labels) {
             return found;
         }
-        self.resolve::<T>(name, labels, Policy::Repair)
-            .unwrap_or_else(|_| Arc::clone(T::overflow_sink()))
+        match self.resolve::<T>(name, labels, Policy::Repair) {
+            Ok(metric) => metric,
+            Err(MetricsError::CardinalityExceeded) => self.park_or_sink::<T>(name, labels),
+            Err(_) => Arc::clone(T::overflow_sink()),
+        }
     }
 
     pub(crate) fn try_lookup<T: RegistryMetric>(
@@ -703,6 +905,10 @@ impl Registry {
         let after = shard
             .get(name.as_ref())
             .map_or(1, |f| (f.series_count() + 1).max(1));
+        if family_exists && after > self.family_cardinality_cap() {
+            let _ = self.overflows.fetch_add(1, Ordering::Relaxed);
+            return Err(MetricsError::CardinalityExceeded);
+        }
         self.try_reserve(after - before)?;
         if !family_exists {
             let _ = shard.insert(name.to_string(), Family::new(T::KIND));
@@ -952,6 +1158,34 @@ impl Registry {
         let bounds: Arc<[f64]> = Histogram::validate_bounds(buckets)?.into();
         self.update_family(name, MetricKind::Histogram, |family| {
             family.buckets = Some(bounds);
+        })
+    }
+
+    /// Spread histograms created under `name` from now on over `shards`
+    /// stripes (see [`Histogram::with_shards`]), for a histogram that many
+    /// threads record into. Existing series keep their stripes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Registry::configure_histogram`], except that every stripe count
+    /// is accepted (it is rounded to a power of two in `1..=64`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "histogram")]
+    /// # {
+    /// use metrics_lib::Registry;
+    ///
+    /// let registry = Registry::new();
+    /// registry.configure_histogram_shards("request_seconds", 8).unwrap();
+    /// assert_eq!(registry.histogram("request_seconds").shards(), 8);
+    /// # }
+    /// ```
+    #[cfg(feature = "histogram")]
+    pub fn configure_histogram_shards(&self, name: &str, shards: usize) -> Result<()> {
+        self.update_family(name, MetricKind::Histogram, |family| {
+            family.histogram_shards = Some(shards);
         })
     }
 
@@ -1263,6 +1497,7 @@ impl Registry {
         match removed {
             Some(family) => {
                 self.release(family.slots());
+                self.adopt_parked();
                 true
             }
             None => false,
@@ -1289,6 +1524,8 @@ impl Registry {
             let _ = shard.remove(name.as_ref());
         }
         self.release(before - after);
+        drop(shard);
+        self.adopt_parked();
         true
     }
 
@@ -1369,6 +1606,9 @@ impl Registry {
                 removed += 1;
             }
         }
+        if removed > 0 {
+            self.adopt_parked();
+        }
         removed
     }
 
@@ -1400,6 +1640,7 @@ impl Registry {
             drop(guard);
             self.release(slots);
         }
+        self.adopt_parked();
     }
 
     /// A view that prefixes every name with `prefix`.
@@ -1441,6 +1682,7 @@ impl std::fmt::Debug for Registry {
             .field("series", &self.metric_count())
             .field("cardinality_count", &self.cardinality_count())
             .field("cardinality_cap", &self.cardinality_cap())
+            .field("family_cardinality_cap", &self.family_cardinality_cap())
             .finish_non_exhaustive()
     }
 }
@@ -1890,15 +2132,82 @@ mod tests {
             r.try_counter("c3").unwrap_err(),
             MetricsError::CardinalityExceeded
         );
-        let sink = r.counter("c4");
-        sink.inc();
+        let parked = r.counter("c4");
+        parked.inc();
         assert_eq!(r.metric_count(), 3);
         assert_eq!(r.cardinality_overflows(), 2);
         // Existing series still resolve when the cap is full.
         assert!(r.try_counter("c0").is_ok());
+        // Raising the cap first lets the kept-aside `c4` join (2.2).
         r.set_cardinality_cap(4);
+        assert_eq!(r.metric_count(), 4);
+        assert!(Arc::ptr_eq(&parked, &r.try_counter("c4").unwrap()));
+        assert!(r.try_counter("c3").is_err());
+        r.set_cardinality_cap(5);
         assert!(r.try_counter("c3").is_ok());
-        assert_eq!(r.cardinality_cap(), 4);
+        assert_eq!(r.cardinality_cap(), 5);
+    }
+
+    // Review F-1 (2.1.1): the series cap was one pool for every family, so
+    // attacker-chosen label values in one family stopped every later series
+    // of every other family from being exported.
+    #[test]
+    fn test_one_hostile_family_cannot_blind_the_others() {
+        let r = Registry::new();
+        for i in 0..20_000 {
+            r.counter_with("logins", &LabelSet::from([("user", format!("u{i}"))]))
+                .inc();
+        }
+        let status = r.counter_with("http_requests", &LabelSet::from([("status", "503")]));
+        status.inc();
+        assert!(Arc::ptr_eq(
+            &status,
+            &r.try_counter_with("http_requests", &LabelSet::from([("status", "503")]))
+                .unwrap()
+        ));
+        assert_eq!(
+            r.metric_count(),
+            DEFAULT_FAMILY_CARDINALITY_CAP + 1,
+            "the hostile family stops at its own cap"
+        );
+    }
+
+    // Review F-1 (2.1.1): a handle obtained while the cap was full stayed
+    // the shared, never exported overflow sink after slots freed.
+    #[test]
+    fn test_handle_obtained_at_full_cap_is_exported_once_a_slot_frees() {
+        let r = Registry::with_cardinality_cap(2);
+        r.counter("a").inc();
+        r.counter("b").inc();
+        let late = r.counter("late");
+        late.inc();
+        assert!(r.try_counter("late").is_err(), "not exported while full");
+        assert!(r.remove("a"));
+        late.inc();
+        let exported = r.try_counter("late").unwrap();
+        assert!(Arc::ptr_eq(&late, &exported), "the held handle joined");
+        assert_eq!(exported.get(), 2);
+        assert_eq!(r.metric_count(), 2);
+    }
+
+    #[test]
+    fn test_family_cap_is_configurable() {
+        let r = Registry::new();
+        assert_eq!(r.family_cardinality_cap(), DEFAULT_FAMILY_CARDINALITY_CAP);
+        r.set_family_cardinality_cap(1);
+        r.counter_with("f", &LabelSet::from([("k", "1")])).inc();
+        r.counter_with("f", &LabelSet::from([("k", "2")])).inc();
+        assert_eq!(r.metric_count(), 1);
+        assert_eq!(
+            r.try_counter_with("f", &LabelSet::from([("k", "3")]))
+                .unwrap_err(),
+            MetricsError::CardinalityExceeded
+        );
+        r.set_family_cardinality_cap(usize::MAX);
+        assert!(
+            r.try_counter_with("f", &LabelSet::from([("k", "3")]))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2041,8 +2350,10 @@ mod tests {
         assert!(overflows >= 1);
         let before = r.counter("a");
         r.clear();
-        assert_eq!(r.cardinality_count(), 0);
-        assert_eq!(r.metric_count(), 0);
+        // `b`, refused by the full cap, was kept aside and joins (2.2).
+        assert_eq!(r.cardinality_count(), 1);
+        assert_eq!(r.metric_count(), 1);
+        assert!(r.try_counter("b").is_ok());
         assert_eq!(r.cardinality_overflows(), overflows);
         assert!(!Arc::ptr_eq(&before, &r.counter("a")));
     }

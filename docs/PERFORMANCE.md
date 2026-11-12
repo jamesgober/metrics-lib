@@ -133,6 +133,25 @@ single cache line that every core fights over; a `ShardedCounter` gives
 each thread its own 128-byte stripe and sums the stripes on read (`get`
 takes 4.2 ns with the default stripe count).
 
+### Histograms
+
+One `Histogram` series observed by many threads has the same problem, three
+times over: a bucket, the count and the `f64` sum (a compare-and-swap loop)
+are shared by every thread. Since 2.2, `Histogram::with_shards(n)` (and
+`Registry::configure_histogram_shards`) give each thread its own stripe.
+
+Time per observation per thread, 8 threads on one series, default seconds
+buckets, release build with fat LTO, Windows x86_64 on a shared, loaded
+machine (three alternating rounds of three runs each, 2.1.1 against 2.2.0):
+
+| | 2.1.1 | 2.2.0, one stripe | 2.2.0, `with_shards(16)` |
+|---|---|---|---|
+| uncontended | 16 to 51 ns | 16 to 20 ns | 18 to 28 ns |
+| 8 threads | 314 to 613 ns | 241 to 505 ns | 21 to 36 ns |
+
+A histogram observed from one thread at a time needs no stripes; each
+stripe costs about `128 + 8 * buckets` bytes.
+
 ## Registry lookups
 
 Looking a metric up by name takes a shard read lock and hashes the name

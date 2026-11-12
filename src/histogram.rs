@@ -20,6 +20,18 @@
 //! concurrent writes is still monotonic (`le="+Inf"` is never below a lower
 //! bucket).
 //!
+//! Every observation of one histogram writes the same cache lines, so a
+//! histogram shared by many threads that observe it constantly spends most
+//! of its time on cache-line transfers (about 540 ns per observation at 8
+//! threads, against 13.5 ns uncontended). For such a histogram call
+//! [`Histogram::with_shards`] (or [`Registry::configure_histogram_shards`]
+//! for registry histograms): each thread then records into its own stripe
+//! of buckets, sum and count, as [`ShardedCounter`] does for counters, and
+//! reads merge the stripes.
+//!
+//! [`Registry::configure_histogram_shards`]: crate::Registry::configure_histogram_shards
+//! [`ShardedCounter`]: https://docs.rs/metrics-lib/latest/metrics_lib/struct.ShardedCounter.html
+//!
 //! # Exemplars
 //!
 //! [`Histogram::observe_with_exemplar`] additionally stores the observation's
@@ -41,7 +53,7 @@
 //! assert!(latency.quantile(0.5) > 0.0);
 //! ```
 
-use crate::util::CasUpdate;
+use crate::util::{CasUpdate, thread_slot};
 use crate::{LabelSet, MetricsError, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError, TryLockError};
@@ -76,17 +88,42 @@ pub struct Exemplar {
     pub timestamp: f64,
 }
 
+/// Upper bound on the stripe count of a sharded histogram (see
+/// [`Histogram::with_shards`]).
+pub const MAX_HISTOGRAM_SHARDS: usize = 64;
+
+/// One stripe of counts, padded so neighbouring stripes do not share a
+/// cache line (or an adjacent-line prefetch pair).
+#[repr(align(128))]
+struct Stripe {
+    /// Non-cumulative count per explicit bucket.
+    counts: Box<[AtomicU64]>,
+    /// Sum of observations as `f64` bits.
+    sum_bits: AtomicU64,
+    /// Total observations (explicit buckets plus `+Inf`).
+    total: AtomicU64,
+}
+
+impl Stripe {
+    fn new(buckets: usize) -> Self {
+        Self {
+            counts: (0..buckets).map(|_| AtomicU64::new(0)).collect(),
+            sum_bits: AtomicU64::new(0.0_f64.to_bits()),
+            total: AtomicU64::new(0),
+        }
+    }
+}
+
 /// Lock-free bucketed histogram.
 #[repr(align(64))]
 pub struct Histogram {
     /// Explicit upper bounds, ascending. The `+Inf` bucket is implicit.
     bucket_bounds: Box<[f64]>,
-    /// Non-cumulative count per explicit bucket.
-    bucket_counts: Box<[AtomicU64]>,
-    /// Sum of observations as `f64` bits.
-    sum_bits: AtomicU64,
-    /// Total observations (explicit buckets plus `+Inf`).
-    total: AtomicU64,
+    /// One stripe unless [`Histogram::with_shards`] asked for more; a
+    /// power of two.
+    stripes: Box<[Stripe]>,
+    /// `stripes.len() - 1`.
+    mask: usize,
     /// One exemplar slot per bucket including `+Inf`, allocated on first use.
     exemplars: OnceLock<Box<[Mutex<Option<Exemplar>>]>>,
     created_at: Instant,
@@ -228,15 +265,90 @@ impl Histogram {
     }
 
     fn from_clean(cleaned: Vec<f64>) -> Self {
-        let bucket_counts: Box<[AtomicU64]> = cleaned.iter().map(|_| AtomicU64::new(0)).collect();
+        let stripes: Box<[Stripe]> = Box::new([Stripe::new(cleaned.len())]);
         Self {
             bucket_bounds: cleaned.into_boxed_slice(),
-            bucket_counts,
-            sum_bits: AtomicU64::new(0.0_f64.to_bits()),
-            total: AtomicU64::new(0),
+            stripes,
+            mask: 0,
             exemplars: OnceLock::new(),
             created_at: Instant::now(),
         }
+    }
+
+    /// Spread the counts over `shards` stripes (rounded up to a power of
+    /// two, at most [`MAX_HISTOGRAM_SHARDS`]; `0` and `1` mean one), so
+    /// threads observing the same histogram stop contending for one set of
+    /// cache lines. Reads (`count`, `sum`, `snapshot`, `quantile`) merge the
+    /// stripes.
+    ///
+    /// Use it for a histogram that many threads record into constantly:
+    /// measured at 8 threads on one series, about 540 ns per observation
+    /// with one stripe and tens of ns sharded. Each stripe costs about
+    /// `128 + 8 * buckets` bytes, and an uncontended observation stays
+    /// about as cheap. Call it before recording: observations made before
+    /// the call are discarded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use metrics_lib::Histogram;
+    /// use std::sync::Arc;
+    ///
+    /// let latency = Arc::new(Histogram::default_seconds().with_shards(8));
+    /// let workers: Vec<_> = (0..4)
+    ///     .map(|_| {
+    ///         let latency = Arc::clone(&latency);
+    ///         std::thread::spawn(move || {
+    ///             for _ in 0..1000 {
+    ///                 latency.observe(0.02);
+    ///             }
+    ///         })
+    ///     })
+    ///     .collect();
+    /// for w in workers {
+    ///     w.join().unwrap();
+    /// }
+    /// assert_eq!(latency.shards(), 8);
+    /// assert_eq!(latency.count(), 4000);
+    /// assert_eq!(latency.snapshot().buckets[2].count, 4000); // le="0.025"
+    /// ```
+    #[must_use]
+    pub fn with_shards(mut self, shards: usize) -> Self {
+        let count = shards.clamp(1, MAX_HISTOGRAM_SHARDS).next_power_of_two();
+        let buckets = self.bucket_bounds.len();
+        self.stripes = (0..count).map(|_| Stripe::new(buckets)).collect();
+        self.mask = count - 1;
+        self
+    }
+
+    /// Number of stripes (1 unless [`Histogram::with_shards`] was used).
+    #[must_use]
+    pub fn shards(&self) -> usize {
+        self.stripes.len()
+    }
+
+    /// The stripe the calling thread records into.
+    #[inline]
+    fn stripe(&self) -> &Stripe {
+        let index = if self.mask == 0 {
+            0
+        } else {
+            thread_slot() & self.mask
+        };
+        // `index` is in bounds (`mask` is `len - 1`); `get` keeps the hot
+        // path free of a panic branch anyway.
+        match self.stripes.get(index) {
+            Some(stripe) => stripe,
+            None => &self.stripes[0],
+        }
+    }
+
+    /// Count of explicit bucket `i`, merged over the stripes.
+    #[inline]
+    fn bucket_count(&self, i: usize) -> u64 {
+        self.stripes.iter().fold(0u64, |acc, s| {
+            acc.saturating_add(s.counts.get(i).map_or(0, |c| c.load(Ordering::Relaxed)))
+        })
     }
 
     /// Histogram with [`DEFAULT_SECONDS_BUCKETS`].
@@ -392,11 +504,12 @@ impl Histogram {
     #[inline]
     fn observe_finite(&self, value: f64) -> usize {
         let idx = self.bucket_bounds.partition_point(|&b| b < value);
-        if let Some(slot) = self.bucket_counts.get(idx) {
+        let stripe = self.stripe();
+        if let Some(slot) = stripe.counts.get(idx) {
             let _ = slot.fetch_add(1, Ordering::Relaxed);
         }
-        let _ = self.total.fetch_add(1, Ordering::Relaxed);
-        let _ = self
+        let _ = stripe.total.fetch_add(1, Ordering::Relaxed);
+        let _ = stripe
             .sum_bits
             .cas_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
                 let next = f64::from_bits(bits) + value;
@@ -411,14 +524,19 @@ impl Histogram {
     #[inline]
     #[must_use]
     pub fn count(&self) -> u64 {
-        self.total.load(Ordering::Relaxed)
+        self.stripes.iter().fold(0u64, |acc, s| {
+            acc.saturating_add(s.total.load(Ordering::Relaxed))
+        })
     }
 
     /// Sum of observations.
     #[inline]
     #[must_use]
     pub fn sum(&self) -> f64 {
-        f64::from_bits(self.sum_bits.load(Ordering::Relaxed))
+        self.stripes
+            .iter()
+            .map(|s| f64::from_bits(s.sum_bits.load(Ordering::Relaxed)))
+            .sum()
     }
 
     /// Mean observation, or `0.0` when empty.
@@ -441,11 +559,13 @@ impl Histogram {
 
     /// Clear every bucket, the sum, the count and stored exemplars.
     pub fn reset(&self) {
-        for b in &*self.bucket_counts {
-            b.store(0, Ordering::Relaxed);
+        for stripe in &*self.stripes {
+            for b in &*stripe.counts {
+                b.store(0, Ordering::Relaxed);
+            }
+            stripe.sum_bits.store(0.0_f64.to_bits(), Ordering::Relaxed);
+            stripe.total.store(0, Ordering::Relaxed);
         }
-        self.sum_bits.store(0.0_f64.to_bits(), Ordering::Relaxed);
-        self.total.store(0, Ordering::Relaxed);
         if let Some(slots) = self.exemplars.get() {
             for slot in &**slots {
                 *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -478,18 +598,13 @@ impl Histogram {
         let mut cumulative: u64 = 0;
         // `extend` over zipped slices writes without per-element capacity
         // checks.
-        buckets.extend(
-            self.bucket_bounds
-                .iter()
-                .zip(self.bucket_counts.iter())
-                .map(|(bound, counter)| {
-                    cumulative = cumulative.saturating_add(counter.load(Ordering::Relaxed));
-                    HistogramBucket {
-                        upper_bound: *bound,
-                        count: cumulative,
-                    }
-                }),
-        );
+        buckets.extend(self.bucket_bounds.iter().enumerate().map(|(i, bound)| {
+            cumulative = cumulative.saturating_add(self.bucket_count(i));
+            HistogramBucket {
+                upper_bound: *bound,
+                count: cumulative,
+            }
+        }));
         let count = self.count().max(cumulative);
         buckets.push(HistogramBucket {
             upper_bound: f64::INFINITY,
@@ -525,8 +640,8 @@ impl Histogram {
         let target = ((q * count as f64).ceil() as u64).max(1);
         let mut cumulative: u64 = 0;
         let mut lower = self.bucket_bounds.first().map_or(0.0, |b| b.min(0.0));
-        for (bound, counter) in self.bucket_bounds.iter().zip(self.bucket_counts.iter()) {
-            let in_bucket = counter.load(Ordering::Relaxed);
+        for (i, bound) in self.bucket_bounds.iter().enumerate() {
+            let in_bucket = self.bucket_count(i);
             let next = cumulative.saturating_add(in_bucket);
             if next >= target && in_bucket > 0 {
                 let within = (target - cumulative) as f64 / in_bucket as f64;
@@ -572,6 +687,7 @@ impl std::fmt::Debug for Histogram {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Histogram")
             .field("buckets", &(self.bucket_bounds.len() + 1))
+            .field("shards", &self.shards())
             .field("count", &self.count())
             .field("sum", &self.sum())
             .finish_non_exhaustive()
@@ -686,6 +802,47 @@ mod tests {
         }
         let q = h.quantile(0.5);
         assert!((-10.0..=-5.0).contains(&q), "{q}");
+    }
+
+    #[test]
+    fn test_sharded_histogram_merges_stripes() {
+        let h = Arc::new(Histogram::with_buckets([1.0, 2.0]).with_shards(4));
+        assert_eq!(h.shards(), 4);
+        let workers: Vec<_> = (0..8)
+            .map(|t| {
+                let h = Arc::clone(&h);
+                std::thread::spawn(move || {
+                    for i in 0..1000 {
+                        h.observe(f64::from((t + i) % 3));
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        assert_eq!(h.count(), 8000);
+        let snap = h.snapshot();
+        assert_eq!(snap.count, 8000);
+        assert_eq!(snap.buckets.last().map(|b| b.count), Some(8000));
+        let expected: f64 = (0..8)
+            .flat_map(|t| (0..1000).map(move |i| f64::from((t + i) % 3)))
+            .sum();
+        assert!((h.sum() - expected).abs() < 1e-6);
+        assert!(h.quantile(0.5) > 0.0);
+        h.reset();
+        assert_eq!(h.count(), 0);
+    }
+
+    #[test]
+    fn test_with_shards_rounds_and_clamps() {
+        assert_eq!(Histogram::default_seconds().with_shards(0).shards(), 1);
+        assert_eq!(Histogram::default_seconds().with_shards(3).shards(), 4);
+        assert_eq!(
+            Histogram::default_seconds().with_shards(1000).shards(),
+            MAX_HISTOGRAM_SHARDS
+        );
+        assert_eq!(Histogram::default_seconds().shards(), 1);
     }
 
     #[test]

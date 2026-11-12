@@ -10,13 +10,55 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-11
+
+Fixes from an independent review. No breaking API change; MSRV unchanged
+(1.85); no new dependency.
+
 ### Added
+
+- `Registry::set_family_cardinality_cap` and `family_cardinality_cap`, with
+  `DEFAULT_FAMILY_CARDINALITY_CAP` (5 000): a cap on the series of one
+  family, checked before the series cap.
+- `Histogram::with_shards`, `Histogram::shards`, `MAX_HISTOGRAM_SHARDS` and
+  `Registry::configure_histogram_shards`: striped histograms for series
+  observed by many threads.
+- `MetricsServer::builder()` and `MetricsServerBuilder` with
+  `bearer_token`, `max_connections`, `max_connections_per_peer` and
+  `write_stall_timeout`; constants `MAX_CONNECTIONS_PER_PEER` (4) and
+  `WRITE_STALL_TIMEOUT` (2 s).
 
 ### Changed
 
-### Deprecated
+- One family can hold at most 5 000 series by default (half the default
+  series cap). A family that needs more needs
+  `set_family_cardinality_cap`; `usize::MAX` restores the 2.1 behaviour.
+- `MetricsServer` gives each client address at most 4 connections and
+  drops a client whose response write makes no progress for 2 s.
 
-### Removed
+### Fixed
+
+- The series cap was one pool for every family: attacker-chosen label
+  values in one family took every slot, and every series created later in
+  any family went to the shared overflow sink and was never exported. The
+  family cap now stops that family alone. A counter, gauge, timer or rate
+  meter refused because the series cap was full is now kept aside (up to
+  256) and joins its family, as the same handle, once a slot frees
+  (`remove`, `remove_series`, `evict_idle`, `clear` or a higher cap), so a
+  handle the caller kept starts being exported. Up to 2.1 it recorded into
+  the process-wide sink for good.
+- `MetricsServer`: 16 clients that sent a request and never read the
+  answer held every slot for the 10 s response deadline, so every real
+  scrape got 503. The per-address limit and the write-stall timeout close
+  that, and an optional bearer token keeps other clients out.
+- A `Histogram` observed by 8 threads cost about 540 ns per observation
+  (13.5 ns uncontended). With `with_shards` it costs 21 to 36 ns on the
+  same machine (see `docs/PERFORMANCE.md`).
+
+### Documentation
+
+- The README and API examples bind `MetricsServer` to `127.0.0.1` and say
+  the endpoint is unauthenticated unless a token is set.
 
 ### Fixed
 
@@ -1449,7 +1491,8 @@ Initial release with core metrics library functionality.
 
 <!-- FOOT LINKS
 ################################################# -->
-[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/jamesgober/metrics-lib/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/jamesgober/metrics-lib/compare/v2.1.1...v2.2.0
 [2.1.1]: https://github.com/jamesgober/metrics-lib/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/jamesgober/metrics-lib/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/jamesgober/metrics-lib/compare/v1.0.0...v2.0.0
