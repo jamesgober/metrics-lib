@@ -19,8 +19,8 @@
 //! counters on a busy server, per-message counters in a broker). For
 //! everything else, [`Counter`](crate::Counter) is simpler and cheaper.
 
-use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::util::thread_slot;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Upper bound on the stripe count.
@@ -59,29 +59,6 @@ pub struct ShardedCounter {
     stripes: Box<[Stripe]>,
     mask: usize,
     created_at: Instant,
-}
-
-/// Process-wide round-robin source of stripe slots for new threads.
-static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
-
-thread_local! {
-    /// This thread's stripe slot, assigned on first use. Masked per counter,
-    /// so it works for counters with any (power-of-two) stripe count.
-    static SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
-}
-
-#[inline]
-fn thread_slot() -> usize {
-    SLOT.with(|slot| {
-        let current = slot.get();
-        if current == usize::MAX {
-            let assigned = NEXT_SLOT.fetch_add(1, Ordering::Relaxed) & (usize::MAX >> 1);
-            slot.set(assigned);
-            assigned
-        } else {
-            current
-        }
-    })
 }
 
 impl ShardedCounter {

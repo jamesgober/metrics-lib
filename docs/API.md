@@ -296,6 +296,25 @@ assert_eq!(evicted, 0);
 ```
 
 Lookups of existing series take one shard read lock and do not allocate.
+
+Two caps bound the registry: the series cap (`set_cardinality_cap`,
+default 10 000) and, since 2.2, a cap per family (`set_family_cardinality_cap`,
+default 5 000), so label values from untrusted input in one family cannot
+take every slot. Past a cap, `try_*` lookups return `CardinalityExceeded`.
+The other lookups return a metric that is not exported; when only the series
+cap was full, a counter, gauge, timer or rate meter refused that way joins
+its family once a slot frees, and a handle held by the caller is then
+exported.
+
+`MetricsServer` (feature `http`) gives each client address at most 4
+connections, drops a client whose response write makes no progress for 2 s,
+and with `bearer_token` requires `Authorization: Bearer <token>` on
+`/metrics`.
+
+Histograms shared by many threads can be striped:
+`Histogram::default_seconds().with_shards(8)`, or
+`Registry::configure_histogram_shards(name, 8)` before the first series.
+
 Diagnostics: `cardinality_count`, `cardinality_overflows`,
 `invalid_inputs`, `kind_conflicts`, `exposition_conflicts`, `metric_count`.
 `*_entries()` and `*_names()` list series for custom exporters.
@@ -414,7 +433,14 @@ use metrics_lib::{LabelSet, MetricsCore};
 use std::sync::Arc;
 
 let core = Arc::new(MetricsCore::new());
-let server = MetricsServer::spawn("0.0.0.0:9898", Arc::clone(&core))?;
+// Loopback: the endpoint is unauthenticated by default.
+let server = MetricsServer::spawn("127.0.0.1:9898", Arc::clone(&core))?;
+// For other hosts, require a token (since 2.2):
+let token_server = MetricsServer::builder()
+    .bearer_token("change-me")
+    .max_connections_per_peer(4)
+    .spawn("127.0.0.1:0", Arc::clone(&core))?;
+token_server.shutdown();
 
 let gateway = Pushgateway::new("http://pushgateway:9091")?;
 gateway.push("batch_job", &LabelSet::from([("instance", "a")]), core.registry())?;

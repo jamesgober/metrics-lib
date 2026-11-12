@@ -214,7 +214,7 @@ pub use gauge::{Gauge, GaugeStats};
 #[cfg(feature = "histogram")]
 pub use histogram::{
     DEFAULT_SECONDS_BUCKETS, Exemplar, Histogram, HistogramBucket, HistogramSnapshot,
-    MAX_EXEMPLAR_LABEL_CHARS, MAX_HISTOGRAM_BUCKETS,
+    MAX_EXEMPLAR_LABEL_CHARS, MAX_HISTOGRAM_BUCKETS, MAX_HISTOGRAM_SHARDS,
 };
 pub use labels::{Label, LabelSet};
 pub use metadata::{MetricKind, MetricMetadata, Unit};
@@ -226,7 +226,9 @@ pub use name::{
 pub use rate_meter::specialized as rate_meter_specialized;
 #[cfg(feature = "meter")]
 pub use rate_meter::{MIN_RATE_WINDOW, RateMeter, RateStats};
-pub use registry::{DEFAULT_CARDINALITY_CAP, Registry, ScopedRegistry};
+pub use registry::{
+    DEFAULT_CARDINALITY_CAP, DEFAULT_FAMILY_CARDINALITY_CAP, Registry, ScopedRegistry,
+};
 #[cfg(feature = "count")]
 pub use sharded::{MAX_SHARDS, ShardedCounter};
 #[cfg(feature = "histogram")]
@@ -687,6 +689,8 @@ mod doc_tests {
     struct ReleaseNotes2_1;
     #[doc = include_str!("../docs/release/v2.1.1.md")]
     struct ReleaseNotes2_1_1;
+    #[doc = include_str!("../docs/release/v2.2.0.md")]
+    struct ReleaseNotes2_2_0;
 }
 
 #[cfg(test)]

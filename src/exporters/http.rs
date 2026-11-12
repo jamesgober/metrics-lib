@@ -9,6 +9,13 @@
 //! Neither helper speaks TLS. Put the endpoint behind your ingress or bind it
 //! to a private interface, and reach the Pushgateway over a trusted network.
 //!
+//! The server answers anyone who can reach it unless a bearer token is set
+//! ([`MetricsServerBuilder::bearer_token`]), and the `process_*` families
+//! tell any peer the process start time, memory and descriptor counts. Bind
+//! it to `127.0.0.1` (or a private address) unless something in front of it
+//! authenticates scrapers; never expose it to untrusted networks without a
+//! token.
+//!
 //! # Serving `/metrics`
 //!
 //! ```no_run
@@ -62,19 +69,36 @@ pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// request; only when every slot is writing a response is it answered
 /// `503`.
 pub const MAX_CONNECTIONS: usize = 16;
+/// Connections one client address may hold at the same time (since 2.2).
+/// A further connection from that address replaces its own oldest one that
+/// is still sending its request, or is answered `503`, so one address
+/// cannot take every slot.
+pub const MAX_CONNECTIONS_PER_PEER: usize = 4;
+/// Longest time one write of a response may make no progress before the
+/// client is dropped (since 2.2). A client that sends a request and never
+/// reads the answer then frees its slot after this long, not after the
+/// whole [`RESPONSE_TIMEOUT`].
+pub const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Limits of one server; the public constants are the defaults.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Limits {
     request_timeout: Duration,
     response_timeout: Duration,
     max_connections: usize,
+    max_per_peer: usize,
+    write_stall: Duration,
+    /// `Authorization: Bearer <token>` required on `/metrics`.
+    token: Option<Arc<str>>,
 }
 
 const DEFAULT_LIMITS: Limits = Limits {
     request_timeout: REQUEST_TIMEOUT,
     response_timeout: RESPONSE_TIMEOUT,
     max_connections: MAX_CONNECTIONS,
+    max_per_peer: MAX_CONNECTIONS_PER_PEER,
+    write_stall: WRITE_STALL_TIMEOUT,
+    token: None,
 };
 
 /// A blocking HTTP server for `GET /metrics` and `GET /health`.
@@ -93,9 +117,18 @@ const DEFAULT_LIMITS: Limits = Limits {
 /// slot is taken, a new connection evicts the oldest connection still
 /// waiting for its request, taken from the address holding the most such
 /// connections, so idle connections cannot lock scrapers out and a client
-/// flooding the server evicts its own connections first. Clients sharing one
-/// address with an attacker (behind the same NAT or proxy) are not told
-/// apart; keep the endpoint on a network you control.
+/// flooding the server evicts its own connections first. One address holds
+/// at most [`MAX_CONNECTIONS_PER_PEER`] connections, and a response write
+/// that makes no progress for [`WRITE_STALL_TIMEOUT`] drops the client, so
+/// clients that send a request and never read the answer cannot hold the
+/// slots either. Clients sharing one address with an attacker (behind the
+/// same NAT or proxy) are not told apart; keep the endpoint on a network you
+/// control.
+///
+/// The endpoint is unauthenticated unless built with
+/// [`MetricsServerBuilder::bearer_token`]. Bind it to `127.0.0.1` or a
+/// private interface, not `0.0.0.0`, unless a token or a proxy in front of
+/// it keeps untrusted clients out.
 pub struct MetricsServer {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -113,6 +146,31 @@ impl MetricsServer {
         Self::spawn_with(addr, core, DEFAULT_LIMITS)
     }
 
+    /// Configure a server (since 2.2): a bearer token, connection limits and
+    /// the write-stall timeout. [`MetricsServer::spawn`] is
+    /// `MetricsServer::builder().spawn(addr, core)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use metrics_lib::exporters::http::MetricsServer;
+    /// use metrics_lib::MetricsCore;
+    /// use std::sync::Arc;
+    ///
+    /// let core = Arc::new(MetricsCore::new());
+    /// let server = MetricsServer::builder()
+    ///     .bearer_token(std::env::var("METRICS_TOKEN")?)
+    ///     .spawn("127.0.0.1:9898", Arc::clone(&core))?;
+    /// // Scrape with `Authorization: Bearer <token>`.
+    /// server.shutdown();
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn builder() -> MetricsServerBuilder {
+        MetricsServerBuilder {
+            limits: DEFAULT_LIMITS,
+        }
+    }
+
     fn spawn_with(
         addr: impl ToSocketAddrs,
         core: Arc<MetricsCore>,
@@ -124,7 +182,7 @@ impl MetricsServer {
         let flag = Arc::clone(&stop);
         let thread = thread::Builder::new()
             .name("metrics-lib-http".into())
-            .spawn(move || accept_loop(&listener, &core, &flag, limits))?;
+            .spawn(move || accept_loop(&listener, &core, &flag, &limits))?;
         Ok(Self {
             local_addr,
             stop,
@@ -167,6 +225,71 @@ fn wake_addr(addr: SocketAddr) -> SocketAddr {
         ip => ip,
     };
     SocketAddr::new(ip, addr.port())
+}
+
+/// Options for a [`MetricsServer`]. Create with [`MetricsServer::builder`].
+#[derive(Clone)]
+#[must_use = "call `spawn` to start the server"]
+pub struct MetricsServerBuilder {
+    limits: Limits,
+}
+
+impl MetricsServerBuilder {
+    /// Require `Authorization: Bearer <token>` on `/metrics`; other
+    /// requests to it get `401`. `/health` stays open. The comparison takes
+    /// the same time wherever the first difference is. Plain HTTP carries
+    /// the token in clear text, so use it on a private network or behind a
+    /// TLS proxy.
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.limits.token = Some(Arc::from(token.into()));
+        self
+    }
+
+    /// Connections served at the same time. Default
+    /// [`MAX_CONNECTIONS`]; values below 1 are raised to 1.
+    pub fn max_connections(mut self, connections: usize) -> Self {
+        self.limits.max_connections = connections.max(1);
+        self
+    }
+
+    /// Connections one client address may hold at the same time. Default
+    /// [`MAX_CONNECTIONS_PER_PEER`]; values below 1 are raised to 1.
+    pub fn max_connections_per_peer(mut self, connections: usize) -> Self {
+        self.limits.max_per_peer = connections.max(1);
+        self
+    }
+
+    /// Longest time one response write may make no progress. Default
+    /// [`WRITE_STALL_TIMEOUT`]. The whole response is still bounded by
+    /// [`RESPONSE_TIMEOUT`].
+    pub fn write_stall_timeout(mut self, timeout: Duration) -> Self {
+        self.limits.write_stall = timeout.max(Duration::from_millis(1));
+        self
+    }
+
+    /// Bind `addr` and serve `core` on background threads.
+    ///
+    /// # Errors
+    ///
+    /// As [`MetricsServer::spawn`].
+    pub fn spawn(
+        self,
+        addr: impl ToSocketAddrs,
+        core: Arc<MetricsCore>,
+    ) -> io::Result<MetricsServer> {
+        MetricsServer::spawn_with(addr, core, self.limits)
+    }
+}
+
+impl std::fmt::Debug for MetricsServerBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricsServerBuilder")
+            .field("max_connections", &self.limits.max_connections)
+            .field("max_connections_per_peer", &self.limits.max_per_peer)
+            .field("write_stall_timeout", &self.limits.write_stall)
+            .field("bearer_token", &self.limits.token.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for MetricsServer {
@@ -234,18 +357,29 @@ impl Drop for ConnGuard {
     }
 }
 
-/// Register `stream` (from `peer`). When the table is full, evict a
-/// connection still reading its request: the oldest one of the address that
-/// holds the most such connections, so one client flooding the server pushes
-/// out its own connections before anybody else's. `None` when every slot is
-/// writing a response.
+/// Register `stream` (from `peer`). When `peer` already holds `per_peer`
+/// connections, evict its own oldest one still reading its request, or
+/// refuse. When the table is full, evict a connection still reading its
+/// request: the oldest one of the address that holds the most such
+/// connections, so one client flooding the server pushes out its own
+/// connections before anybody else's. `None` when the connection cannot be
+/// admitted.
 fn admit(
     conns: &Arc<Mutex<Conns>>,
     stream: &TcpStream,
     peer: IpAddr,
     max: usize,
+    per_peer: usize,
 ) -> Option<ConnGuard> {
     let mut table = conns.lock().unwrap_or_else(PoisonError::into_inner);
+    if table.list.iter().filter(|c| c.peer == peer).count() >= per_peer {
+        let own = table
+            .list
+            .iter()
+            .position(|c| c.reading && c.peer == peer)?;
+        let evicted = table.list.remove(own);
+        let _ = evicted.stream.shutdown(Shutdown::Both);
+    }
     if table.list.len() >= max {
         let reading_from = |ip: IpAddr| {
             table
@@ -284,7 +418,12 @@ fn admit(
     })
 }
 
-fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBool, limits: Limits) {
+fn accept_loop(
+    listener: &TcpListener,
+    core: &Arc<MetricsCore>,
+    stop: &AtomicBool,
+    limits: &Limits,
+) {
     let conns = Arc::new(Mutex::new(Conns::default()));
     let refusing = Arc::new(AtomicUsize::new(0));
     loop {
@@ -300,7 +439,13 @@ fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBoo
             continue;
         };
         let accepted_at = Instant::now();
-        let Some(guard) = admit(&conns, &stream, peer.ip(), limits.max_connections) else {
+        let Some(guard) = admit(
+            &conns,
+            &stream,
+            peer.ip(),
+            limits.max_connections,
+            limits.max_per_peer,
+        ) else {
             // Every slot is writing a response. Answer 503 off the accept
             // thread, with its own bound; past it the connection is closed.
             if refusing.fetch_add(1, Ordering::AcqRel) < limits.max_connections {
@@ -317,11 +462,12 @@ fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBoo
             continue;
         };
         let core = Arc::clone(core);
+        let limits = limits.clone();
         let spawned = thread::Builder::new()
             .name("metrics-lib-http-conn".into())
             .spawn(move || {
                 // A failed exchange only affects that client.
-                let _ = serve_connection(stream, &core, accepted_at, limits, &guard);
+                let _ = serve_connection(stream, &core, accepted_at, &limits, &guard);
             });
         if spawned.is_err() {
             // The closure (and with it the stream and the guard) was dropped.
@@ -333,7 +479,14 @@ fn accept_loop(listener: &TcpListener, core: &Arc<MetricsCore>, stop: &AtomicBoo
 /// Answer `status` with an empty body and close.
 fn refuse(mut stream: TcpStream, status: &str) {
     let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    if write_all_by(&mut stream, response.as_bytes(), Instant::now() + LINGER).is_ok() {
+    if write_all_by(
+        &mut stream,
+        response.as_bytes(),
+        Instant::now() + LINGER,
+        LINGER,
+    )
+    .is_ok()
+    {
         close_gracefully(&mut stream);
     }
 }
@@ -367,6 +520,8 @@ struct Request {
     method: String,
     path: String,
     accepts_openmetrics: bool,
+    /// The `Authorization` header value, if any.
+    authorization: Option<String>,
 }
 
 /// Why a request head could not be read.
@@ -440,25 +595,56 @@ fn parse_head(head: &[u8]) -> Request {
     let method = parts.next().unwrap_or_default().to_owned();
     let target = parts.next().unwrap_or_default();
     let path = target.split('?').next().unwrap_or_default().to_owned();
-    let accepts_openmetrics = lines.any(|line| {
-        line.split_once(':').is_some_and(|(name, value)| {
-            name.trim().eq_ignore_ascii_case("accept")
-                && value.contains("application/openmetrics-text")
-        })
-    });
+    let mut accepts_openmetrics = false;
+    let mut authorization = None;
+    for (name, value) in lines.filter_map(|line| line.split_once(':')) {
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("accept") && value.contains("application/openmetrics-text") {
+            accepts_openmetrics = true;
+        } else if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.trim().to_owned());
+        }
+    }
     Request {
         method,
         path,
         accepts_openmetrics,
+        authorization,
     }
 }
 
-/// Write all of `bytes` before `deadline`.
-fn write_all_by(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+/// Whether `authorization` carries `Bearer <token>`, compared in time that
+/// does not depend on where the first difference is.
+fn bearer_matches(authorization: Option<&str>, token: &str) -> bool {
+    let Some(value) = authorization else {
+        return false;
+    };
+    let Some((scheme, given)) = value.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return false;
+    }
+    let (given, token) = (given.trim().as_bytes(), token.as_bytes());
+    let mut diff = given.len() ^ token.len();
+    for (i, t) in token.iter().enumerate() {
+        diff |= usize::from(given.get(i).copied().unwrap_or(0) ^ t);
+    }
+    diff == 0
+}
+
+/// Write all of `bytes` before `deadline`, giving up when one write makes
+/// no progress for `stall`.
+fn write_all_by(
+    stream: &mut TcpStream,
+    mut bytes: &[u8],
+    deadline: Instant,
+    stall: Duration,
+) -> io::Result<()> {
     while !bytes.is_empty() {
         let left = remaining(deadline)
             .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "response deadline passed"))?;
-        stream.set_write_timeout(Some(left))?;
+        stream.set_write_timeout(Some(left.min(stall)))?;
         match stream.write(bytes) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "client closed")),
             Ok(n) => bytes = &bytes[n..],
@@ -473,7 +659,7 @@ fn serve_connection(
     mut stream: TcpStream,
     core: &MetricsCore,
     accepted_at: Instant,
-    limits: Limits,
+    limits: &Limits,
     guard: &ConnGuard,
 ) -> io::Result<()> {
     stream.set_nonblocking(false)?;
@@ -491,7 +677,16 @@ fn serve_connection(
     };
     guard.serving();
     let request = parse_head(&head);
+    let authorized = limits
+        .token
+        .as_deref()
+        .is_none_or(|token| bearer_matches(request.authorization.as_deref(), token));
     let (status, content_type, body) = match (request.method.as_str(), request.path.as_str()) {
+        ("GET" | "HEAD", "/metrics") if !authorized => (
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            "unauthorized\n".to_owned(),
+        ),
         ("GET" | "HEAD", "/metrics") => {
             if request.accepts_openmetrics {
                 (
@@ -528,6 +723,9 @@ fn serve_connection(
     if status.starts_with("405") {
         response.push_str("Allow: GET, HEAD\r\n");
     }
+    if status.starts_with("401") {
+        response.push_str("WWW-Authenticate: Bearer\r\n");
+    }
     response.push_str("\r\n");
     if request.method != "HEAD" {
         response.push_str(&body);
@@ -536,6 +734,7 @@ fn serve_connection(
         &mut stream,
         response.as_bytes(),
         Instant::now() + limits.response_timeout,
+        limits.write_stall,
     )?;
     close_gracefully(&mut stream);
     Ok(())
@@ -687,8 +886,8 @@ impl Pushgateway {
             prometheus::CONTENT_TYPE,
             body.len()
         );
-        write_all_by(&mut stream, request.as_bytes(), deadline)?;
-        write_all_by(&mut stream, body.as_bytes(), deadline)?;
+        write_all_by(&mut stream, request.as_bytes(), deadline, self.timeout)?;
+        write_all_by(&mut stream, body.as_bytes(), deadline, self.timeout)?;
         let response = read_response_by(&mut stream, deadline, 64 * 1024)?;
         let text = String::from_utf8_lossy(&response);
         let status_line = text.lines().next().unwrap_or_default();
@@ -813,6 +1012,7 @@ mod tests {
             request_timeout: Duration::from_millis(300),
             response_timeout: Duration::from_millis(300),
             max_connections: 4,
+            ..DEFAULT_LIMITS
         }
     }
 
@@ -896,7 +1096,7 @@ mod tests {
             request_timeout: Duration::from_secs(5),
             ..fast_limits()
         };
-        let server = MetricsServer::spawn_with("127.0.0.1:0", core, limits).unwrap();
+        let server = MetricsServer::spawn_with("127.0.0.1:0", core, limits.clone()).unwrap();
         let addr = server.local_addr();
         // The re-audit's scenario: every slot is held by an idle connection
         // (before this fix, every scrape got 503 until they timed out).
@@ -933,16 +1133,19 @@ mod tests {
         let conns = Arc::new(Mutex::new(Conns::default()));
         // The scraper's connection is the oldest; the flooder holds the rest.
         let (mut scraper_client, s) = pair();
-        let _gs = admit(&conns, &s, scraper, 3).unwrap();
+        let _gs = admit(&conns, &s, scraper, 3, usize::MAX).unwrap();
         let (_a, a) = pair();
         let (_b, b) = pair();
-        let _ga = admit(&conns, &a, flooder, 3).unwrap();
-        let _gb = admit(&conns, &b, flooder, 3).unwrap();
+        let _ga = admit(&conns, &a, flooder, 3, usize::MAX).unwrap();
+        let _gb = admit(&conns, &b, flooder, 3, usize::MAX).unwrap();
         // Ten more flooder connections never evict the scraper's.
         let mut keep = Vec::new();
         for _ in 0..10 {
             let (c, server_side) = pair();
-            keep.push((c, admit(&conns, &server_side, flooder, 3).unwrap()));
+            keep.push((
+                c,
+                admit(&conns, &server_side, flooder, 3, usize::MAX).unwrap(),
+            ));
         }
         scraper_client
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -969,11 +1172,11 @@ mod tests {
         let (mut first_client, first) = pair();
         let (_c2, second) = pair();
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let g1 = admit(&conns, &first, ip, 2).unwrap();
-        let g2 = admit(&conns, &second, ip, 2).unwrap();
+        let g1 = admit(&conns, &first, ip, 2, usize::MAX).unwrap();
+        let g2 = admit(&conns, &second, ip, 2, usize::MAX).unwrap();
         // Full: the next connection evicts the oldest one still reading.
         let (_c3, third) = pair();
-        let g3 = admit(&conns, &third, ip, 2).unwrap();
+        let g3 = admit(&conns, &third, ip, 2, usize::MAX).unwrap();
         let mut buf = [0u8; 1];
         first_client
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -984,10 +1187,117 @@ mod tests {
         g2.serving();
         g3.serving();
         let (_c4, fourth) = pair();
-        assert!(admit(&conns, &fourth, ip, 2).is_none());
+        assert!(admit(&conns, &fourth, ip, 2, usize::MAX).is_none());
         // Guards remove their entries; the evicted one is already gone.
         drop((g1, g2, g3));
         assert_eq!(conns.lock().unwrap().list.len(), 0);
+    }
+
+    // Review F-2 (2.1.1): one address could hold every slot.
+    #[test]
+    fn test_one_peer_holds_at_most_its_share_of_slots() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pair = || {
+            let client = TcpStream::connect(addr).unwrap();
+            let (server_side, _) = listener.accept().unwrap();
+            (client, server_side)
+        };
+        let flooder = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let scraper = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let conns = Arc::new(Mutex::new(Conns::default()));
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            let (c, s) = pair();
+            let guard = admit(&conns, &s, flooder, 16, 2).unwrap();
+            guard.serving(); // sent a request, never reads
+            held.push((c, guard));
+        }
+        // A third connection from the same address cannot get a slot.
+        let (_c, s) = pair();
+        assert!(admit(&conns, &s, flooder, 16, 2).is_none());
+        // Another address still can.
+        let (_c, s) = pair();
+        assert!(admit(&conns, &s, scraper, 16, 2).is_some());
+    }
+
+    // Review F-2 (2.1.1): a client that sent a request and never read the
+    // answer held its slot for the whole 10 s response deadline, so a few
+    // of them answered every real scrape with 503.
+    #[cfg(feature = "count")]
+    #[test]
+    fn test_a_client_that_never_reads_frees_its_slot_after_the_stall_timeout() {
+        let core = Arc::new(MetricsCore::new());
+        // A large exposition (about 13 MB), so the response does not fit
+        // the socket buffers and the write stalls.
+        core.registry().set_cardinality_cap(20_000);
+        for family in 0..3 {
+            for i in 0..5000 {
+                let labels = LabelSet::from([("series", format!("{i:0>900}"))]);
+                core.registry()
+                    .counter_with(&format!("padding_{family}"), &labels)
+                    .inc();
+            }
+        }
+        let limits = Limits {
+            max_connections: 1,
+            max_per_peer: 8,
+            write_stall: Duration::from_millis(200),
+            response_timeout: Duration::from_secs(30),
+            ..DEFAULT_LIMITS
+        };
+        let server = MetricsServer::spawn_with("127.0.0.1:0", core, limits).unwrap();
+        let addr = server.local_addr();
+        let mut stalled = TcpStream::connect(addr).unwrap();
+        stalled.write_all(b"GET /metrics HTTP/1.1\r\n\r\n").unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
+        let mut answered = false;
+        while start.elapsed() < Duration::from_secs(10) {
+            let mut probe = TcpStream::connect(addr).unwrap();
+            let _ = probe.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = probe.write_all(b"GET /health HTTP/1.1\r\n\r\n");
+            let mut response = String::new();
+            let _ = probe.read_to_string(&mut response);
+            if response.ends_with("ok\n") {
+                answered = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(answered, "the non-reading client kept the only slot");
+        drop(stalled);
+        server.shutdown();
+    }
+
+    #[test]
+    fn test_bearer_token_guards_metrics_only() {
+        let core = Arc::new(MetricsCore::new());
+        let server = MetricsServer::builder()
+            .bearer_token("s3cret")
+            .spawn("127.0.0.1:0", core)
+            .unwrap();
+        let addr = server.local_addr();
+        let denied = get(addr, "GET /metrics HTTP/1.1\r\n\r\n");
+        assert!(denied.starts_with("HTTP/1.1 401"), "{denied}");
+        assert!(denied.contains("WWW-Authenticate: Bearer"), "{denied}");
+        let wrong = get(
+            addr,
+            "GET /metrics HTTP/1.1\r\nAuthorization: Bearer nope\r\n\r\n",
+        );
+        assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+        let ok = get(
+            addr,
+            "GET /metrics HTTP/1.1\r\nAuthorization: Bearer s3cret\r\n\r\n",
+        );
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        let health = get(addr, "GET /health HTTP/1.1\r\n\r\n");
+        assert!(health.ends_with("ok\n"), "{health}");
+        server.shutdown();
+        assert!(bearer_matches(Some("bearer abc"), "abc"));
+        assert!(!bearer_matches(Some("Bearer abcd"), "abc"));
+        assert!(!bearer_matches(Some("Basic abc"), "abc"));
+        assert!(!bearer_matches(None, "abc"));
     }
 
     #[test]

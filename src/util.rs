@@ -1,5 +1,6 @@
 //! Small time, rate and atomic helpers shared by every metric type.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -76,6 +77,31 @@ pub(crate) fn duration_from_nanos_u128(nanos: u128) -> Duration {
 pub(crate) fn per_second(value: u64, age: Duration) -> f64 {
     let secs = age.as_secs_f64();
     if secs > 0.0 { value as f64 / secs } else { 0.0 }
+}
+
+/// Process-wide round-robin source of stripe slots for new threads.
+#[cfg_attr(not(any(feature = "count", feature = "histogram")), allow(dead_code))]
+static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// This thread's stripe slot, assigned on first use. Masked per counter,
+    /// so it works for counters with any (power-of-two) stripe count.
+    static SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+#[inline]
+#[cfg_attr(not(any(feature = "count", feature = "histogram")), allow(dead_code))]
+pub(crate) fn thread_slot() -> usize {
+    SLOT.with(|slot| {
+        let current = slot.get();
+        if current == usize::MAX {
+            let assigned = NEXT_SLOT.fetch_add(1, Ordering::Relaxed) & (usize::MAX >> 1);
+            slot.set(assigned);
+            assigned
+        } else {
+            current
+        }
+    })
 }
 
 #[cfg(test)]
