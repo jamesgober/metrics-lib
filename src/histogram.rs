@@ -115,6 +115,7 @@ impl Stripe {
 }
 
 /// Lock-free bucketed histogram.
+#[repr(align(64))]
 pub struct Histogram {
     /// Explicit upper bounds, ascending. The `+Inf` bucket is implicit.
     bucket_bounds: Box<[f64]>,
