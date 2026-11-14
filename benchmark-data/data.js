@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794549860791,
+  "lastUpdate": 1794632955982,
   "repoUrl": "https://github.com/jamesgober/metrics-lib",
   "entries": {
     "Criterion": [
@@ -48845,6 +48845,293 @@ window.BENCHMARK_DATA = {
           {
             "name": "timer/start_stop",
             "value": 60.816234924823966,
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "James Gober",
+            "username": "jamesgober",
+            "email": "12473969+jamesgober@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "bfa110630b69ead2bda6dd31232d19ca946d7e09",
+          "message": "2.2.0: review fixes for the family cap, MetricsServer slots and contended histograms (#7)\n\nFixes from an independent review. See CHANGELOG.md and docs/release/v2.2.0.md.",
+          "timestamp": "2026-11-12T07:15:18Z",
+          "url": "https://github.com/jamesgober/metrics-lib/commit/bfa110630b69ead2bda6dd31232d19ca946d7e09"
+        },
+        "date": 1794632955247,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "admission/token_bucket_acquire",
+            "value": 40.43790920211793,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "admission/token_bucket_reject",
+            "value": 33.60537519175964,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/1",
+            "value": 263879.94228955626,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/16",
+            "value": 22688540.921259858,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/4",
+            "value": 5750290.277352802,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/counter/8",
+            "value": 11349975.214956699,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/1",
+            "value": 257765.70231887448,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/16",
+            "value": 1863871.1994968974,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/4",
+            "value": 344636.8346625911,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "contended_increments/sharded_counter/8",
+            "value": 913393.1694466679,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/add",
+            "value": 2.223312979953359,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/get",
+            "value": 0.6227062207526282,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/inc",
+            "value": 2.1941957963768615,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/sharded_get",
+            "value": 1.2482665582650982,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/sharded_inc",
+            "value": 2.2346716415617536,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/try_add",
+            "value": 3.1909762846805605,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "counter/up_down_add",
+            "value": 2.0439159349920724,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_observe",
+            "value": 14.03141464021998,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_observe_with_exemplar",
+            "value": 80.28235112210297,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_snapshot",
+            "value": 74.69656266811538,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/histogram_snapshot_with_exemplars",
+            "value": 159.6626601816474,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/summary_observe",
+            "value": 25.181045601690986,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/summary_quantile",
+            "value": 1236.6861932727597,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "distribution/summary_snapshot",
+            "value": 1340.0968177565394,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "exposition/openmetrics_400_series",
+            "value": 264218.39151833137,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "exposition/prometheus_400_series",
+            "value": 259687.142036005,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "exposition/render_core_400_series_with_process",
+            "value": 315602.09918693197,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/add",
+            "value": 5.31082181806859,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/get",
+            "value": 0.6344584928690399,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/set",
+            "value": 0.6247024858384221,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "gauge/set_max",
+            "value": 1.0158643568804764,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "global/counter_lookup_inc",
+            "value": 37.778148619364785,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "global/labels_from_array_2",
+            "value": 28.90427264785193,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rate_meter/rate",
+            "value": 34.62429322572386,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rate_meter/tick",
+            "value": 40.0615760061563,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rate_meter/tick_n",
+            "value": 39.88304586724709,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_concurrent/labeled_lookup_inc/1",
+            "value": 836958.00079436,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_concurrent/labeled_lookup_inc/4",
+            "value": 3420945.4592385935,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_concurrent/labeled_lookup_inc/8",
+            "value": 5095015.366990048,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/counter_held_handle",
+            "value": 2.2048762578276793,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/counter_labeled_hit",
+            "value": 108.74155442802807,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/counter_unlabeled_hit",
+            "value": 36.20316602796725,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/gauge_unlabeled_hit",
+            "value": 34.29057098126198,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/histogram_labeled_hit",
+            "value": 113.5658802053448,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_lookup/timer_unlabeled_hit",
+            "value": 40.37657436289542,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_registration/evict_idle_10k_series",
+            "value": 24716.203889166038,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "registry_registration/new_labeled_series",
+            "value": 342.5524385993416,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "system/host_and_process_update",
+            "value": 80549.98808632359,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "system/process_sample",
+            "value": 37412.72760493731,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/record",
+            "value": 4.916230113859888,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/record_ns",
+            "value": 4.910110226279941,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/start_owned_drop",
+            "value": 67.32635790937292,
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer/start_stop",
+            "value": 64.70871630551365,
             "unit": "ns/iter"
           }
         ]
